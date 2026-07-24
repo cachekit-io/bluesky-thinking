@@ -1,0 +1,13 @@
+# Skyline edge API + dashboard. Deploy/routing is Stage 4; this config is
+# complete for `wrangler dev` and a plain `wrangler deploy` on the free plan.
+# The CACHEKIT_API_KEY secret is provisioned in Stage 3
+# (docs/architecture.md provisioning runbook):
+#   wrangler secret put CACHEKIT_API_KEY
+name = "skyline-edge"
+main = "src/worker.ts"
+compatibility_date = "2026-07-01"
+
+# Static dashboard. Asset requests are served before the worker script runs;
+# unmatched paths (/api/*) fall through to the fetch handler.
+[assets]
+directory = "./public"

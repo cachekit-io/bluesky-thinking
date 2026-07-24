@@ -80,6 +80,7 @@ one-time trial credit only; an always-on 256 MB machine bills ≈ $2/mo).
 
 ```
 docs/architecture.md   — the Stage-1 architecture spec (locked contract)
+edge/                  — Stage-2 TS edge API + dashboard: CF Worker serving the five aggregates (interop/v1 reads, X-Cache + hit-rate stats) + Workers Assets dashboard
 spike/decorators/      — AC-3 proof: the three decorators running on cachekit 0.15.0
 spike/edge-worker/     — AC-2 proof: deployable cachekit-rs Worker (the live spike)
 spike/roundtrip/       — AC-1 harness: CachekitIO round-trip, runs as soon as credentials exist
