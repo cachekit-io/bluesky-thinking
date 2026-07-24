@@ -22,6 +22,10 @@ logger = logging.getLogger("skyline_ingester")
 
 def build_publisher(settings: Settings, store: WindowStore) -> Publisher:
     if settings.cachekit_api_key is not None:
+        # Fail closed (epic decision, ray 2026-07-24): the AC-6 secure cache is part
+        # of the demo, so a live deploy without its master key must not come up.
+        if settings.cachekit_master_key is None:
+            raise RuntimeError("CACHEKIT_MASTER_KEY is required in live mode: the secure sentiment cache must fail closed")
         from cachekit.backends.cachekitio import CachekitIOBackend
 
         backend = CachekitIOBackend(api_key=settings.cachekit_api_key.get_secret_value())
@@ -32,7 +36,7 @@ def build_publisher(settings: Settings, store: WindowStore) -> Publisher:
     master_key = settings.cachekit_master_key.get_secret_value() if settings.cachekit_master_key else None
     publisher = Publisher(store, backend, master_key=master_key, top_n=settings.top_n)
     if not publisher.secure_enabled:
-        logger.warning("CACHEKIT_MASTER_KEY not set — secure sentiment cache disabled")
+        logger.warning("CACHEKIT_MASTER_KEY not set — secure sentiment cache disabled (dry-run only)")
     return publisher
 
 

@@ -1,0 +1,36 @@
+name: ingester-qa
+
+on:
+  pull_request:
+    paths:
+      - "ingester/**"
+      - ".github/workflows/ingester-qa.yml"
+  push:
+    branches: [main]
+    paths:
+      - "ingester/**"
+      - ".github/workflows/ingester-qa.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  qa:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ingester
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v9
+        with:
+          enable-cache: true
+          cache-dependency-glob: ingester/uv.lock
+      - name: Sync (locked)
+        run: uv sync --locked
+      - name: Lint
+        run: uv run ruff check src tests
+      - name: Format check
+        run: uv run ruff format --check src tests
+      - name: Tests (no network, no creds)
+        run: uv run pytest -q

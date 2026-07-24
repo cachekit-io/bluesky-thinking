@@ -30,3 +30,18 @@ def test_no_master_key_disables_secure_cache(store, backend):
     assert not publisher.secure_enabled
     assert publisher.publish_window("1h") == 5  # the five interop ops still publish
     assert not [k for k in backend.stored_keys() if k.startswith("ns:")]
+
+
+def test_live_mode_without_master_key_fails_closed():
+    """Epic decision (ray, 2026-07-24): a live deploy missing the secure-cache
+    master key must refuse to start, not come up with AC-6 silently absent."""
+    import pytest
+    from pydantic import SecretStr
+
+    from skyline_ingester.__main__ import build_publisher
+    from skyline_ingester.config import Settings
+    from skyline_ingester.windows import WindowStore
+
+    settings = Settings(cachekit_api_key=SecretStr("ck_test_not_a_real_key"), cachekit_master_key=None)
+    with pytest.raises(RuntimeError, match="fail closed"):
+        build_publisher(settings, WindowStore())  # raises before any backend is constructed

@@ -23,7 +23,7 @@ Configuration (env or `.env`, via pydantic-settings; secrets are `SecretStr`):
 | Variable | Default | Meaning |
 | :--- | :--- | :--- |
 | `CACHEKIT_API_KEY` | unset | CachekitIO key. Unset → dry-run mode. |
-| `CACHEKIT_MASTER_KEY` | unset | 64-hex master key for the `@cache.secure` sentiment cache. Unset → secure cache disabled. |
+| `CACHEKIT_MASTER_KEY` | unset | 64-hex master key for the `@cache.secure` sentiment cache. **Required in live mode** (fail closed — a live deploy without it refuses to start); unset in dry-run → secure cache disabled with a warning. |
 | `JETSTREAM_URL` | `wss://jetstream2.us-east.bsky.network/subscribe` | Jetstream endpoint. |
 | `PUBLISH_TICK_SECONDS` | `15` | Publish-loop poll interval. |
 | `CHECKPOINT_INTERVAL_SECONDS` | `120` | Window-state checkpoint cadence. |
