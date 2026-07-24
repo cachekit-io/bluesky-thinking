@@ -1,0 +1,6 @@
+name = "lab-735-skyline-spike"
+main = "build/worker/shim.mjs"
+compatibility_date = "2026-07-01"
+
+[build]
+command = "worker-build --release"
