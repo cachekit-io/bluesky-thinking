@@ -1,0 +1,6 @@
+# Deployable Worker: the lockfile IS the reproducibility record — re-include
+# it under the repo-root `Cargo.lock` ignore (which fits the spike crates).
+!Cargo.lock
+
+# wrangler's local state (account cache, logs) — never committed
+.wrangler/

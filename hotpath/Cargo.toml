@@ -1,0 +1,34 @@
+[package]
+name = "skyline-hotpath"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Stage-2 hot-path Worker (LAB-746). Build-chain pins are locked in
+# docs/architecture.md — worker-build@^0.1, wasm-bindgen-cli 0.2.126,
+# and the git-tag cachekit-rs dep (crates.io max is 0.3.0, pre-interop;
+# switch when the LAB-742 publish lands).
+
+[lib]
+# rlib so `cargo test` can link the compute module natively; cdylib for wasm32.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Interop key derivation + strict interop/v1 (de)serialization. No features:
+# the interop module is unconditional, and native builds don't need backends.
+cachekit-rs = { git = "https://github.com/cachekit-io/cachekit-rs", tag = "cachekit-rs-v0.4.0", default-features = false }
+# xxHash3-64 integrity primitive — same function that backs StorageEnvelope
+# checksums, so wire values are identical.
+cachekit-core = { version = "0.3", default-features = false, features = ["checksum"] }
+serde = { version = "1", features = ["derive"] }
+hex = "0.4"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+worker = "0.4"
+serde_json = "1"
+base64 = "0.22"
+# Pin the bindgen ABI to the pre-installed CLI (docs/architecture.md build pins).
+wasm-bindgen = "=0.2.126"
+# Workers feature set exactly as spike-proven; WorkersCachekitIO is the only
+# CachekitIO backend that implements Backend on wasm32.
+cachekit-rs = { git = "https://github.com/cachekit-io/cachekit-rs", tag = "cachekit-rs-v0.4.0", default-features = false, features = ["workers", "cachekitio", "encryption", "macros"] }

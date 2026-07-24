@@ -80,6 +80,9 @@ one-time trial credit only; an always-on 256 MB machine bills ≈ $2/mo).
 
 ```
 docs/architecture.md   — the Stage-1 architecture spec (locked contract)
+hotpath/               — Stage-2 Rust-WASM hot-path Worker (cachekit-rs 0.4 on CF Workers):
+                         interop key derivation, xxHash3 payload verification, window-slice
+                         merging — live at skyline-hotpath.raywalker.workers.dev
 spike/decorators/      — AC-3 proof: the three decorators running on cachekit 0.15.0
 spike/edge-worker/     — AC-2 proof: deployable cachekit-rs Worker (the live spike)
 spike/roundtrip/       — AC-1 harness: CachekitIO round-trip, runs as soon as credentials exist
