@@ -11,6 +11,7 @@ in a profile.
 
 from __future__ import annotations
 
+import threading
 from collections import Counter
 from dataclasses import dataclass, field
 
@@ -29,6 +30,8 @@ _K_TAGS, _K_LINKS, _K_EMOJI, _K_LANGS = 20, 20, 10, 15
 
 @dataclass(slots=True)
 class Bucket:
+    """One minute of counters — also the shape a window merge accumulates into."""
+
     n: int = 0
     tags: Counter = field(default_factory=Counter)
     links: Counter = field(default_factory=Counter)
@@ -37,71 +40,71 @@ class Bucket:
     sent: dict[str, list[float]] = field(default_factory=dict)  # lang -> [sum, count]
 
 
-@dataclass(slots=True)
-class Merged:
-    n: int = 0
-    tags: Counter = field(default_factory=Counter)
-    links: Counter = field(default_factory=Counter)
-    langs: Counter = field(default_factory=Counter)
-    emoji: Counter = field(default_factory=Counter)
-    sent: dict[str, list[float]] = field(default_factory=dict)
-
-
 class WindowStore:
     """In-memory minute buckets covering at most the 24h window."""
 
     def __init__(self, max_minutes: int = WINDOW_MINUTES["24h"]):
         self._max = max_minutes
         self._buckets: dict[int, Bucket] = {}
-        self._memo: dict[tuple[str, int], Merged] = {}
+        self._memo: dict[tuple[str, int], Bucket] = {}
+        # The Jetstream consumer calls add() on the event-loop thread while the
+        # publish/checkpoint loops read the store from asyncio.to_thread workers;
+        # every access to _buckets/_memo is serialised through this lock.
+        self._lock = threading.Lock()
 
     def add(self, feats: PostFeatures) -> None:
         minute = int(feats.ts // 60)
-        bucket = self._buckets.get(minute)
-        if bucket is None:
-            bucket = self._buckets[minute] = Bucket()
-            self._prune(minute)
-        bucket.n += 1
-        bucket.tags.update(feats.hashtags)
-        bucket.links.update(feats.links)
-        bucket.langs[feats.lang] += 1
-        bucket.emoji.update(feats.emoji)
-        if feats.sentiment is not None:
-            acc = bucket.sent.setdefault(feats.lang, [0.0, 0])
-            acc[0] += feats.sentiment
-            acc[1] += 1
-        self._memo.clear()
+        with self._lock:
+            bucket = self._buckets.get(minute)
+            if bucket is None:
+                bucket = self._buckets[minute] = Bucket()
+                self._prune(minute)
+            bucket.n += 1
+            bucket.tags.update(feats.hashtags)
+            bucket.links.update(feats.links)
+            bucket.langs[feats.lang] += 1
+            bucket.emoji.update(feats.emoji)
+            if feats.sentiment is not None:
+                acc = bucket.sent.setdefault(feats.lang, [0.0, 0])
+                acc[0] += feats.sentiment
+                acc[1] += 1
+            self._memo.clear()
 
     def _prune(self, newest_minute: int) -> None:
-        floor = max((m for m in self._buckets), default=newest_minute)
-        floor = max(floor, newest_minute) - self._max
+        # Caller holds self._lock. Anchor the retention floor to the minute being
+        # added, NOT max(self._buckets): one bogus far-future timestamp must not
+        # become a permanent anchor that evicts every real bucket forever. With
+        # this anchor a stray future bucket is excluded from every merged() query
+        # (which bounds by `now`) and real minutes re-accumulate on the next event.
+        floor = newest_minute - self._max
         for minute in [m for m in self._buckets if m <= floor]:
             del self._buckets[minute]
 
-    def merged(self, window: str, now: float) -> Merged:
-        """Merge the buckets inside (now - window, now]."""
+    def merged(self, window: str, now: float) -> Bucket:
+        """Merge the buckets inside (now - window, now] into one Bucket."""
         key = (window, int(now))
-        memo = self._memo.get(key)
-        if memo is not None:
-            return memo
         now_min = int(now // 60)
         lo = now_min - WINDOW_MINUTES[window]
-        out = Merged()
-        for minute, b in self._buckets.items():
-            if lo < minute <= now_min:
-                out.n += b.n
-                out.tags.update(b.tags)
-                out.links.update(b.links)
-                out.langs.update(b.langs)
-                out.emoji.update(b.emoji)
-                for lang, (s, c) in b.sent.items():
-                    acc = out.sent.setdefault(lang, [0.0, 0])
-                    acc[0] += s
-                    acc[1] += c
-        if len(self._memo) > 8:
-            self._memo.clear()
-        self._memo[key] = out
-        return out
+        with self._lock:
+            memo = self._memo.get(key)
+            if memo is not None:
+                return memo
+            out = Bucket()
+            for minute, b in self._buckets.items():
+                if lo < minute <= now_min:
+                    out.n += b.n
+                    out.tags.update(b.tags)
+                    out.links.update(b.links)
+                    out.langs.update(b.langs)
+                    out.emoji.update(b.emoji)
+                    for lang, (s, c) in b.sent.items():
+                        acc = out.sent.setdefault(lang, [0.0, 0])
+                        acc[0] += s
+                        acc[1] += c
+            if len(self._memo) > 8:
+                self._memo.clear()
+            self._memo[key] = out
+            return out
 
     def build_value(self, operation: str, window: str, now: float, top_n: int = 50) -> dict:
         """The interop/v1 value for one (operation, window): a top-level map with string keys."""
@@ -142,44 +145,66 @@ class WindowStore:
         Per-bucket counters are cut to their top-K entries, so long-tail counts
         are approximate after a restore; posts_per_minute and lang_mix totals
         stay exact (bucket n / langs are kept in full up to _K_LANGS languages).
+
+        Per-language sentiment (`sent`) is deliberately NOT persisted: it is the
+        cleartext source of the @cache.secure sentiment cache, and this checkpoint
+        is stored unencrypted. Writing it here would let the backend reconstruct
+        the zero-knowledge value (avg = sum / count). The secure 1h window
+        repopulates within an hour of a restart; the restart-critical aggregate
+        counts below are unaffected.
         """
-        return {
-            "v": SNAPSHOT_VERSION,
-            "saved_at": int(now),
-            "buckets": [
-                [
-                    minute,
-                    {
-                        "n": b.n,
-                        "tags": dict(b.tags.most_common(_K_TAGS)),
-                        "links": dict(b.links.most_common(_K_LINKS)),
-                        "langs": dict(b.langs.most_common(_K_LANGS)),
-                        "emoji": dict(b.emoji.most_common(_K_EMOJI)),
-                        "sent": {lang: [s, c] for lang, (s, c) in b.sent.items()},
-                    },
-                ]
-                for minute, b in sorted(self._buckets.items())
-            ],
-        }
+        with self._lock:
+            return {
+                "v": SNAPSHOT_VERSION,
+                "saved_at": int(now),
+                "buckets": [
+                    [
+                        minute,
+                        {
+                            "n": b.n,
+                            "tags": dict(b.tags.most_common(_K_TAGS)),
+                            "links": dict(b.links.most_common(_K_LINKS)),
+                            "langs": dict(b.langs.most_common(_K_LANGS)),
+                            "emoji": dict(b.emoji.most_common(_K_EMOJI)),
+                        },
+                    ]
+                    for minute, b in sorted(self._buckets.items())
+                ],
+            }
 
     def restore(self, snap: dict, now: float) -> int:
-        """Load a snapshot(); returns the number of buckets restored (0 = nothing usable)."""
+        """Load a snapshot(); returns the number of buckets restored (0 = nothing usable).
+
+        The checkpoint is untrusted input (plaintext, integrity-unprotected in the
+        backend), so every entry is validated and a malformed one is skipped rather
+        than raising — a corrupt or partial checkpoint must never crash startup into
+        a permanent boot loop. Legacy checkpoints may still carry `sent`; it is read
+        into memory here but no longer written back out (see snapshot()).
+        """
         if not isinstance(snap, dict) or snap.get("v") != SNAPSHOT_VERSION:
+            return 0
+        buckets = snap.get("buckets")
+        if not isinstance(buckets, list):
             return 0
         floor = int(now // 60) - self._max
         restored = 0
-        for minute, d in snap.get("buckets") or []:
-            if not isinstance(minute, int) or minute <= floor:
-                continue
-            b = Bucket(
-                n=int(d.get("n", 0)),
-                tags=Counter(d.get("tags") or {}),
-                links=Counter(d.get("links") or {}),
-                langs=Counter(d.get("langs") or {}),
-                emoji=Counter(d.get("emoji") or {}),
-                sent={lang: [float(s), int(c)] for lang, (s, c) in (d.get("sent") or {}).items()},
-            )
-            self._buckets[minute] = b
-            restored += 1
-        self._memo.clear()
+        with self._lock:
+            for item in buckets:
+                try:
+                    minute, d = item
+                    if not isinstance(minute, int) or minute <= floor or not isinstance(d, dict):
+                        continue
+                    b = Bucket(
+                        n=int(d.get("n", 0)),
+                        tags=Counter(d.get("tags") or {}),
+                        links=Counter(d.get("links") or {}),
+                        langs=Counter(d.get("langs") or {}),
+                        emoji=Counter(d.get("emoji") or {}),
+                        sent={lang: [float(s), int(c)] for lang, (s, c) in (d.get("sent") or {}).items()},
+                    )
+                except (ValueError, TypeError, AttributeError):
+                    continue
+                self._buckets[minute] = b
+                restored += 1
+            self._memo.clear()
         return restored

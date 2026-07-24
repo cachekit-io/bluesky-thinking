@@ -90,28 +90,51 @@ class Publisher:
     def secure_enabled(self) -> bool:
         return self._secure_fn is not None
 
+    def _refresh(self, fn: Callable, window: str, recompute: Callable[[], object], label: str) -> int:
+        """Recompute the value, then invalidate + republish one wrapper.
+
+        cachekit is decorator-only, so a fresh write is invalidate-then-call — and
+        if the recompute would raise we must find out BEFORE invalidating, or a
+        failed recompute leaves the key deleted (a cache miss on the metered-miss
+        path) until the next tick. Probing recompute() first keeps the live entry
+        intact on failure.
+        """
+        try:
+            recompute()
+            fn.invalidate_cache(window)
+            fn(window)
+            return 1
+        except Exception:
+            logger.exception("publish failed: %s", label)
+            return 0
+
     def publish_window(self, window: str) -> int:
         """Refresh every operation for one window; returns how many published."""
         published = 0
         for operation in OPERATIONS:
             fn = self._publish_fns[(operation, window)]
-            try:
-                fn.invalidate_cache(window)
-                fn(window)
-                published += 1
-            except Exception:
-                logger.exception("publish failed: %s/%s", operation, window)
+            published += self._refresh(
+                fn,
+                window,
+                lambda operation=operation: self._store.build_value(operation, window, self._now(), self._top_n),
+                f"{operation}/{window}",
+            )
         if window == SECURE_WINDOW and self._secure_fn is not None:
-            try:
-                self._secure_fn.invalidate_cache(window)
-                self._secure_fn(window)
-                published += 1
-            except Exception:
-                logger.exception("secure publish failed: language_sentiment/%s", window)
+            published += self._refresh(
+                self._secure_fn,
+                window,
+                lambda: self._store.sentiment_value(window, self._now()),
+                f"language_sentiment/{window}",
+            )
         return published
 
     def checkpoint(self) -> None:
-        """Force-write the current window state (restart insurance)."""
+        """Force-write the current window state (restart insurance).
+
+        Recompute first (same reason as _refresh): a snapshot that fails must not
+        delete the last good checkpoint and leave the next restart with a cold window.
+        """
+        self._store.snapshot(self._now())
         self._checkpoint_fn.invalidate_cache()
         self._checkpoint_fn()
 
@@ -119,9 +142,15 @@ class Publisher:
         """Load the last checkpoint into the store; returns buckets restored.
 
         On a cold cache the call is a miss, which harmlessly writes a snapshot
-        of the (empty) store and restores 0 buckets.
+        of the (empty) store and restores 0 buckets. A read failure (backend error
+        or a malformed checkpoint) degrades to 0 rather than propagating — a bad
+        checkpoint must never crash startup into a permanent boot loop.
         """
-        snap = self._checkpoint_fn()
+        try:
+            snap = self._checkpoint_fn()
+        except Exception:
+            logger.exception("checkpoint read failed at startup; continuing with a cold window")
+            return 0
         restored = self._store.restore(snap, self._now())
         if restored:
             logger.info("restored %d window buckets from checkpoint (saved_at=%s)", restored, snap.get("saved_at"))

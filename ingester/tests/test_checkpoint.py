@@ -1,7 +1,7 @@
 """Checkpoint/restore: a restart must not zero the 24h window."""
 
 from skyline_ingester.publisher import Publisher
-from skyline_ingester.windows import WindowStore
+from skyline_ingester.windows import SNAPSHOT_VERSION, WindowStore
 
 from .conftest import FIXTURE_TOTALS, MASTER_KEY, NOW
 
@@ -45,3 +45,30 @@ def test_snapshot_truncates_per_bucket_counters(store):
 def test_restore_rejects_unknown_version(store):
     assert store.restore({"v": 999, "buckets": []}, NOW) == 0
     assert store.restore({}, NOW) == 0
+
+
+def test_snapshot_omits_sentiment_for_zero_knowledge(store):
+    # ZK: `sent` is the cleartext source of the @cache.secure value; the plaintext
+    # checkpoint must not carry it, or the backend reconstructs avg = sum / count.
+    snap = store.snapshot(NOW)
+    assert snap["buckets"], "fixture stream should produce buckets"
+    assert all("sent" not in d for _minute, d in snap["buckets"])
+
+
+def test_restore_tolerates_malformed_checkpoints():
+    # A corrupt / partial checkpoint must degrade to a skip, never raise — a raise
+    # here propagates through asyncio.run and crashes startup into a boot loop.
+    good = int(NOW // 60)
+    bad = [
+        {"v": SNAPSHOT_VERSION, "buckets": "not-a-list"},
+        {"v": SNAPSHOT_VERSION, "buckets": [[good]]},  # item is not a (minute, dict) pair
+        {"v": SNAPSHOT_VERSION, "buckets": [[good, "not-a-dict"]]},
+        {"v": SNAPSHOT_VERSION, "buckets": [["not-an-int", {}]]},
+        {"v": SNAPSHOT_VERSION, "buckets": [[good, {"n": "x"}]]},  # non-numeric count
+        {"v": SNAPSHOT_VERSION, "buckets": [[good, {"sent": {"en": [1.0]}}]]},  # bad sent pair
+    ]
+    for snap in bad:
+        assert WindowStore().restore(snap, NOW) == 0  # skipped, no raise
+    # a valid bucket alongside a broken one is still restored
+    mixed = {"v": SNAPSHOT_VERSION, "buckets": [[good, {"n": 5}], [good - 1, "broken"]]}
+    assert WindowStore().restore(mixed, NOW) == 1
