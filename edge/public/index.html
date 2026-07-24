@@ -221,6 +221,10 @@
       ];
       const TIME_KEYS = ['computed_at', 'generated_at', 'updated_at', 'as_of', 'timestamp'];
       let currentWindow = '5m';
+      // Bumped on every refresh; in-flight responses from an older refresh
+      // (e.g. a slow 5m fetch finishing after a switch to 1h) are discarded
+      // instead of rendering stale data under the wrong window.
+      let refreshVersion = 0;
 
       const esc = (s) =>
         String(s).replace(
@@ -304,7 +308,7 @@
         return `<pre>${esc(JSON.stringify(data, null, 2))}</pre>`;
       }
 
-      function renderCard(el, title, state) {
+      function renderCard(el, title, state, win) {
         const badge = { HIT: 'hit', MISS: 'miss', ERR: 'err' }[state.cache];
         const time =
           state.data && typeof state.data === 'object'
@@ -312,31 +316,35 @@
             : null;
         el.innerHTML = `
       <h2>${esc(title)} <span class="badge ${badge}">${state.cache}</span></h2>
-      <p class="meta">window ${esc(currentWindow)}${time ? ` · as of ${esc(time)}` : ''}</p>
+      <p class="meta">window ${esc(win)}${time ? ` · as of ${esc(time)}` : ''}</p>
       ${state.error ? `<p class="error">${esc(state.error)}</p>` : state.data !== undefined ? renderData(state.data) : `<p class="empty">No data for this window yet — waiting on the ingester.</p>`}`;
       }
 
-      async function loadOperation(el, op, title) {
+      async function loadOperation(el, op, title, win, version) {
         try {
-          const res = await fetch(`/api/${op}?window=${currentWindow}`);
-          const cache = res.headers.get('x-cache') || (res.ok ? 'HIT' : 'ERR');
+          const res = await fetch(`/api/${op}?window=${win}`);
           const body = await res.json();
-          if (res.ok) return renderCard(el, title, { cache: 'HIT', data: body.data });
+          if (version !== refreshVersion) return; // superseded by a newer refresh
+          if (res.ok) return renderCard(el, title, { cache: 'HIT', data: body.data }, win);
           if (res.status === 404 && body.error === 'miss')
-            return renderCard(el, title, { cache: 'MISS' });
-          renderCard(el, title, {
-            cache: 'ERR',
-            error: body.detail || body.error || `HTTP ${res.status}`,
-          });
+            return renderCard(el, title, { cache: 'MISS' }, win);
+          renderCard(
+            el,
+            title,
+            { cache: 'ERR', error: body.detail || body.error || `HTTP ${res.status}` },
+            win,
+          );
         } catch (err) {
-          renderCard(el, title, { cache: 'ERR', error: String(err) });
+          if (version !== refreshVersion) return;
+          renderCard(el, title, { cache: 'ERR', error: String(err) }, win);
         }
       }
 
-      async function loadStats() {
+      async function loadStats(version) {
         const tiles = document.getElementById('tiles');
         try {
           const stats = await (await fetch('/api/stats')).json();
+          if (version !== refreshVersion) return;
           const rate = stats.hit_rate === null ? '—' : (stats.hit_rate * 100).toFixed(1) + '%';
           tiles.innerHTML = [
             ['Cache hit rate', rate],
@@ -350,21 +358,24 @@
             )
             .join('');
         } catch {
+          if (version !== refreshVersion) return;
           tiles.innerHTML =
             '<div class="tile"><div class="label">Stats</div><div class="value">—</div></div>';
         }
       }
 
       function refresh() {
+        const version = ++refreshVersion;
+        const win = currentWindow;
         const grid = document.getElementById('grid');
         if (!grid.children.length) {
           grid.innerHTML = OPERATIONS.map(
             ([op]) => `<section class="card" id="card-${op}"></section>`,
           ).join('');
         }
-        loadStats();
+        loadStats(version);
         for (const [op, title] of OPERATIONS)
-          loadOperation(document.getElementById(`card-${op}`), op, title);
+          loadOperation(document.getElementById(`card-${op}`), op, title, win, version);
       }
 
       document.querySelector('.windows').addEventListener('click', (e) => {

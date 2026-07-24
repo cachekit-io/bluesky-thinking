@@ -10,8 +10,6 @@
 import { createServer } from 'node:http';
 import { readFileSync } from 'node:fs';
 import { encodeInteropValue, generateInteropKey, type Backend } from '@cachekit-io/cachekit';
-// Real .ts extension: this file runs under plain `node` (type stripping),
-// which does not rewrite bundler-style .js specifiers.
 import { handleApi, NAMESPACE } from '../src/handler.ts';
 
 const computed_at = new Date().toISOString();
