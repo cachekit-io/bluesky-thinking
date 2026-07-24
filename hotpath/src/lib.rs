@@ -45,7 +45,7 @@ mod edge {
         Response::from_json(&json!({
             "component": "skyline-hotpath",
             "version": env!("CARGO_PKG_VERSION"),
-            "sdk": "cachekit-rs v0.4.0 (wasm32-unknown-unknown)",
+            "sdk": "cachekit-rs 0.5.0 (crates.io, wasm32-unknown-unknown)",
             "namespace": compute::NAMESPACE,
             "operations": compute::OPERATIONS,
             "windows": { "5m": 60, "1h": 300, "24h": 900 },

@@ -5,9 +5,10 @@ edition = "2021"
 publish = false
 
 # Stage-2 hot-path Worker (LAB-746). Build-chain pins are locked in
-# docs/architecture.md — worker-build@^0.1, wasm-bindgen-cli 0.2.126,
-# and the git-tag cachekit-rs dep (crates.io max is 0.3.0, pre-interop;
-# switch when the LAB-742 publish lands).
+# docs/architecture.md — worker-build@^0.1, wasm-bindgen-cli 0.2.126.
+# cachekit-rs comes from crates.io since 0.5.0 (LAB-742 resolved the
+# failed 0.4.0 publish; 0.5.0 keeps worker pinned at 0.4, so the chain
+# pins are unchanged).
 
 [lib]
 # rlib so `cargo test` can link the compute module natively; cdylib for wasm32.
@@ -16,7 +17,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 # Interop key derivation + strict interop/v1 (de)serialization. No features:
 # the interop module is unconditional, and native builds don't need backends.
-cachekit-rs = { git = "https://github.com/cachekit-io/cachekit-rs", tag = "cachekit-rs-v0.4.0", default-features = false }
+cachekit-rs = { version = "0.5.0", default-features = false }
 # xxHash3-64 integrity primitive — same function that backs StorageEnvelope
 # checksums, so wire values are identical.
 cachekit-core = { version = "0.3", default-features = false, features = ["checksum"] }
@@ -31,4 +32,4 @@ base64 = "0.22"
 wasm-bindgen = "=0.2.126"
 # Workers feature set exactly as spike-proven; WorkersCachekitIO is the only
 # CachekitIO backend that implements Backend on wasm32.
-cachekit-rs = { git = "https://github.com/cachekit-io/cachekit-rs", tag = "cachekit-rs-v0.4.0", default-features = false, features = ["workers", "cachekitio", "encryption", "macros"] }
+cachekit-rs = { version = "0.5.0", default-features = false, features = ["workers", "cachekitio", "encryption", "macros"] }

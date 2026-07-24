@@ -1,7 +1,7 @@
 # Skyline hot-path Worker (`hotpath/`)
 
-The Rust-WASM leg of the Skyline edge (Stage 2, LAB-746): `cachekit-rs` compiled to
-`wasm32-unknown-unknown`, deployed as its own Cloudflare Worker. Stage 3 binds it into the
+The Rust-WASM leg of the Skyline edge (Stage 2, LAB-746): `cachekit-rs` 0.5.0 (crates.io)
+compiled to `wasm32-unknown-unknown`, deployed as its own Cloudflare Worker. Stage 3 binds it into the
 TS serving path (service binding); until then it runs standalone.
 
 Dev deployment: **https://skyline-hotpath.raywalker.workers.dev**
@@ -35,8 +35,9 @@ $ curl https://skyline-hotpath.raywalker.workers.dev/v1/key/posts_per_minute/5m
 Build-chain pins are locked in [`docs/architecture.md`](../docs/architecture.md#build-chain-pins-from-spike-friction-so-stage-2-doesnt-rediscover-them):
 `worker-build@^0.1`, `wasm-bindgen-cli` **0.2.126** on `PATH` (Cargo.toml pins the
 `wasm-bindgen` crate to `=0.2.126` and the committed `Cargo.lock` holds the full graph, so
-CLI and crate ABI can never drift), `cachekit-rs` via git tag `cachekit-rs-v0.4.0`
-(crates.io publish tracked in LAB-742 — switch the dep when it lands).
+CLI and crate ABI can never drift). `cachekit-rs` comes from **crates.io 0.5.0** — the
+spec's git-tag workaround retired when LAB-742's publish landed; 0.5.0 keeps `worker`
+pinned at 0.4, so the chain pins are unchanged.
 
 ```console
 $ cargo test                                     # native: contract + vector tests, no creds

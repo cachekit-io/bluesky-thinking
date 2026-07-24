@@ -188,8 +188,9 @@ dependencies = [
 
 [[package]]
 name = "cachekit-macros"
-version = "0.4.0"
-source = "git+https://github.com/cachekit-io/cachekit-rs?tag=cachekit-rs-v0.4.0#12181c9781dbba882aef6562b0b4983671f90efb"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "712c2fb36da45d979a5ef178f455aa6395fac894382acbb5761f936d3da5cce1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -198,8 +199,9 @@ dependencies = [
 
 [[package]]
 name = "cachekit-rs"
-version = "0.4.0"
-source = "git+https://github.com/cachekit-io/cachekit-rs?tag=cachekit-rs-v0.4.0#12181c9781dbba882aef6562b0b4983671f90efb"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "602e017ad7eb735ba12665f217ef7c887b697fb6a6d392486c8e84e2c4865524"
 dependencies = [
  "async-trait",
  "blake2",
