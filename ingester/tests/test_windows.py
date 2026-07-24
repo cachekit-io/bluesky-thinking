@@ -1,0 +1,81 @@
+"""Window aggregation and expiry against the recorded fixture stream."""
+
+from skyline_ingester.extract import PostFeatures
+from skyline_ingester.windows import WindowStore
+
+from .conftest import FIXTURE_TOTALS, NOW
+
+
+def test_trending_hashtags_per_window(store):
+    v5 = store.build_value("trending_hashtags", "5m", NOW)
+    top = {d["tag"]: d["count"] for d in v5["hashtags"]}
+    assert top["cachekit"] == 3
+    assert top["bluesky"] == 3
+    assert "onehour" not in top  # 30 min old — outside 5m
+
+    v1h = store.build_value("trending_hashtags", "1h", NOW)
+    top1h = {d["tag"]: d["count"] for d in v1h["hashtags"]}
+    assert top1h["onehour"] == 3
+    assert top1h["cachekit"] == 4  # 3 recent + 1 in the hourly band
+
+    v24 = store.build_value("trending_hashtags", "24h", NOW)
+    top24 = {d["tag"]: d["count"] for d in v24["hashtags"]}
+    assert top24["daily"] == 8  # 5 via facets + 3 via the regex fallback
+    assert "ancient" not in top24  # 25 h old — outside 24h
+
+
+def test_trending_links(store):
+    links = {d["uri"]: d["count"] for d in store.build_value("trending_links", "5m", NOW)["links"]}
+    assert links == {"https://example.com/a": 3}  # 2 link facets + 1 external embed
+    hourly = {d["uri"]: d["count"] for d in store.build_value("trending_links", "1h", NOW)["links"]}
+    assert hourly["https://example.com/hourly"] == 2
+
+
+def test_lang_mix_shares_sum_to_one(store):
+    value = store.build_value("lang_mix", "5m", NOW)
+    langs = value["langs"]
+    assert value["total_posts"] == FIXTURE_TOTALS["5m"]
+    assert set(langs) == {"en", "ja", "es", "und"}
+    assert abs(sum(langs.values()) - 1.0) < 0.01
+    assert langs["en"] == 0.5  # 6 of 12
+
+
+def test_posts_per_minute(store):
+    assert store.build_value("posts_per_minute", "5m", NOW)["ppm"] == FIXTURE_TOTALS["5m"] / 5
+    assert store.build_value("posts_per_minute", "1h", NOW)["ppm"] == round(FIXTURE_TOTALS["1h"] / 60, 3)
+
+
+def test_top_emoji(store):
+    emoji = {d["emoji"]: d["count"] for d in store.build_value("top_emoji", "5m", NOW)["emoji"]}
+    assert emoji["🔥"] == 3
+    assert emoji["👨‍👩‍👧"] == 1  # ZWJ family counted as one emoji
+
+
+def test_windows_expire(store):
+    # 6 minutes later every 5m-window fixture post has aged out.
+    later = NOW + 6 * 60
+    assert store.merged("5m", later).n == 0
+    # At +37 min the hourly band (30 min old at NOW) has left the 1h window;
+    # the recent dozen (≤ 4 min old at NOW) are still inside it.
+    at_37 = store.merged("1h", NOW + 37 * 60)
+    assert "onehour" not in at_37.tags
+    assert at_37.n == FIXTURE_TOTALS["5m"]
+    # At +65 min the 1h window is empty; the 24h window still holds everything.
+    assert store.merged("1h", NOW + 65 * 60).n == 0
+    assert store.merged("24h", NOW + 65 * 60).n == FIXTURE_TOTALS["24h"]
+
+
+def test_memo_does_not_leak_across_now(store):
+    a = store.merged("5m", NOW)
+    b = store.merged("5m", NOW + 6 * 60)
+    assert a.n == FIXTURE_TOTALS["5m"] and b.n == 0
+    assert store.merged("5m", NOW).n == FIXTURE_TOTALS["5m"]  # memoised value still correct
+
+
+def test_prune_drops_buckets_beyond_24h():
+    s = WindowStore()
+    base = 20_000_000 * 60.0
+    s.add(PostFeatures(ts=base, lang="en", hashtags=["old"], links=[], emoji=[], sentiment=None))
+    s.add(PostFeatures(ts=base + 1441 * 60, lang="en", hashtags=["new"], links=[], emoji=[], sentiment=None))
+    assert len(s._buckets) == 1  # the 1441-min-old bucket was pruned on insert
+    assert "new" in s.merged("24h", base + 1441 * 60).tags
