@@ -83,6 +83,7 @@ docs/architecture.md   — the Stage-1 architecture spec (locked contract)
 hotpath/               — Stage-2 Rust-WASM hot-path Worker (cachekit-rs 0.5 on CF Workers):
                          interop key derivation, xxHash3 payload verification, window-slice
                          merging — live at skyline-hotpath.raywalker.workers.dev
+ingester/              — Stage-2 Python ingester + window aggregator (LAB-744): Jetstream → 5m/1h/24h windows → interop/v1 aggregates
 spike/decorators/      — AC-3 proof: the three decorators running on cachekit 0.15.0
 spike/edge-worker/     — AC-2 proof: deployable cachekit-rs Worker (the live spike)
 spike/roundtrip/       — AC-1 harness: CachekitIO round-trip, runs as soon as credentials exist
