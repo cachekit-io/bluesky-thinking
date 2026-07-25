@@ -1,0 +1,394 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Skyline — live Bluesky analytics on CacheKit</title>
+    <style>
+      :root {
+        --surface: #262321;
+        --card: #2e2a27;
+        --line: #3b3631;
+        --ink: #e8e2da;
+        --ink-2: #a89f93;
+        --accent: #e0a836;
+        --hit: #7fb069;
+        --miss: #a89f93;
+        --err: #d97b66;
+      }
+      * {
+        box-sizing: border-box;
+        margin: 0;
+      }
+      body {
+        background: var(--surface);
+        color: var(--ink);
+        font:
+          15px/1.5 'Overpass',
+          system-ui,
+          sans-serif;
+        padding: 2rem 1.25rem 4rem;
+        max-width: 72rem;
+        margin: 0 auto;
+      }
+      header {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: baseline;
+        gap: 1rem;
+        margin-bottom: 1.5rem;
+      }
+      h1 {
+        font-size: 1.4rem;
+        font-weight: 600;
+      }
+      h1 span {
+        color: var(--accent);
+      }
+      .sub {
+        color: var(--ink-2);
+        font-size: 0.85rem;
+      }
+      .windows {
+        margin-left: auto;
+        display: flex;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        overflow: hidden;
+      }
+      .windows button {
+        background: none;
+        border: none;
+        color: var(--ink-2);
+        font: inherit;
+        padding: 0.3rem 0.9rem;
+        cursor: pointer;
+      }
+      .windows button[aria-pressed='true'] {
+        background: var(--accent);
+        color: #262321;
+        font-weight: 600;
+      }
+      .tiles {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+        gap: 0.75rem;
+        margin-bottom: 1.25rem;
+      }
+      .tile {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 0.9rem 1rem;
+      }
+      .tile .label {
+        color: var(--ink-2);
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+      }
+      .tile .value {
+        font-size: 1.9rem;
+        font-weight: 650;
+        font-variant-numeric: tabular-nums;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr));
+        gap: 0.75rem;
+      }
+      .card {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 1rem;
+      }
+      .card h2 {
+        font-size: 0.95rem;
+        font-weight: 600;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+      }
+      .badge {
+        font-size: 0.65rem;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        padding: 0.1rem 0.45rem;
+        border-radius: 4px;
+        border: 1px solid;
+      }
+      .badge.hit {
+        color: var(--hit);
+        border-color: var(--hit);
+      }
+      .badge.miss {
+        color: var(--miss);
+        border-color: var(--miss);
+      }
+      .badge.err {
+        color: var(--err);
+        border-color: var(--err);
+      }
+      .meta {
+        color: var(--ink-2);
+        font-size: 0.75rem;
+        margin-top: 0.15rem;
+      }
+      .rows {
+        margin-top: 0.75rem;
+        display: flex;
+        flex-direction: column;
+        gap: 0.45rem;
+      }
+      .row {
+        display: grid;
+        grid-template-columns: minmax(5rem, 40%) 1fr auto;
+        gap: 0.6rem;
+        align-items: center;
+      }
+      .row .name {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .row .bar {
+        height: 8px;
+        background: var(--accent);
+        border-radius: 0 4px 4px 0;
+        min-width: 2px;
+      }
+      .row .num {
+        color: var(--ink-2);
+        font-variant-numeric: tabular-nums;
+        font-size: 0.85rem;
+      }
+      .empty,
+      .error {
+        color: var(--ink-2);
+        font-size: 0.85rem;
+        margin-top: 0.75rem;
+      }
+      .error {
+        color: var(--err);
+      }
+      pre {
+        margin-top: 0.75rem;
+        font:
+          0.78rem/1.4 'JetBrains Mono',
+          monospace;
+        color: var(--ink-2);
+        overflow-x: auto;
+      }
+      .hero {
+        font-size: 2.6rem;
+        font-weight: 650;
+        font-variant-numeric: tabular-nums;
+        margin-top: 0.5rem;
+      }
+      .hero small {
+        font-size: 1rem;
+        color: var(--ink-2);
+        font-weight: 400;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div>
+        <h1>Skyline <span>/</span> live Bluesky analytics</h1>
+        <p class="sub">
+          Five aggregates, one CacheKit namespace, three SDKs. Refreshes every 30&nbsp;s.
+        </p>
+      </div>
+      <div class="windows" role="group" aria-label="Aggregation window">
+        <button data-window="5m" aria-pressed="true">5m</button>
+        <button data-window="1h" aria-pressed="false">1h</button>
+        <button data-window="24h" aria-pressed="false">24h</button>
+      </div>
+    </header>
+
+    <div class="tiles" id="tiles"></div>
+    <div class="grid" id="grid"></div>
+
+    <script>
+      const OPERATIONS = [
+        ['posts_per_minute', 'Posts per minute'],
+        ['trending_hashtags', 'Trending hashtags'],
+        ['trending_links', 'Trending links'],
+        ['lang_mix', 'Language mix'],
+        ['top_emoji', 'Top emoji'],
+      ];
+      const TIME_KEYS = ['computed_at', 'generated_at', 'updated_at', 'as_of', 'timestamp'];
+      let currentWindow = '5m';
+      // Bumped on every refresh; in-flight responses from an older refresh
+      // (e.g. a slow 5m fetch finishing after a switch to 1h) are discarded
+      // instead of rendering stale data under the wrong window.
+      let refreshVersion = 0;
+
+      const esc = (s) =>
+        String(s).replace(
+          /[&<>"]/g,
+          (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c],
+        );
+      const fmt = (n) =>
+        Intl.NumberFormat('en', {
+          notation: n >= 10000 ? 'compact' : 'standard',
+          maximumFractionDigits: 2,
+        }).format(n);
+
+      // The value shapes are the ingester's choice (only "top-level msgpack map"
+      // is contract-locked), so rendering is structural: find the largest
+      // {string: number} ranking anywhere in the value, else show JSON.
+      function findRanking(value, depth = 0) {
+        if (depth > 3 || value === null || typeof value !== 'object') return null;
+        if (Array.isArray(value)) {
+          // Accept [[name, count], …] or [{<str>, <num>}, …] entry lists.
+          const pairs = value
+            .map((it) => {
+              if (
+                Array.isArray(it) &&
+                it.length === 2 &&
+                typeof it[0] === 'string' &&
+                typeof it[1] === 'number'
+              )
+                return it;
+              if (it && typeof it === 'object' && !Array.isArray(it)) {
+                const s = Object.values(it).find((v) => typeof v === 'string');
+                const n = Object.values(it).find((v) => typeof v === 'number');
+                if (s !== undefined && n !== undefined) return [s, n];
+              }
+              return null;
+            })
+            .filter(Boolean);
+          return pairs.length >= 2 ? pairs : null;
+        }
+        const entries = Object.entries(value);
+        const numeric = entries.filter(([, v]) => typeof v === 'number');
+        if (numeric.length >= 2 && numeric.length >= entries.length - 2) return numeric;
+        let best = null;
+        for (const [, v] of entries) {
+          const sub = findRanking(v, depth + 1);
+          if (sub && (!best || sub.length > best.length)) best = sub;
+        }
+        return best;
+      }
+
+      function findScalar(value) {
+        if (typeof value === 'number') return value;
+        if (value && typeof value === 'object' && !Array.isArray(value)) {
+          const nums = Object.entries(value).filter(
+            ([k, v]) => typeof v === 'number' && !TIME_KEYS.includes(k),
+          );
+          if (nums.length === 1) return nums[0][1];
+        }
+        return null;
+      }
+
+      function renderRanking(pairs) {
+        const sorted = [...pairs].sort((a, b) => b[1] - a[1]).slice(0, 10);
+        const max = sorted[0][1] || 1;
+        const asPercent = pairs.every(([, v]) => v >= 0 && v <= 1);
+        return `<div class="rows">${sorted
+          .map(
+            ([name, v]) => `<div class="row">
+          <span class="name" title="${esc(name)}">${esc(name)}</span>
+          <span class="bar" style="width:${Math.max(1, (v / max) * 100)}%"></span>
+          <span class="num">${asPercent ? (v * 100).toFixed(1) + '%' : fmt(v)}</span>
+        </div>`,
+          )
+          .join('')}</div>`;
+      }
+
+      function renderData(data) {
+        const scalar = findScalar(data);
+        if (scalar !== null) return `<p class="hero">${fmt(scalar)}</p>`;
+        const ranking = findRanking(data);
+        if (ranking) return renderRanking(ranking);
+        return `<pre>${esc(JSON.stringify(data, null, 2))}</pre>`;
+      }
+
+      function renderCard(el, title, state, win) {
+        const badge = { HIT: 'hit', MISS: 'miss', ERR: 'err' }[state.cache];
+        const time =
+          state.data && typeof state.data === 'object'
+            ? TIME_KEYS.map((k) => state.data[k]).find((v) => typeof v === 'string')
+            : null;
+        el.innerHTML = `
+      <h2>${esc(title)} <span class="badge ${badge}">${state.cache}</span></h2>
+      <p class="meta">window ${esc(win)}${time ? ` · as of ${esc(time)}` : ''}</p>
+      ${state.error ? `<p class="error">${esc(state.error)}</p>` : state.data !== undefined ? renderData(state.data) : `<p class="empty">No data for this window yet — waiting on the ingester.</p>`}`;
+      }
+
+      async function loadOperation(el, op, title, win, version) {
+        try {
+          const res = await fetch(`/api/${op}?window=${win}`);
+          const body = await res.json();
+          if (version !== refreshVersion) return; // superseded by a newer refresh
+          if (res.ok) return renderCard(el, title, { cache: 'HIT', data: body.data }, win);
+          if (res.status === 404 && body.error === 'miss')
+            return renderCard(el, title, { cache: 'MISS' }, win);
+          renderCard(
+            el,
+            title,
+            { cache: 'ERR', error: body.detail || body.error || `HTTP ${res.status}` },
+            win,
+          );
+        } catch (err) {
+          if (version !== refreshVersion) return;
+          renderCard(el, title, { cache: 'ERR', error: String(err) }, win);
+        }
+      }
+
+      async function loadStats(version) {
+        const tiles = document.getElementById('tiles');
+        try {
+          const stats = await (await fetch('/api/stats')).json();
+          if (version !== refreshVersion) return;
+          const rate = stats.hit_rate === null ? '—' : (stats.hit_rate * 100).toFixed(1) + '%';
+          tiles.innerHTML = [
+            ['Cache hit rate', rate],
+            ['Hits', fmt(stats.hits)],
+            ['Misses', fmt(stats.misses)],
+            ['Errors', fmt(stats.errors)],
+          ]
+            .map(
+              ([l, v]) =>
+                `<div class="tile"><div class="label">${l}</div><div class="value">${v}</div></div>`,
+            )
+            .join('');
+        } catch {
+          if (version !== refreshVersion) return;
+          tiles.innerHTML =
+            '<div class="tile"><div class="label">Stats</div><div class="value">—</div></div>';
+        }
+      }
+
+      function refresh() {
+        const version = ++refreshVersion;
+        const win = currentWindow;
+        const grid = document.getElementById('grid');
+        if (!grid.children.length) {
+          grid.innerHTML = OPERATIONS.map(
+            ([op]) => `<section class="card" id="card-${op}"></section>`,
+          ).join('');
+        }
+        loadStats(version);
+        for (const [op, title] of OPERATIONS)
+          loadOperation(document.getElementById(`card-${op}`), op, title, win, version);
+      }
+
+      document.querySelector('.windows').addEventListener('click', (e) => {
+        const btn = e.target.closest('button[data-window]');
+        if (!btn) return;
+        currentWindow = btn.dataset.window;
+        for (const b of document.querySelectorAll('.windows button'))
+          b.setAttribute('aria-pressed', String(b === btn));
+        refresh();
+      });
+
+      refresh();
+      setInterval(refresh, 30_000);
+    </script>
+  </body>
+</html>
