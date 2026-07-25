@@ -68,6 +68,30 @@ def test_windows_expire(store):
     assert store.merged("24h", NOW + 65 * 60).n == FIXTURE_TOTALS["24h"]
 
 
+def test_memo_is_not_resurrected_by_a_concurrent_add(store):
+    # Regression (CodeRabbit on PR #5): merged() computes outside the lock; if an
+    # add() lands mid-merge it clears the memo, and blindly re-inserting the
+    # pre-add() result would serve it stale to every same-second caller. The
+    # generation counter must suppress that memo insert.
+    before = store.merged("5m", NOW).n
+
+    orig = store._copy_range
+
+    def add_mid_merge(lo, hi):
+        copies = orig(lo, hi)
+        store.add(PostFeatures(ts=NOW, lang="en", hashtags=[], links=[], emoji=[], sentiment=None))
+        return copies
+
+    store._copy_range = add_mid_merge
+    try:
+        stale = store.merged("5m", NOW + 1)  # computed from the pre-add copies...
+    finally:
+        store._copy_range = orig
+    assert stale.n == before
+    # ...but NOT memoised: the next same-second call recomputes and sees the add.
+    assert store.merged("5m", NOW + 1).n == before + 1
+
+
 def test_memo_does_not_leak_across_now(store):
     a = store.merged("5m", NOW)
     b = store.merged("5m", NOW + 6 * 60)

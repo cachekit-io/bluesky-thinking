@@ -67,6 +67,10 @@ class WindowStore:
         self._max = max_minutes
         self._buckets: dict[int, Bucket] = {}
         self._memo: dict[tuple[str, int], Bucket] = {}
+        # Bumped by every add(); a merge only memoises its result if no add()
+        # landed since it started, so a cleared memo can't be resurrected with
+        # a pre-add() view for the rest of that second.
+        self._gen = 0
         # The Jetstream consumer calls add() on the event-loop thread while the
         # publish/checkpoint loops read the store from asyncio.to_thread workers;
         # every access to _buckets/_memo is serialised through this lock.
@@ -89,6 +93,7 @@ class WindowStore:
                 acc[0] += feats.sentiment
                 acc[1] += 1
             self._memo.clear()
+            self._gen += 1
 
     def _prune(self, newest_minute: int) -> None:
         # Caller holds self._lock. Anchor the retention floor to the minute being
@@ -117,6 +122,7 @@ class WindowStore:
             memo = self._memo.get(key)
             if memo is not None:
                 return memo
+            gen = self._gen
         out = Bucket()
         for _minute, b in self._copy_range(lo, now_min):
             out.n += b.n
@@ -129,9 +135,13 @@ class WindowStore:
                 acc[0] += s
                 acc[1] += c
         with self._lock:
-            if len(self._memo) > 8:
-                self._memo.clear()
-            self._memo[key] = out
+            # Memoise only if no add() landed since the merge started: add()
+            # cleared the memo, and re-inserting this pre-add() view would serve
+            # it stale to every same-second caller.
+            if self._gen == gen:
+                if len(self._memo) > 8:
+                    self._memo.clear()
+                self._memo[key] = out
         return out
 
     # 16 buckets/chunk keeps each lock hold ~1-2 ms even at firehose-dense
@@ -241,35 +251,46 @@ class WindowStore:
         buckets = snap.get("buckets")
         if not isinstance(buckets, list):
             return 0
-        floor = int(now // 60) - self._max
+        now_min = int(now // 60)
+        floor = now_min - self._max
+        ceiling = now_min + 1  # a checkpoint can't legitimately hold future minutes
         restored = 0
         with self._lock:
             for item in buckets:
                 try:
                     minute, d = item
-                    if not isinstance(minute, int) or minute <= floor:
+                    if not isinstance(minute, int) or minute <= floor or minute > ceiling:
                         continue
                     # Coerce keys/values, not just presence: a poisoned-but-valid
-                    # checkpoint (e.g. a counter value of "not-a-number") would pass
-                    # restore and detonate later inside merged()/most_common(), where
-                    # the publisher's except swallows it into silent misses for up to
+                    # checkpoint (e.g. a counter value of "not-a-number", or a
+                    # negative count that skews ppm/lang_mix) would pass restore
+                    # and detonate later inside merged()/most_common(), where the
+                    # publisher's except swallows it into silent misses for up to
                     # 24h. A bad entry must fail HERE, skipping only its bucket.
                     b = Bucket(
-                        n=int(d.get("n", 0)),
+                        n=_non_negative(int(d.get("n", 0))),
                         tags=_coerced_counter(d.get("tags")),
                         links=_coerced_counter(d.get("links")),
                         langs=_coerced_counter(d.get("langs")),
                         emoji=_coerced_counter(d.get("emoji")),
-                        sent={str(lang): [float(s), int(c)] for lang, (s, c) in (d.get("sent") or {}).items()},
+                        sent={str(lang): [float(s), _non_negative(int(c))] for lang, (s, c) in (d.get("sent") or {}).items()},
                     )
                 except (ValueError, TypeError, AttributeError):
                     continue
                 self._buckets[minute] = b
                 restored += 1
             self._memo.clear()
+            self._gen += 1
         return restored
 
 
+def _non_negative(value: int) -> int:
+    if value < 0:
+        raise ValueError("negative count in checkpoint")
+    return value
+
+
 def _coerced_counter(data) -> Counter:
-    # str keys / int values or ValueError|TypeError — restore() skips the bucket.
-    return Counter({str(k): int(v) for k, v in (data or {}).items()})
+    # str keys / non-negative int values, or ValueError|TypeError — restore()
+    # skips the bucket.
+    return Counter({str(k): _non_negative(int(v)) for k, v in (data or {}).items()})

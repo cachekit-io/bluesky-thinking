@@ -85,6 +85,10 @@ def test_restore_rejects_poisoned_but_valid_counter_values():
         "buckets": [
             [good, {"n": 3, "tags": {"x": "not-a-number"}}],  # poisoned value -> skipped
             [good - 1, {"n": 2, "tags": {"ok": 2}, "langs": {1: 2}}],  # non-str key -> coerced
+            [good - 2, {"n": -1_000_000}],  # negative count skews ppm -> skipped
+            [good - 3, {"n": 1, "tags": {"neg": -5}}],  # negative counter value -> skipped
+            [good + 10_000, {"n": 1, "tags": {"future": 1}}],  # future minute parks forever -> skipped
+            [good - 4, {"n": 1, "sent": {"en": [0.5, -3]}}],  # negative sentiment count -> skipped
         ],
     }
     store = WindowStore()
@@ -92,3 +96,4 @@ def test_restore_rejects_poisoned_but_valid_counter_values():
     merged = store.merged("24h", NOW)  # must never raise
     assert merged.tags.most_common(5) == [("ok", 2)]
     assert merged.langs == {"1": 2}
+    assert merged.n == 2

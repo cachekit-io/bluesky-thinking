@@ -82,7 +82,9 @@ def test_ingest_raw_drops_future_dated_events(fixture_lines):
     poison = json.loads(fixture_lines[0])
     poison["time_us"] = int((NOW + 10_000_000 * 60) * 1_000_000)  # ~19 years ahead
     assert ingest_raw(json.dumps(poison), store, now_fn=now_fn) is None  # no cursor advance
-    assert store.merged("24h", NOW).n == healthy  # window NOT wiped
+    # NOW + 1 forces a fresh merge (same minute, different memo key) — asserting at
+    # NOW would just re-read the memoised Bucket and pass even on a wiped store.
+    assert store.merged("24h", NOW + 1).n == healthy  # window NOT wiped
     assert store.snapshot(NOW)["buckets"], "checkpoint still has the real buckets"
 
     # small clock skew stays acceptable
