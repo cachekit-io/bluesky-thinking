@@ -39,6 +39,26 @@ class Bucket:
     emoji: Counter = field(default_factory=Counter)
     sent: dict[str, list[float]] = field(default_factory=dict)  # lang -> [sum, count]
 
+    def copy(self) -> Bucket:
+        # Shallow copies: enough isolation to read the copy while the original
+        # keeps being mutated under the store lock. Counter(mapping) copies via a
+        # per-key Python loop (Counter.update's mapping path); dict.update on a
+        # fresh Counter is one C call and identical here since values are ints.
+        return Bucket(
+            n=self.n,
+            tags=_fast_counter_copy(self.tags),
+            links=_fast_counter_copy(self.links),
+            langs=_fast_counter_copy(self.langs),
+            emoji=_fast_counter_copy(self.emoji),
+            sent={lang: acc.copy() for lang, acc in self.sent.items()},
+        )
+
+
+def _fast_counter_copy(src: Counter) -> Counter:
+    dst: Counter = Counter()
+    dict.update(dst, src)
+    return dst
+
 
 class WindowStore:
     """In-memory minute buckets covering at most the 24h window."""
@@ -81,7 +101,15 @@ class WindowStore:
             del self._buckets[minute]
 
     def merged(self, window: str, now: float) -> Bucket:
-        """Merge the buckets inside (now - window, now] into one Bucket."""
+        """Merge the buckets inside (now - window, now] into one Bucket.
+
+        Lock contract: self._lock is a non-reentrant threading.Lock — never call
+        merged()/snapshot()/add() while holding it. The lock is held only for
+        C-speed per-bucket copies; the O(window) Counter merge runs outside it so
+        add() on the event-loop thread never stalls behind a full 24h merge. The
+        returned (memoised) Bucket is read lock-free by callers and MUST NOT be
+        mutated.
+        """
         key = (window, int(now))
         now_min = int(now // 60)
         lo = now_min - WINDOW_MINUTES[window]
@@ -89,22 +117,47 @@ class WindowStore:
             memo = self._memo.get(key)
             if memo is not None:
                 return memo
-            out = Bucket()
-            for minute, b in self._buckets.items():
-                if lo < minute <= now_min:
-                    out.n += b.n
-                    out.tags.update(b.tags)
-                    out.links.update(b.links)
-                    out.langs.update(b.langs)
-                    out.emoji.update(b.emoji)
-                    for lang, (s, c) in b.sent.items():
-                        acc = out.sent.setdefault(lang, [0.0, 0])
-                        acc[0] += s
-                        acc[1] += c
+        out = Bucket()
+        for _minute, b in self._copy_range(lo, now_min):
+            out.n += b.n
+            out.tags.update(b.tags)
+            out.links.update(b.links)
+            out.langs.update(b.langs)
+            out.emoji.update(b.emoji)
+            for lang, (s, c) in b.sent.items():
+                acc = out.sent.setdefault(lang, [0.0, 0])
+                acc[0] += s
+                acc[1] += c
+        with self._lock:
             if len(self._memo) > 8:
                 self._memo.clear()
             self._memo[key] = out
-            return out
+        return out
+
+    # 16 buckets/chunk keeps each lock hold ~1-2 ms even at firehose-dense
+    # buckets; the per-chunk lock overhead itself is microseconds.
+    _COPY_CHUNK = 16
+
+    def _copy_range(self, lo: int, hi: int) -> list[tuple[int, Bucket]]:
+        """Copy the buckets in (lo, hi] in chunks, releasing the lock between chunks.
+
+        Copy, don't reference: add() mutates hot buckets' Counters in place, and
+        iterating a Counter that grows mid-merge raises "dictionary changed size
+        during iteration" (the round-1 bug class). Chunking bounds add()'s worst
+        stall to one chunk's copy (~few ms) instead of a full-window copy; a bucket
+        created or pruned between chunks simply lands in or out of this tick's view,
+        which periodic analytics tolerates.
+        """
+        with self._lock:
+            keys = [m for m in self._buckets if lo < m <= hi]
+        copies: list[tuple[int, Bucket]] = []
+        for i in range(0, len(keys), self._COPY_CHUNK):
+            with self._lock:
+                for m in keys[i : i + self._COPY_CHUNK]:
+                    b = self._buckets.get(m)
+                    if b is not None:  # pruned between chunks
+                        copies.append((m, b.copy()))
+        return copies
 
     def build_value(self, operation: str, window: str, now: float, top_n: int = 50) -> dict:
         """The interop/v1 value for one (operation, window): a top-level map with string keys."""
@@ -153,24 +206,26 @@ class WindowStore:
         repopulates within an hour of a restart; the restart-critical aggregate
         counts below are unaffected.
         """
-        with self._lock:
-            return {
-                "v": SNAPSHOT_VERSION,
-                "saved_at": int(now),
-                "buckets": [
-                    [
-                        minute,
-                        {
-                            "n": b.n,
-                            "tags": dict(b.tags.most_common(_K_TAGS)),
-                            "links": dict(b.links.most_common(_K_LINKS)),
-                            "langs": dict(b.langs.most_common(_K_LANGS)),
-                            "emoji": dict(b.emoji.most_common(_K_EMOJI)),
-                        },
-                    ]
-                    for minute, b in sorted(self._buckets.items())
-                ],
-            }
+        # Same lock discipline as merged(): chunked copy-under-lock; the
+        # most_common() sorts and dict building run outside.
+        copies = sorted(self._copy_range(-(1 << 62), 1 << 62))
+        return {
+            "v": SNAPSHOT_VERSION,
+            "saved_at": int(now),
+            "buckets": [
+                [
+                    minute,
+                    {
+                        "n": b.n,
+                        "tags": dict(b.tags.most_common(_K_TAGS)),
+                        "links": dict(b.links.most_common(_K_LINKS)),
+                        "langs": dict(b.langs.most_common(_K_LANGS)),
+                        "emoji": dict(b.emoji.most_common(_K_EMOJI)),
+                    },
+                ]
+                for minute, b in copies
+            ],
+        }
 
     def restore(self, snap: dict, now: float) -> int:
         """Load a snapshot(); returns the number of buckets restored (0 = nothing usable).
@@ -192,15 +247,20 @@ class WindowStore:
             for item in buckets:
                 try:
                     minute, d = item
-                    if not isinstance(minute, int) or minute <= floor or not isinstance(d, dict):
+                    if not isinstance(minute, int) or minute <= floor:
                         continue
+                    # Coerce keys/values, not just presence: a poisoned-but-valid
+                    # checkpoint (e.g. a counter value of "not-a-number") would pass
+                    # restore and detonate later inside merged()/most_common(), where
+                    # the publisher's except swallows it into silent misses for up to
+                    # 24h. A bad entry must fail HERE, skipping only its bucket.
                     b = Bucket(
                         n=int(d.get("n", 0)),
-                        tags=Counter(d.get("tags") or {}),
-                        links=Counter(d.get("links") or {}),
-                        langs=Counter(d.get("langs") or {}),
-                        emoji=Counter(d.get("emoji") or {}),
-                        sent={lang: [float(s), int(c)] for lang, (s, c) in (d.get("sent") or {}).items()},
+                        tags=_coerced_counter(d.get("tags")),
+                        links=_coerced_counter(d.get("links")),
+                        langs=_coerced_counter(d.get("langs")),
+                        emoji=_coerced_counter(d.get("emoji")),
+                        sent={str(lang): [float(s), int(c)] for lang, (s, c) in (d.get("sent") or {}).items()},
                     )
                 except (ValueError, TypeError, AttributeError):
                     continue
@@ -208,3 +268,8 @@ class WindowStore:
                 restored += 1
             self._memo.clear()
         return restored
+
+
+def _coerced_counter(data) -> Counter:
+    # str keys / int values or ValueError|TypeError — restore() skips the bucket.
+    return Counter({str(k): int(v) for k, v in (data or {}).items()})

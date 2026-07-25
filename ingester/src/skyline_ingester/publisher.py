@@ -96,8 +96,13 @@ class Publisher:
         cachekit is decorator-only, so a fresh write is invalidate-then-call — and
         if the recompute would raise we must find out BEFORE invalidating, or a
         failed recompute leaves the key deleted (a cache miss on the metered-miss
-        path) until the next tick. Probing recompute() first keeps the live entry
-        intact on failure.
+        path) until the next tick.
+
+        Honest ceiling: the probe only covers RECOMPUTE failure. The wrapper call
+        after invalidate is itself recompute-then-backend-WRITE, and a write
+        failure at that point still leaves the key deleted until the next tick —
+        cachekit has no atomic set/replace (confirmed against 0.15.0), so this is
+        as close as the decorator API allows.
         """
         try:
             recompute()
@@ -131,10 +136,11 @@ class Publisher:
     def checkpoint(self) -> None:
         """Force-write the current window state (restart insurance).
 
-        Recompute first (same reason as _refresh): a snapshot that fails must not
-        delete the last good checkpoint and leave the next restart with a cold window.
+        No recompute probe here (unlike _refresh): snapshot() is a pure in-memory
+        walk of our own state — the only realistic failure after invalidate is the
+        backend WRITE, which no probe can cover (see _refresh's ceiling note), so a
+        probe would just double the snapshot cost for nothing.
         """
-        self._store.snapshot(self._now())
         self._checkpoint_fn.invalidate_cache()
         self._checkpoint_fn()
 

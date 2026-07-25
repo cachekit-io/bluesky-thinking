@@ -72,3 +72,23 @@ def test_restore_tolerates_malformed_checkpoints():
     # a valid bucket alongside a broken one is still restored
     mixed = {"v": SNAPSHOT_VERSION, "buckets": [[good, {"n": 5}], [good - 1, "broken"]]}
     assert WindowStore().restore(mixed, NOW) == 1
+
+
+def test_restore_rejects_poisoned_but_valid_counter_values():
+    # Panel round-2 MAJ: a structurally valid checkpoint with a non-numeric counter
+    # VALUE used to pass restore() and detonate later in merged()/most_common(),
+    # where the publisher's except turns it into silent misses for up to 24h.
+    # It must fail at restore, skipping only the poisoned bucket.
+    good = int(NOW // 60)
+    poisoned = {
+        "v": SNAPSHOT_VERSION,
+        "buckets": [
+            [good, {"n": 3, "tags": {"x": "not-a-number"}}],  # poisoned value -> skipped
+            [good - 1, {"n": 2, "tags": {"ok": 2}, "langs": {1: 2}}],  # non-str key -> coerced
+        ],
+    }
+    store = WindowStore()
+    assert store.restore(poisoned, NOW) == 1
+    merged = store.merged("24h", NOW)  # must never raise
+    assert merged.tags.most_common(5) == [("ok", 2)]
+    assert merged.langs == {"1": 2}

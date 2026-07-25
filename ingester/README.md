@@ -33,7 +33,10 @@ Configuration (env or `.env`, via pydantic-settings; secrets are `SecretStr`):
 
 Each window republishes at TTL/2 (locked TTLs: 5m→60 s, 1h→300 s, 24h→900 s), so readers always
 hit. cachekit is decorator-only, so a publish is `invalidate_cache(window)` + call — the miss
-recomputes from the in-memory windows and writes fresh bytes.
+recomputes from the in-memory windows and writes fresh bytes. The recompute is probed *before*
+invalidating so a compute failure never deletes a live key; a backend **write** failure after the
+invalidate can still leave the key briefly deleted until the next tick — cachekit has no atomic
+set/replace, so that gap is inherent to the decorator API.
 
 Values are interop/v1 plain MessagePack, top-level maps with string keys. All carry
 `window` (str), `generated_at` (unix seconds, int), `total_posts` (int), plus:
