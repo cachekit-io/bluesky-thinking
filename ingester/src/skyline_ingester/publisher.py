@@ -148,17 +148,19 @@ class Publisher:
         """Load the last checkpoint into the store; returns buckets restored.
 
         On a cold cache the call is a miss, which harmlessly writes a snapshot
-        of the (empty) store and restores 0 buckets. A read failure (backend error
-        or a malformed checkpoint) degrades to 0 rather than propagating — a bad
-        checkpoint must never crash startup into a permanent boot loop.
+        of the (empty) store and restores 0 buckets. A failure anywhere in the
+        read OR the restore degrades to 0 rather than propagating — a bad
+        checkpoint must never crash startup into a permanent boot loop, and the
+        checkpoint outlives a bad deploy (26h TTL), so a crash here would loop
+        until the TTL expires.
         """
         try:
             snap = self._checkpoint_fn()
+            restored = self._store.restore(snap, self._now())
         except Exception:
             extra = {"operation": "restore_checkpoint"}
-            logger.exception("checkpoint read failed at startup; continuing with a cold window", extra=extra)
+            logger.exception("checkpoint restore failed at startup; continuing with a cold window", extra=extra)
             return 0
-        restored = self._store.restore(snap, self._now())
         if restored:
             logger.info("restored %d window buckets from checkpoint (saved_at=%s)", restored, snap.get("saved_at"))
         return restored

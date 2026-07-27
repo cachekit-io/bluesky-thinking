@@ -72,6 +72,11 @@ plaintext checkpoint would let the backend reconstruct it (`avg = sum / count`),
 zero-knowledge property. Sentiment is not restart-critical — the secure 1h window repopulates within
 an hour of a restart; the aggregate counts above are unaffected.
 
+The checkpoint is equally **untrusted on read-back** (a backend operator can poison it): `restore()`
+validates and coerces every entry, skipping corrupt ones with a warning instead of crashing startup,
+and ignores any legacy `sent` field entirely — restoring it would let a poisoned checkpoint choose
+the plaintext that the next secure publish encrypts.
+
 ## Privacy
 
 Aggregate-only: the extractor reduces each post to counter inputs (tags, links, primary language,

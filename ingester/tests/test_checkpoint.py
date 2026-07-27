@@ -49,6 +49,32 @@ def test_restore_rejects_unknown_version(store):
     assert store.restore({}, NOW) == 0
 
 
+def test_restore_ignores_legacy_sent():
+    # ZK (panel round 3): the plaintext checkpoint is operator-poisonable, so a
+    # restored `sent` would let the backend operator choose the plaintext of the
+    # next @cache.secure publish. Sentiment must come from live ingestion only.
+    good = int(NOW // 60)
+    legacy = {"v": SNAPSHOT_VERSION, "buckets": [[good, {"n": 2, "sent": {"en": [999.0, 1]}}]]}
+    store = WindowStore()
+    assert store.restore(legacy, NOW) == 1  # the bucket's counts still restore
+    assert store.sentiment_value("1h", NOW)["langs"] == {}
+
+
+def test_restore_checkpoint_never_crashes_startup(publisher, backend, monkeypatch):
+    # The boot-loop guard end-to-end: nothing a poisoned checkpoint triggers inside
+    # restore() may propagate through asyncio.run and crash startup — the bad
+    # checkpoint outlives the crash (26h TTL), so a raise here loops until the TTL.
+    publisher.checkpoint()
+    store2 = WindowStore()
+    publisher2 = Publisher(store2, backend, master_key=MASTER_KEY, now_fn=lambda: NOW)
+
+    def boom(snap, now):
+        raise RuntimeError("poisoned checkpoint detonated inside restore")
+
+    monkeypatch.setattr(store2, "restore", boom)
+    assert publisher2.restore_checkpoint() == 0
+
+
 def test_snapshot_omits_sentiment_for_zero_knowledge(store):
     # ZK: `sent` is the cleartext source of the @cache.secure value; the plaintext
     # checkpoint must not carry it, or the backend reconstructs avg = sum / count.
@@ -67,7 +93,7 @@ def test_restore_tolerates_malformed_checkpoints(caplog):
         {"v": SNAPSHOT_VERSION, "buckets": [[good, "not-a-dict"]]},
         {"v": SNAPSHOT_VERSION, "buckets": [["not-an-int", {}]]},
         {"v": SNAPSHOT_VERSION, "buckets": [[good, {"n": "x"}]]},  # non-numeric count
-        {"v": SNAPSHOT_VERSION, "buckets": [[good, {"sent": {"en": [1.0]}}]]},  # bad sent pair
+        {"v": SNAPSHOT_VERSION, "buckets": [[good, {"n": float("inf")}]]},  # int(inf) -> OverflowError
     ]
     for snap in bad:
         assert WindowStore().restore(snap, NOW) == 0  # skipped, no raise
@@ -93,7 +119,6 @@ def test_restore_rejects_poisoned_but_valid_counter_values():
             [good - 2, {"n": -1_000_000}],  # negative count skews ppm -> skipped
             [good - 3, {"n": 1, "tags": {"neg": -5}}],  # negative counter value -> skipped
             [good + 10_000, {"n": 1, "tags": {"future": 1}}],  # future minute parks forever -> skipped
-            [good - 4, {"n": 1, "sent": {"en": [0.5, -3]}}],  # negative sentiment count -> skipped
         ],
     }
     store = WindowStore()

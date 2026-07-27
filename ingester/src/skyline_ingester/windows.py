@@ -1,8 +1,11 @@
 """Sliding minute-bucket windows and the five locked aggregates.
 
 One minute of posts = one Bucket of counters. A window aggregate merges the
-buckets inside (now - window, now]; merges are memoised per (window, now) so
-one publish tick computes each window's merge once for all five operations.
+buckets inside (now - window, now]; merges are memoised per (window, now), so
+on a quiet stream one publish tick computes each window's merge once for all
+five operations. The memo is best-effort: an add() landing mid-merge suppresses
+it (typical under live firehose load) and each caller then recomputes — correct
+either way, just without the shortcut.
 
 ponytail: merge-on-demand walks up to 1440 buckets per 24h publish (~every
 450 s). Move to incremental per-window running totals if that ever shows up
@@ -44,23 +47,17 @@ class Bucket:
 
     def copy(self) -> Bucket:
         # Shallow copies: enough isolation to read the copy while the original
-        # keeps being mutated under the store lock. Counter(mapping) copies via a
-        # per-key Python loop (Counter.update's mapping path); dict.update on a
-        # fresh Counter is one C call and identical here since values are ints.
+        # keeps being mutated under the store lock. Counter.copy() into an empty
+        # destination is a single C-level dict.update (Counter.update's empty
+        # fast path), so each copy stays cheap enough to run under the lock.
         return Bucket(
             n=self.n,
-            tags=_fast_counter_copy(self.tags),
-            links=_fast_counter_copy(self.links),
-            langs=_fast_counter_copy(self.langs),
-            emoji=_fast_counter_copy(self.emoji),
+            tags=self.tags.copy(),
+            links=self.links.copy(),
+            langs=self.langs.copy(),
+            emoji=self.emoji.copy(),
             sent={lang: acc.copy() for lang, acc in self.sent.items()},
         )
-
-
-def _fast_counter_copy(src: Counter) -> Counter:
-    dst: Counter = Counter()
-    dict.update(dst, src)
-    return dst
 
 
 class WindowStore:
@@ -151,7 +148,7 @@ class WindowStore:
     # buckets; the per-chunk lock overhead itself is microseconds.
     _COPY_CHUNK = 16
 
-    def _copy_range(self, lo: int, hi: int) -> list[tuple[int, Bucket]]:
+    def _copy_range(self, lo: float = float("-inf"), hi: float = float("inf")) -> list[tuple[int, Bucket]]:
         """Copy the buckets in (lo, hi] in chunks, releasing the lock between chunks.
 
         Copy, don't reference: add() mutates hot buckets' Counters in place, and
@@ -221,7 +218,7 @@ class WindowStore:
         """
         # Same lock discipline as merged(): chunked copy-under-lock; the
         # most_common() sorts and dict building run outside.
-        copies = sorted(self._copy_range(-(1 << 62), 1 << 62))
+        copies = sorted(self._copy_range())
         return {
             "v": SNAPSHOT_VERSION,
             "saved_at": int(now),
@@ -246,13 +243,18 @@ class WindowStore:
         The checkpoint is untrusted input (plaintext, integrity-unprotected in the
         backend), so every entry is validated and a malformed one is skipped with a
         warning rather than raising — a corrupt or partial checkpoint must never
-        crash startup into a permanent boot loop. Legacy checkpoints may still carry `sent`; it is read
-        into memory here but no longer written back out (see snapshot()).
+        crash startup into a permanent boot loop. Legacy checkpoints may still carry
+        `sent`; it is IGNORED entirely: the checkpoint is operator-poisonable, and
+        restoring `sent` would let the backend operator choose the plaintext that the
+        next @cache.secure publish encrypts — the exact value the zero-knowledge
+        boundary exists to protect. Sentiment repopulates from live ingestion only.
         """
         if not isinstance(snap, dict) or snap.get("v") != SNAPSHOT_VERSION:
+            logger.warning("ignoring checkpoint with unexpected shape/version: %.80r", snap)
             return 0
         buckets = snap.get("buckets")
         if not isinstance(buckets, list):
+            logger.warning("ignoring checkpoint with malformed buckets: %.80r", buckets)
             return 0
         now_min = int(now // 60)
         floor = now_min - self._max
@@ -276,9 +278,8 @@ class WindowStore:
                         links=_coerced_counter(d.get("links")),
                         langs=_coerced_counter(d.get("langs")),
                         emoji=_coerced_counter(d.get("emoji")),
-                        sent={str(lang): [float(s), _non_negative(int(c))] for lang, (s, c) in (d.get("sent") or {}).items()},
                     )
-                except (ValueError, TypeError, AttributeError) as exc:
+                except (ValueError, TypeError, AttributeError, OverflowError) as exc:
                     # %.120r: entries come from the untrusted checkpoint and can
                     # be arbitrarily large — cap what one bad bucket puts in a log.
                     logger.warning("skipping corrupt checkpoint bucket: %s: %.120r", exc, item)
@@ -297,6 +298,6 @@ def _non_negative(value: int) -> int:
 
 
 def _coerced_counter(data) -> Counter:
-    # str keys / non-negative int values, or ValueError|TypeError — restore()
-    # skips the bucket.
+    # str keys / non-negative int values, or ValueError|TypeError|OverflowError
+    # (int(float("inf"))) — restore() skips the bucket.
     return Counter({str(k): _non_negative(int(v)) for k, v in (data or {}).items()})

@@ -38,6 +38,9 @@ def ingest_raw(raw: str | bytes, store: WindowStore, *, now_fn: Callable[[], flo
         return None
     time_us = event.get("time_us") if isinstance(event, dict) else None
     if not isinstance(time_us, int):
+        # Same visibility as the sibling drops: a Jetstream schema change here
+        # would otherwise be 100% silent data loss under a healthy-looking loop.
+        logger.warning("dropping Jetstream frame without int time_us")
         return None
     if time_us / 1_000_000 > now_fn() + MAX_FUTURE_SKEW_SECONDS:
         logger.warning("dropping future-dated Jetstream event (time_us=%d)", time_us)
