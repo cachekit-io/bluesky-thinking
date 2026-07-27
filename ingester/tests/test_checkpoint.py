@@ -1,5 +1,7 @@
 """Checkpoint/restore: a restart must not zero the 24h window."""
 
+import logging
+
 from skyline_ingester.publisher import Publisher
 from skyline_ingester.windows import SNAPSHOT_VERSION, WindowStore
 
@@ -55,7 +57,7 @@ def test_snapshot_omits_sentiment_for_zero_knowledge(store):
     assert all("sent" not in d for _minute, d in snap["buckets"])
 
 
-def test_restore_tolerates_malformed_checkpoints():
+def test_restore_tolerates_malformed_checkpoints(caplog):
     # A corrupt / partial checkpoint must degrade to a skip, never raise — a raise
     # here propagates through asyncio.run and crashes startup into a boot loop.
     good = int(NOW // 60)
@@ -69,9 +71,12 @@ def test_restore_tolerates_malformed_checkpoints():
     ]
     for snap in bad:
         assert WindowStore().restore(snap, NOW) == 0  # skipped, no raise
-    # a valid bucket alongside a broken one is still restored
+    # a valid bucket alongside a broken one is still restored — and the skip is
+    # logged, not silent: an operator must be able to see checkpoint corruption.
     mixed = {"v": SNAPSHOT_VERSION, "buckets": [[good, {"n": 5}], [good - 1, "broken"]]}
-    assert WindowStore().restore(mixed, NOW) == 1
+    with caplog.at_level(logging.WARNING, logger="skyline_ingester.windows"):
+        assert WindowStore().restore(mixed, NOW) == 1
+    assert any("corrupt checkpoint bucket" in r.getMessage() for r in caplog.records)
 
 
 def test_restore_rejects_poisoned_but_valid_counter_values():

@@ -157,10 +157,12 @@ def test_concurrent_add_and_read_is_race_free():
 
     old_interval = sys.getswitchinterval()
     sys.setswitchinterval(1e-9)
-    t = threading.Thread(target=writer)
-    t.start()
-    start.wait()
+    # daemon: a genuinely deadlocked writer must fail the is_alive() assert
+    # below, not wedge interpreter shutdown after the join times out.
+    t = threading.Thread(target=writer, daemon=True)
     try:
+        t.start()
+        start.wait()
         for i in range(2000):
             now = (20_000_400 + i) * 60.0
             store.snapshot(now)
@@ -171,4 +173,5 @@ def test_concurrent_add_and_read_is_race_free():
         t.join(timeout=10)
         sys.setswitchinterval(old_interval)
 
+    assert not t.is_alive(), "writer thread did not finish (possible deadlock)"
     assert not errors, f"race detected: {errors[:3]}"

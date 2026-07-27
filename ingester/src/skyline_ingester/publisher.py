@@ -90,7 +90,7 @@ class Publisher:
     def secure_enabled(self) -> bool:
         return self._secure_fn is not None
 
-    def _refresh(self, fn: Callable, window: str, recompute: Callable[[], object], label: str) -> int:
+    def _refresh(self, fn: Callable, window: str, recompute: Callable[[], object], operation: str) -> int:
         """Recompute the value, then invalidate + republish one wrapper.
 
         cachekit is decorator-only, so a fresh write is invalidate-then-call — and
@@ -110,7 +110,7 @@ class Publisher:
             fn(window)
             return 1
         except Exception:
-            logger.exception("publish failed: %s", label)
+            logger.exception("publish failed: %s/%s", operation, window, extra={"operation": operation, "window": window})
             return 0
 
     def publish_window(self, window: str) -> int:
@@ -122,14 +122,14 @@ class Publisher:
                 fn,
                 window,
                 lambda operation=operation: self._store.build_value(operation, window, self._now(), self._top_n),
-                f"{operation}/{window}",
+                operation,
             )
         if window == SECURE_WINDOW and self._secure_fn is not None:
             published += self._refresh(
                 self._secure_fn,
                 window,
                 lambda: self._store.sentiment_value(window, self._now()),
-                f"language_sentiment/{window}",
+                "language_sentiment",
             )
         return published
 
@@ -155,7 +155,8 @@ class Publisher:
         try:
             snap = self._checkpoint_fn()
         except Exception:
-            logger.exception("checkpoint read failed at startup; continuing with a cold window")
+            extra = {"operation": "restore_checkpoint"}
+            logger.exception("checkpoint read failed at startup; continuing with a cold window", extra=extra)
             return 0
         restored = self._store.restore(snap, self._now())
         if restored:

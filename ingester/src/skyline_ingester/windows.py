@@ -11,11 +11,14 @@ in a profile.
 
 from __future__ import annotations
 
+import logging
 import threading
 from collections import Counter
 from dataclasses import dataclass, field
 
 from skyline_ingester.extract import PostFeatures
+
+logger = logging.getLogger(__name__)
 
 WINDOW_MINUTES = {"5m": 5, "1h": 60, "24h": 1440}
 # Locked TTLs (docs/architecture.md): 5m -> 60 s, 1h -> 300 s, 24h -> 900 s.
@@ -241,9 +244,9 @@ class WindowStore:
         """Load a snapshot(); returns the number of buckets restored (0 = nothing usable).
 
         The checkpoint is untrusted input (plaintext, integrity-unprotected in the
-        backend), so every entry is validated and a malformed one is skipped rather
-        than raising — a corrupt or partial checkpoint must never crash startup into
-        a permanent boot loop. Legacy checkpoints may still carry `sent`; it is read
+        backend), so every entry is validated and a malformed one is skipped with a
+        warning rather than raising — a corrupt or partial checkpoint must never
+        crash startup into a permanent boot loop. Legacy checkpoints may still carry `sent`; it is read
         into memory here but no longer written back out (see snapshot()).
         """
         if not isinstance(snap, dict) or snap.get("v") != SNAPSHOT_VERSION:
@@ -275,7 +278,10 @@ class WindowStore:
                         emoji=_coerced_counter(d.get("emoji")),
                         sent={str(lang): [float(s), _non_negative(int(c))] for lang, (s, c) in (d.get("sent") or {}).items()},
                     )
-                except (ValueError, TypeError, AttributeError):
+                except (ValueError, TypeError, AttributeError) as exc:
+                    # %.120r: entries come from the untrusted checkpoint and can
+                    # be arbitrarily large — cap what one bad bucket puts in a log.
+                    logger.warning("skipping corrupt checkpoint bucket: %s: %.120r", exc, item)
                     continue
                 self._buckets[minute] = b
                 restored += 1
