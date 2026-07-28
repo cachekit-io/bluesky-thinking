@@ -33,7 +33,10 @@ Configuration (env or `.env`, via pydantic-settings; secrets are `SecretStr`):
 
 Each window republishes at TTL/2 (locked TTLs: 5m→60 s, 1h→300 s, 24h→900 s), so readers always
 hit. cachekit is decorator-only, so a publish is `invalidate_cache(window)` + call — the miss
-recomputes from the in-memory windows and writes fresh bytes.
+recomputes from the in-memory windows and writes fresh bytes. The recompute is probed *before*
+invalidating so a compute failure never deletes a live key; a backend **write** failure after the
+invalidate can still leave the key briefly deleted until the next tick — cachekit has no atomic
+set/replace, so that gap is inherent to the decorator API.
 
 Values are interop/v1 plain MessagePack, top-level maps with string keys. All carry
 `window` (str), `generated_at` (unix seconds, int), `total_posts` (int), plus:
@@ -51,7 +54,9 @@ Values are interop/v1 plain MessagePack, top-level maps with string keys. All ca
 `language_sentiment(window="1h")` — per-language lexicon sentiment `{lang: {avg, n}}` — is written
 via `@cache.secure(master_key=…)` auto mode, `namespace="bluesky-thinking"`. Its key is the
 Python-only 7-segment auto key (`ns:bluesky-thinking:func:…`), and the backend stores ciphertext
-only (asserted in tests). Ciphertext-only verification against the live SaaS is Stage 3.
+only (asserted in tests). Zero-knowledge holds end-to-end: the sentiment value is encrypted here and
+its plaintext source is never written to any other key (the checkpoint omits it — see below), so the
+backend never sees it in the clear. Ciphertext-only verification against the live SaaS is Stage 3.
 
 ### Checkpointing
 
@@ -60,6 +65,17 @@ Window state is checkpointed into CacheKit (auto-mode key, TTL 26 h) every
 window (the spec's Render-restart mitigation). Per-minute counters are truncated to their top-K
 entries in the snapshot — long-tail trending counts are approximate after a restore;
 `posts_per_minute` and `lang_mix` stay exact.
+
+The checkpoint is stored **unencrypted**, so it deliberately omits the per-language sentiment
+totals: those are the cleartext source of the `@cache.secure` value, and persisting them in the
+plaintext checkpoint would let the backend reconstruct it (`avg = sum / count`), breaking the
+zero-knowledge property. Sentiment is not restart-critical — the secure 1h window repopulates within
+an hour of a restart; the aggregate counts above are unaffected.
+
+The checkpoint is equally **untrusted on read-back** (a backend operator can poison it): `restore()`
+validates and coerces every entry, skipping corrupt ones with a warning instead of crashing startup,
+and ignores any legacy `sent` field entirely — restoring it would let a poisoned checkpoint choose
+the plaintext that the next secure publish encrypts.
 
 ## Privacy
 

@@ -90,28 +90,57 @@ class Publisher:
     def secure_enabled(self) -> bool:
         return self._secure_fn is not None
 
+    def _refresh(self, fn: Callable, window: str, recompute: Callable[[], object], operation: str) -> int:
+        """Recompute the value, then invalidate + republish one wrapper.
+
+        cachekit is decorator-only, so a fresh write is invalidate-then-call — and
+        if the recompute would raise we must find out BEFORE invalidating, or a
+        failed recompute leaves the key deleted (a cache miss on the metered-miss
+        path) until the next tick.
+
+        Honest ceiling: the probe only covers RECOMPUTE failure. The wrapper call
+        after invalidate is itself recompute-then-backend-WRITE, and a write
+        failure at that point still leaves the key deleted until the next tick —
+        cachekit has no atomic set/replace (confirmed against 0.15.0), so this is
+        as close as the decorator API allows.
+        """
+        try:
+            recompute()
+            fn.invalidate_cache(window)
+            fn(window)
+            return 1
+        except Exception:
+            logger.exception("publish failed: %s/%s", operation, window, extra={"operation": operation, "window": window})
+            return 0
+
     def publish_window(self, window: str) -> int:
         """Refresh every operation for one window; returns how many published."""
         published = 0
         for operation in OPERATIONS:
             fn = self._publish_fns[(operation, window)]
-            try:
-                fn.invalidate_cache(window)
-                fn(window)
-                published += 1
-            except Exception:
-                logger.exception("publish failed: %s/%s", operation, window)
+            published += self._refresh(
+                fn,
+                window,
+                lambda operation=operation: self._store.build_value(operation, window, self._now(), self._top_n),
+                operation,
+            )
         if window == SECURE_WINDOW and self._secure_fn is not None:
-            try:
-                self._secure_fn.invalidate_cache(window)
-                self._secure_fn(window)
-                published += 1
-            except Exception:
-                logger.exception("secure publish failed: language_sentiment/%s", window)
+            published += self._refresh(
+                self._secure_fn,
+                window,
+                lambda: self._store.sentiment_value(window, self._now()),
+                "language_sentiment",
+            )
         return published
 
     def checkpoint(self) -> None:
-        """Force-write the current window state (restart insurance)."""
+        """Force-write the current window state (restart insurance).
+
+        No recompute probe here (unlike _refresh): snapshot() is a pure in-memory
+        walk of our own state — the only realistic failure after invalidate is the
+        backend WRITE, which no probe can cover (see _refresh's ceiling note), so a
+        probe would just double the snapshot cost for nothing.
+        """
         self._checkpoint_fn.invalidate_cache()
         self._checkpoint_fn()
 
@@ -119,10 +148,19 @@ class Publisher:
         """Load the last checkpoint into the store; returns buckets restored.
 
         On a cold cache the call is a miss, which harmlessly writes a snapshot
-        of the (empty) store and restores 0 buckets.
+        of the (empty) store and restores 0 buckets. A failure anywhere in the
+        read OR the restore degrades to 0 rather than propagating — a bad
+        checkpoint must never crash startup into a permanent boot loop, and the
+        checkpoint outlives a bad deploy (26h TTL), so a crash here would loop
+        until the TTL expires.
         """
-        snap = self._checkpoint_fn()
-        restored = self._store.restore(snap, self._now())
+        try:
+            snap = self._checkpoint_fn()
+            restored = self._store.restore(snap, self._now())
+        except Exception:
+            extra = {"operation": "restore_checkpoint"}
+            logger.exception("checkpoint restore failed at startup; continuing with a cold window", extra=extra)
+            return 0
         if restored:
             logger.info("restored %d window buckets from checkpoint (saved_at=%s)", restored, snap.get("saved_at"))
         return restored

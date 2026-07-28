@@ -64,6 +64,35 @@ def test_ingest_raw_returns_cursor_and_skips_garbage():
     assert ingest_raw('{"kind": "commit", "time_us": 123}', store) == 123
 
 
+def test_ingest_raw_drops_future_dated_events(fixture_lines):
+    # Panel round-2 CRIT: one far-future time_us sets a retention floor in _prune
+    # that wipes every real bucket (and, as a cursor, would skip everything on the
+    # next reconnect). Future-dated frames are dropped whole at the ingest boundary.
+    import json
+
+    from .conftest import NOW
+
+    store = WindowStore()
+    now_fn = lambda: NOW  # noqa: E731
+    for line in fixture_lines:
+        ingest_raw(line, store, now_fn=now_fn)
+    healthy = store.merged("24h", NOW).n
+    assert healthy == FIXTURE_TOTALS["24h"]
+
+    poison = json.loads(fixture_lines[0])
+    poison["time_us"] = int((NOW + 10_000_000 * 60) * 1_000_000)  # ~19 years ahead
+    assert ingest_raw(json.dumps(poison), store, now_fn=now_fn) is None  # no cursor advance
+    # NOW + 1 forces a fresh merge (same minute, different memo key) — asserting at
+    # NOW would just re-read the memoised Bucket and pass even on a wiped store.
+    assert store.merged("24h", NOW + 1).n == healthy  # window NOT wiped
+    assert store.snapshot(NOW)["buckets"], "checkpoint still has the real buckets"
+
+    # small clock skew stays acceptable
+    slight = json.loads(fixture_lines[0])
+    slight["time_us"] = int((NOW + 60) * 1_000_000)
+    assert ingest_raw(json.dumps(slight), store, now_fn=now_fn) == slight["time_us"]
+
+
 def test_fixture_totals_match_windows(store):
     from .conftest import NOW
 

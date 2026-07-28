@@ -1,5 +1,8 @@
 """Window aggregation and expiry against the recorded fixture stream."""
 
+import sys
+import threading
+
 from skyline_ingester.extract import PostFeatures
 from skyline_ingester.windows import WindowStore
 
@@ -65,6 +68,30 @@ def test_windows_expire(store):
     assert store.merged("24h", NOW + 65 * 60).n == FIXTURE_TOTALS["24h"]
 
 
+def test_memo_is_not_resurrected_by_a_concurrent_add(store):
+    # Regression (CodeRabbit on PR #5): merged() computes outside the lock; if an
+    # add() lands mid-merge it clears the memo, and blindly re-inserting the
+    # pre-add() result would serve it stale to every same-second caller. The
+    # generation counter must suppress that memo insert.
+    before = store.merged("5m", NOW).n
+
+    orig = store._copy_range
+
+    def add_mid_merge(lo, hi):
+        copies = orig(lo, hi)
+        store.add(PostFeatures(ts=NOW, lang="en", hashtags=[], links=[], emoji=[], sentiment=None))
+        return copies
+
+    store._copy_range = add_mid_merge
+    try:
+        stale = store.merged("5m", NOW + 1)  # computed from the pre-add copies...
+    finally:
+        store._copy_range = orig
+    assert stale.n == before
+    # ...but NOT memoised: the next same-second call recomputes and sees the add.
+    assert store.merged("5m", NOW + 1).n == before + 1
+
+
 def test_memo_does_not_leak_across_now(store):
     a = store.merged("5m", NOW)
     b = store.merged("5m", NOW + 6 * 60)
@@ -79,3 +106,72 @@ def test_prune_drops_buckets_beyond_24h():
     s.add(PostFeatures(ts=base + 1441 * 60, lang="en", hashtags=["new"], links=[], emoji=[], sentiment=None))
     assert len(s._buckets) == 1  # the 1441-min-old bucket was pruned on insert
     assert "new" in s.merged("24h", base + 1441 * 60).tags
+
+
+def test_prune_recovers_after_a_future_timestamp():
+    # Regression: max()-anchored pruning let one bogus far-future event set a
+    # permanent retention floor that dropped every subsequent real event on insert
+    # (window stuck at zero until restart). Anchoring the floor to the minute being
+    # added lets the window recover; the stray future bucket is excluded by merged().
+    s = WindowStore()
+    base_min = 20_000_000
+    s.add(PostFeatures(ts=(base_min + 10_000_000) * 60.0, lang="en", hashtags=["bogus"], links=[], emoji=[], sentiment=None))
+    for _ in range(3):  # real events arriving after the bogus one must still register
+        s.add(PostFeatures(ts=base_min * 60.0, lang="en", hashtags=["real"], links=[], emoji=[], sentiment=None))
+    m = s.merged("5m", base_min * 60.0)
+    assert m.n == 3
+    assert m.tags["real"] == 3
+    assert "bogus" not in m.tags
+
+
+def test_concurrent_add_and_read_is_race_free():
+    # Regression: consume() calls add() on the event-loop thread while the publish/
+    # checkpoint loops read via asyncio.to_thread. Unsynchronised, iterating _buckets
+    # while add() inserts/prunes raised "RuntimeError: dictionary changed size during
+    # iteration". A tiny GIL switch interval forces a thread hand-off mid-iteration so
+    # the race is deterministic without the lock; with the lock it can never happen.
+    def _post(offset: int) -> PostFeatures:
+        return PostFeatures(
+            ts=(20_000_000 + offset) * 60.0,
+            lang="en",
+            hashtags=[f"t{offset % 30}"],
+            links=[],
+            emoji=["🔥"],
+            sentiment=0.5,
+        )
+
+    store = WindowStore(max_minutes=400)
+    for i in range(400):  # seed buckets so one iteration spans several switch points
+        store.add(_post(i))
+
+    errors: list[str] = []
+    start = threading.Barrier(2)
+
+    def writer():
+        start.wait()
+        try:
+            for i in range(5000):
+                store.add(_post(400 + i))
+        except Exception as exc:
+            errors.append(repr(exc))
+
+    old_interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-9)
+    # daemon: a genuinely deadlocked writer must fail the is_alive() assert
+    # below, not wedge interpreter shutdown after the join times out.
+    t = threading.Thread(target=writer, daemon=True)
+    try:
+        t.start()
+        start.wait()
+        for i in range(2000):
+            now = (20_000_400 + i) * 60.0
+            store.snapshot(now)
+            store.merged("24h", now)
+    except Exception as exc:
+        errors.append(repr(exc))
+    finally:
+        t.join(timeout=10)
+        sys.setswitchinterval(old_interval)
+
+    assert not t.is_alive(), "writer thread did not finish (possible deadlock)"
+    assert not errors, f"race detected: {errors[:3]}"

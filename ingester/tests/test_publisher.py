@@ -60,3 +60,19 @@ def test_republish_refreshes_stale_values(publisher, backend, store):
     publisher.publish_window("5m")  # invalidate + recompute, not a cache hit
     after = decode_interop_value(backend.get(key))
     assert after["total_posts"] == before["total_posts"] + 1
+
+
+def test_failed_recompute_keeps_the_live_key(publisher, backend, store, monkeypatch):
+    # Regression: publish was invalidate-then-recompute, so a recompute failure left
+    # the key deleted (a miss on the metered-miss path). Recompute now runs first, so
+    # a failure leaves the previously published entry intact.
+    publisher.publish_window("5m")
+    key = generate_interop_key(NAMESPACE, "trending_hashtags", ["5m"])
+    assert backend.get(key) is not None
+
+    def boom(*_a, **_k):
+        raise RuntimeError("recompute failed")
+
+    monkeypatch.setattr(store, "build_value", boom)
+    assert publisher.publish_window("5m") == 0  # every op fails its recompute probe
+    assert backend.get(key) is not None  # ...and the live key was NOT invalidated

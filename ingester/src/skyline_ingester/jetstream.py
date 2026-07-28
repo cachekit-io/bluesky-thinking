@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
+from collections.abc import Callable
 from urllib.parse import urlencode
 
 import websockets
@@ -15,20 +17,38 @@ from skyline_ingester.windows import WindowStore
 logger = logging.getLogger(__name__)
 
 MAX_BACKOFF = 60.0
+# Payload timestamps are untrusted. One far-future time_us would (a) set a
+# retention floor in WindowStore._prune that instantly evicts every real bucket
+# — wiping the restart-critical 24h window and poisoning the next checkpoint —
+# and (b) as a resume cursor, skip every real event on the next reconnect.
+# Anything beyond this skew over wall-clock is dropped whole.
+MAX_FUTURE_SKEW_SECONDS = 300.0
 
 
-def ingest_raw(raw: str | bytes, store: WindowStore) -> int | None:
-    """Parse one Jetstream frame into the store; returns the event's time_us cursor."""
+def ingest_raw(raw: str | bytes, store: WindowStore, *, now_fn: Callable[[], float] = time.time) -> int | None:
+    """Parse one Jetstream frame into the store; returns the event's time_us cursor.
+
+    Future-dated events (beyond MAX_FUTURE_SKEW_SECONDS of wall-clock) are dropped
+    entirely — neither aggregated nor used to advance the cursor.
+    """
     try:
         event = json.loads(raw)
     except (ValueError, UnicodeDecodeError):
         logger.warning("unparseable Jetstream frame (%d bytes)", len(raw))
         return None
+    time_us = event.get("time_us") if isinstance(event, dict) else None
+    if not isinstance(time_us, int):
+        # Same visibility as the sibling drops: a Jetstream schema change here
+        # would otherwise be 100% silent data loss under a healthy-looking loop.
+        logger.warning("dropping Jetstream frame without int time_us")
+        return None
+    if time_us / 1_000_000 > now_fn() + MAX_FUTURE_SKEW_SECONDS:
+        logger.warning("dropping future-dated Jetstream event (time_us=%d)", time_us)
+        return None
     feats = extract_post(event)
     if feats is not None:
         store.add(feats)
-    time_us = event.get("time_us") if isinstance(event, dict) else None
-    return time_us if isinstance(time_us, int) else None
+    return time_us
 
 
 def subscribe_url(base: str, cursor: int | None = None) -> str:

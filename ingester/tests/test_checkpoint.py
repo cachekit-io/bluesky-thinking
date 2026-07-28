@@ -1,7 +1,9 @@
 """Checkpoint/restore: a restart must not zero the 24h window."""
 
+import logging
+
 from skyline_ingester.publisher import Publisher
-from skyline_ingester.windows import WindowStore
+from skyline_ingester.windows import SNAPSHOT_VERSION, WindowStore
 
 from .conftest import FIXTURE_TOTALS, MASTER_KEY, NOW
 
@@ -45,3 +47,83 @@ def test_snapshot_truncates_per_bucket_counters(store):
 def test_restore_rejects_unknown_version(store):
     assert store.restore({"v": 999, "buckets": []}, NOW) == 0
     assert store.restore({}, NOW) == 0
+
+
+def test_restore_ignores_legacy_sent():
+    # ZK (panel round 3): the plaintext checkpoint is operator-poisonable, so a
+    # restored `sent` would let the backend operator choose the plaintext of the
+    # next @cache.secure publish. Sentiment must come from live ingestion only.
+    good = int(NOW // 60)
+    legacy = {"v": SNAPSHOT_VERSION, "buckets": [[good, {"n": 2, "sent": {"en": [999.0, 1]}}]]}
+    store = WindowStore()
+    assert store.restore(legacy, NOW) == 1  # the bucket's counts still restore
+    assert store.sentiment_value("1h", NOW)["langs"] == {}
+
+
+def test_restore_checkpoint_never_crashes_startup(publisher, backend, monkeypatch):
+    # The boot-loop guard end-to-end: nothing a poisoned checkpoint triggers inside
+    # restore() may propagate through asyncio.run and crash startup — the bad
+    # checkpoint outlives the crash (26h TTL), so a raise here loops until the TTL.
+    publisher.checkpoint()
+    store2 = WindowStore()
+    publisher2 = Publisher(store2, backend, master_key=MASTER_KEY, now_fn=lambda: NOW)
+
+    def boom(snap, now):
+        raise RuntimeError("poisoned checkpoint detonated inside restore")
+
+    monkeypatch.setattr(store2, "restore", boom)
+    assert publisher2.restore_checkpoint() == 0
+
+
+def test_snapshot_omits_sentiment_for_zero_knowledge(store):
+    # ZK: `sent` is the cleartext source of the @cache.secure value; the plaintext
+    # checkpoint must not carry it, or the backend reconstructs avg = sum / count.
+    snap = store.snapshot(NOW)
+    assert snap["buckets"], "fixture stream should produce buckets"
+    assert all("sent" not in d for _minute, d in snap["buckets"])
+
+
+def test_restore_tolerates_malformed_checkpoints(caplog):
+    # A corrupt / partial checkpoint must degrade to a skip, never raise — a raise
+    # here propagates through asyncio.run and crashes startup into a boot loop.
+    good = int(NOW // 60)
+    bad = [
+        {"v": SNAPSHOT_VERSION, "buckets": "not-a-list"},
+        {"v": SNAPSHOT_VERSION, "buckets": [[good]]},  # item is not a (minute, dict) pair
+        {"v": SNAPSHOT_VERSION, "buckets": [[good, "not-a-dict"]]},
+        {"v": SNAPSHOT_VERSION, "buckets": [["not-an-int", {}]]},
+        {"v": SNAPSHOT_VERSION, "buckets": [[good, {"n": "x"}]]},  # non-numeric count
+        {"v": SNAPSHOT_VERSION, "buckets": [[good, {"n": float("inf")}]]},  # int(inf) -> OverflowError
+    ]
+    for snap in bad:
+        assert WindowStore().restore(snap, NOW) == 0  # skipped, no raise
+    # a valid bucket alongside a broken one is still restored — and the skip is
+    # logged, not silent: an operator must be able to see checkpoint corruption.
+    mixed = {"v": SNAPSHOT_VERSION, "buckets": [[good, {"n": 5}], [good - 1, "broken"]]}
+    with caplog.at_level(logging.WARNING, logger="skyline_ingester.windows"):
+        assert WindowStore().restore(mixed, NOW) == 1
+    assert any("corrupt checkpoint bucket" in r.getMessage() for r in caplog.records)
+
+
+def test_restore_rejects_poisoned_but_valid_counter_values():
+    # Panel round-2 MAJ: a structurally valid checkpoint with a non-numeric counter
+    # VALUE used to pass restore() and detonate later in merged()/most_common(),
+    # where the publisher's except turns it into silent misses for up to 24h.
+    # It must fail at restore, skipping only the poisoned bucket.
+    good = int(NOW // 60)
+    poisoned = {
+        "v": SNAPSHOT_VERSION,
+        "buckets": [
+            [good, {"n": 3, "tags": {"x": "not-a-number"}}],  # poisoned value -> skipped
+            [good - 1, {"n": 2, "tags": {"ok": 2}, "langs": {1: 2}}],  # non-str key -> coerced
+            [good - 2, {"n": -1_000_000}],  # negative count skews ppm -> skipped
+            [good - 3, {"n": 1, "tags": {"neg": -5}}],  # negative counter value -> skipped
+            [good + 10_000, {"n": 1, "tags": {"future": 1}}],  # future minute parks forever -> skipped
+        ],
+    }
+    store = WindowStore()
+    assert store.restore(poisoned, NOW) == 1
+    merged = store.merged("24h", NOW)  # must never raise
+    assert merged.tags.most_common(5) == [("ok", 2)]
+    assert merged.langs == {"1": 2}
+    assert merged.n == 2
