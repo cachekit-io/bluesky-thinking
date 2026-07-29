@@ -72,9 +72,16 @@ async def main() -> int:
     started = time.perf_counter()
     try:
         results = await asyncio.gather(*(stampede_probe("5m") for _ in range(N)))
+        # Stop the clock before cleanup: elapsed measures the stampede window
+        # only, not the cleanup round-trip.
+        elapsed = time.perf_counter() - started
     finally:
-        backend.delete(key)  # leave the namespace as we found it, even on failure
-    elapsed = time.perf_counter() - started
+        # Leave the namespace as we found it, even on failure — but never let
+        # a failing cleanup mask the probe's own exception.
+        try:
+            backend.delete(key)
+        except Exception:
+            logging.exception("probe-key cleanup failed: %s", key)
 
     distinct = {tuple(sorted(r.items())) for r in results}
     print(f"\n{N} concurrent invocations finished in {elapsed:.2f}s")
