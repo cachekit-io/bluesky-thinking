@@ -21,6 +21,13 @@ backend failure → 502, undecodable entry → 500, missing `CACHEKIT_API_KEY`
 secret → 503. Success body: `{ operation, window, data }` where `data` is the
 decoded interop/v1 MessagePack map as written by the ingester.
 
+Aggregate reads (not `/api/stats`) are additionally fronted by the Cloudflare
+POP cache — 200s for 15 s, 404s for 10 s (negative caching) — so unauthenticated
+public traffic can't mint billable misses against the metered CachekitIO
+backend at will (Stage-3 panel finding, closed in LAB-738). A POP-cached
+response replays the stored `X-Cache` header; per-POP scope means at most one
+backend read per URL per POP per TTL.
+
 ## Develop
 
 ```bash

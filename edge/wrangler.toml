@@ -23,6 +23,19 @@ compatibility_flags = ["nodejs_compat"]
 # explicit config-level opt-out (trusted operator config, same trust model as
 # the Python CACHEKIT_ALLOW_CUSTOM_HOST env var).
 CACHEKIT_API_URL = "https://api.dev.cachekit.io"
+# Keep-alive target (LAB-738 AC-1): the Render free tier spins the ingester
+# down after 15 min without inbound traffic, and its Jetstream socket is
+# outbound so it doesn't count. Render URLs are name-based but globally
+# unique — if the first deploy lands with a suffixed URL, update this value
+# AND the INGESTER_URL default in stage4/verify.sh.
+INGESTER_HEALTH_URL = "https://skyline-ingester.onrender.com/health"
+
+# Cron keep-alive (LAB-738 AC-1): ping the ingester's /health every 10
+# minutes from the edge worker's scheduled handler. Cloudflare cron triggers
+# are free; Render's own cron jobs are not. ~4.3k invocations/month, counted
+# in the README cost table.
+[triggers]
+crons = ["*/10 * * * *"]
 
 # Stage 3 (AC-3): the Rust-WASM hot path, reached via service binding — not
 # a public URL. Every served aggregate is integrity-checked there first.

@@ -12,6 +12,7 @@ from urllib.parse import urlencode
 import websockets
 
 from skyline_ingester.extract import POST_COLLECTION, extract_post
+from skyline_ingester.health import HealthState
 from skyline_ingester.windows import WindowStore
 
 logger = logging.getLogger(__name__)
@@ -58,7 +59,7 @@ def subscribe_url(base: str, cursor: int | None = None) -> str:
     return base + ("&" if "?" in base else "?") + urlencode(params)
 
 
-async def consume(base_url: str, store: WindowStore) -> None:
+async def consume(base_url: str, store: WindowStore, health: HealthState) -> None:
     """Consume forever, reconnecting with backoff and resuming from the last cursor.
 
     ponytail: resumes at the last seen time_us with no rewind — a reconnect can
@@ -72,14 +73,24 @@ async def consume(base_url: str, store: WindowStore) -> None:
         try:
             async with websockets.connect(url) as ws:
                 logger.info("connected to Jetstream: %s", url)
-                backoff = 1.0
+                health.jetstream_connected = True
                 async for raw in ws:
                     time_us = ingest_raw(raw, store)
                     if time_us is not None:
+                        # Reset on real events, not on handshake: a server that
+                        # accepts-then-closes must not defeat the backoff.
+                        backoff = 1.0
                         cursor = time_us
+                        health.event()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             logger.warning("Jetstream connection lost (%s: %s); reconnecting in %.0fs", type(exc).__name__, exc, backoff)
-            await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, MAX_BACKOFF)
+        # Both exits land here — error AND clean close (the async-for ends
+        # without raising). Backing off both plugs the zero-delay reconnect
+        # spin a drain/policy close would otherwise cause (expert-panel
+        # finding), and the flag drops BEFORE the sleep so /health goes 503
+        # the moment the socket dies, not after the backoff.
+        health.jetstream_connected = False
+        await asyncio.sleep(backoff)
+        backoff = min(backoff * 2, MAX_BACKOFF)

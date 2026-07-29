@@ -13,14 +13,30 @@ interface Env {
   CACHEKIT_API_KEY?: string;
   /** Override for the dev instance / tests; defaults to https://api.cachekit.io. */
   CACHEKIT_API_URL?: string;
+  /** Keep-alive target — the Render ingester's /health (wrangler [vars]). */
+  INGESTER_HEALTH_URL?: string;
   /** Service binding to the Rust-WASM hot-path Worker (wrangler [[services]]). */
   HOTPATH?: HotpathBinding;
 }
 
 let backend: Backend | null = null;
 
+/** Structural slice of ExecutionContext (repo doesn't use workers-types). */
+interface Ctx {
+  waitUntil(promise: Promise<unknown>): void;
+}
+
+/** Structural slice of the Workers-only caches.default (not in lib.dom). */
+interface EdgeCache {
+  match(key: string): Promise<Response | undefined>;
+  put(key: string, response: Response): Promise<void>;
+}
+
+/** POP-cache TTLs for the miss-minting guard below. */
+const EDGE_CACHE_TTL_SECONDS = { hit: 15, negative: 10 } as const;
+
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx?: Ctx): Promise<Response> {
     const url = new URL(request.url);
 
     if (!url.pathname.startsWith('/api/')) {
@@ -42,14 +58,78 @@ export default {
       );
     }
 
-    backend ??= cachekitio({
-      apiKey: env.CACHEKIT_API_KEY,
-      // A non-default apiUrl (the dev instance) is outside the SDK's SSRF
-      // allowlist; the value comes from wrangler config, so opting out is
-      // an operator decision, not a request-time one.
-      ...(env.CACHEKIT_API_URL ? { apiUrl: env.CACHEKIT_API_URL, allowCustomHost: true } : {}),
-    });
+    // Miss-minting guard (Stage-3 panel finding, closed in LAB-738): these
+    // URLs are public and the backend bills misses, so an unauthenticated
+    // client must not be able to reach CachekitIO at will. Front every
+    // aggregate read with the POP cache, 404s included (negative caching) —
+    // repeat requests cost a Cloudflare cache hit, not a billable miss.
+    // /api/stats stays uncached: it's per-isolate module state, no backend
+    // call to protect, and caching it would blind the dashboard's counters.
+    // Scope note: caches.default is per-POP, so this bounds minting to one
+    // backend read per URL per POP per TTL rather than eliminating it.
+    // absent under vitest / the node demo script
+    const edgeCache = (globalThis as { caches?: { default?: EdgeCache } }).caches?.default;
+    const cacheable = edgeCache !== undefined && url.pathname !== '/api/stats';
+    if (cacheable) {
+      const cached = await edgeCache.match(request.url);
+      if (cached) return cached;
+    }
 
-    return handleApi(url, backend, env.HOTPATH);
+    // handleApi maps its own failure modes to 502/500 responses; this outer
+    // catch exists for what it can't — a throwing backend constructor or an
+    // unforeseen bug — so the caller gets a JSON 500 instead of a Workers
+    // 1101 (Kody review, PR #9).
+    let response: Response;
+    try {
+      backend ??= cachekitio({
+        apiKey: env.CACHEKIT_API_KEY,
+        // A non-default apiUrl (the dev instance) is outside the SDK's SSRF
+        // allowlist; the value comes from wrangler config, so opting out is
+        // an operator decision, not a request-time one.
+        ...(env.CACHEKIT_API_URL ? { apiUrl: env.CACHEKIT_API_URL, allowCustomHost: true } : {}),
+      });
+      response = await handleApi(url, backend, env.HOTPATH);
+    } catch (err) {
+      console.error('edge_unhandled', { path: url.pathname, err: String(err) });
+      return Response.json(
+        { error: 'internal', detail: 'unhandled edge failure' },
+        { status: 500 },
+      );
+    }
+
+    if (cacheable && (response.status === 200 || response.status === 404)) {
+      const ttl =
+        response.status === 200 ? EDGE_CACHE_TTL_SECONDS.hit : EDGE_CACHE_TTL_SECONDS.negative;
+      const copy = new Response(response.body, response); // mutable headers
+      copy.headers.set('cache-control', `public, s-maxage=${ttl}`);
+      const store = edgeCache.put(request.url, copy.clone());
+      if (ctx) ctx.waitUntil(store);
+      else await store;
+      return copy;
+    }
+    return response;
+  },
+
+  /**
+   * Keep-alive cron (LAB-738 AC-1, wrangler [triggers]): Render's free tier
+   * spins the ingester down after 15 minutes without inbound traffic, and
+   * its Jetstream socket is outbound so it doesn't qualify. One GET to
+   * /health every 10 minutes keeps the writer up — and wakes it (~1 min cold
+   * start) if it ever did spin down, hence the generous timeout.
+   */
+  async scheduled(_controller: unknown, env: Env): Promise<void> {
+    if (!env.INGESTER_HEALTH_URL) {
+      console.log('keep-alive: INGESTER_HEALTH_URL not set, skipping');
+      return;
+    }
+    try {
+      const res = await fetch(env.INGESTER_HEALTH_URL, { signal: AbortSignal.timeout(90_000) });
+      // 503 = process up but Jetstream down — still logged, still keep-alive
+      // traffic; the ping's job is inbound bytes, not adjudicating health.
+      // Structured fields, same idiom as hotpath_verify in handler.ts.
+      console.log('keep-alive', { url: env.INGESTER_HEALTH_URL, status: res.status });
+    } catch (err) {
+      console.error('keep-alive_failed', { url: env.INGESTER_HEALTH_URL, err: String(err) });
+    }
   },
 };
