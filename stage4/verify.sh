@@ -33,25 +33,36 @@ hitrate() {
 fail=0
 
 echo "== ingester /health (AC-1: alive, Jetstream connected)"
-if health=$(curl -fsS --max-time 90 "$INGESTER/health"); then
-    echo "$health" | python3 -m json.tool
+# No curl -f here: a 503 carries the JSON that says WHY (Jetstream down),
+# which is exactly what separates "degraded" from "not deployed at all".
+health_body=$(mktemp)
+health_code=$(curl -sS --max-time 90 -o "$health_body" -w '%{http_code}' "$INGESTER/health" || echo 000)
+if [ "$health_code" = "200" ]; then
+    python3 -m json.tool "$health_body"
+elif [ "$health_code" = "000" ]; then
+    echo "FAIL: $INGESTER/health unreachable (not deployed, or spun down and still cold-starting)"
+    fail=$((fail + 1))
 else
-    echo "FAIL: $INGESTER/health unreachable or non-200 (not deployed, spun down, or Jetstream disconnected)"
-    fail=1
+    # 503 + JSON body = process up, Jetstream down; a Render "Not Found"
+    # page = the service doesn't exist at this URL yet.
+    echo "FAIL: /health returned $health_code:"
+    cat "$health_body"; echo
+    fail=$((fail + 1))
 fi
+rm -f "$health_body"
 
 echo "== edge serves real data (epic AC-1: 200 + X-Cache: HIT from a non-origin POP)"
 headers=$(mktemp)
 if body=$(curl -fsS -D "$headers" "$EDGE/api/posts_per_minute?window=$WINDOW"); then
     echo "$body"
-    grep -i '^x-cache:' "$headers" || { echo "FAIL: no X-Cache header"; fail=1; }
-    grep -iq '^x-cache: *hit' "$headers" || { echo "FAIL: expected X-Cache: HIT"; fail=1; }
+    grep -i '^x-cache:' "$headers" || { echo "FAIL: no X-Cache header"; fail=$((fail + 1)); }
+    grep -iq '^x-cache: *hit' "$headers" || { echo "FAIL: expected X-Cache: HIT"; fail=$((fail + 1)); }
     # cf-ray's trailing colo code is the serving POP — the request's own
     # evidence it was served outside the ingester's origin region (Oregon).
     grep -i '^cf-ray:' "$headers" || true
 else
     echo "FAIL: $EDGE/api/posts_per_minute?window=$WINDOW did not return 200"
-    fail=1
+    fail=$((fail + 1))
 fi
 rm -f "$headers"
 
@@ -63,12 +74,16 @@ v = json.load(sys.stdin)['data']  # edge envelope: {operation, window, data}
 age = time.time() - v['generated_at']
 print(f'generated_at age: {age:.0f}s (limit ${MAX_AGE_SECONDS}s); total_posts={v[\"total_posts\"]}')
 sys.exit(0 if age <= ${MAX_AGE_SECONDS} and v['total_posts'] > 0 else 1)
-" || { echo "FAIL: stale or empty aggregate — a green pipeline serving nothing proves nothing"; fail=1; }
+" || { echo "FAIL: stale or empty aggregate — a green pipeline serving nothing proves nothing"; fail=$((fail + 1)); }
 fi
 
 echo "== hit/miss counters (epic AC-4 raw material; per-isolate scope)"
-curl -fsS "$EDGE/api/stats" || { echo "FAIL: /api/stats unreachable"; fail=1; }
+curl -fsS "$EDGE/api/stats" || { echo "FAIL: /api/stats unreachable"; fail=$((fail + 1)); }
 echo
 
-[ "$fail" -eq 0 ] && echo "ALL CHECKS PASSED" || echo "CHECKS FAILED: $fail section(s)"
-exit "$fail"
+if [ "$fail" -eq 0 ]; then
+    echo "ALL CHECKS PASSED"
+else
+    echo "FAILED: $fail check(s)"
+    exit 1
+fi
