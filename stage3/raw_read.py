@@ -13,10 +13,11 @@ for three proofs:
 
 Env: CACHEKIT_API_KEY (required), CACHEKIT_API_URL (default api.cachekit.io).
 
+    # from ingester/ (matches stage3/README.md; SDK-free — deps come from --with)
     op run --env-file=../.op.apikey.env -- \
         uv run --with httpx --with xxhash --with msgpack \
-        python raw_read.py [--expect absent|present|ciphertext] \
-                           [--forbid TEXT ...] [--hexdump N] KEY [KEY ...]
+        python ../stage3/raw_read.py [--expect absent|present|ciphertext] \
+                                     [--forbid TEXT ...] [--hexdump N] KEY [KEY ...]
 
 Exit code 0 only if every key satisfies --expect.
 """

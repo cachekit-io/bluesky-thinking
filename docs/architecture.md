@@ -99,7 +99,18 @@ in 1Password at `op://cachekit/ck-dev-bluesky-default`:
 - `encryption_key` field → 64-hex master key → `CACHEKIT_MASTER_KEY`
 
 Load both via `op run --env-file` (or `op read` for one-off shells) — never commit them, never
-echo them.
+echo them. The gitignored env-file templates the runbooks reference contain only `op://`
+references (no secret material); recreate them at the repo root as:
+
+```bash
+# .op.env — full ingester credentials
+CACHEKIT_API_KEY=op://cachekit/ck-dev-bluesky-default/credential
+CACHEKIT_MASTER_KEY=op://cachekit/ck-dev-bluesky-default/encryption_key
+
+# .op.apikey.env — API key only (interop/evidence tooling; the master key in
+# env auto-enables encryption, which interop-mode scripts must not inherit)
+CACHEKIT_API_KEY=op://cachekit/ck-dev-bluesky-default/credential
+```
 
 `api.dev.cachekit.io` is not in the SDKs' SSRF host allowlists, so every SDK needs its
 config-level custom-host override alongside the credentials:

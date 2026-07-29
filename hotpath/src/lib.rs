@@ -185,7 +185,7 @@ mod edge {
         let Ok(api_key) = ctx.secret("CACHEKIT_API_KEY") else {
             return json_error(
                 503,
-                "CACHEKIT_API_KEY secret not configured — live cache reads activate in Stage 3",
+                "CACHEKIT_API_KEY secret not configured — see docs/architecture.md#credentials",
             );
         };
         let api_url = ctx

@@ -3,7 +3,9 @@
 Repeatable proofs against the live `dev.cachekit` backend. Credentials per
 [`docs/architecture.md#credentials`](../docs/architecture.md#credentials);
 every command below runs under `op run` so nothing secret touches disk or
-logs. All three scripts run from `ingester/` (they reuse its venv):
+logs. All three scripts run from `ingester/` — `derive_keys.py` and
+`stampede.py` reuse its venv; `raw_read.py` is deliberately SDK-free and
+brings its own deps via `--with`:
 
 ```bash
 cd ingester

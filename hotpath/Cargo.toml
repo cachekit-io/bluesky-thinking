@@ -33,6 +33,8 @@ base64 = "0.22"
 urlencoding = "2"
 # Pin the bindgen ABI to the pre-installed CLI (docs/architecture.md build pins).
 wasm-bindgen = "=0.2.126"
-# Workers feature set exactly as spike-proven; WorkersCachekitIO is the only
-# CachekitIO backend that implements Backend on wasm32.
-cachekit-rs = { version = "0.5.0", default-features = false, features = ["workers", "cachekitio", "encryption", "macros"] }
+# `workers, cachekitio` are staged for the LAB-1079 swap-back to
+# WorkersCachekitIO — nothing uses them today (the workaround fetches via the
+# `worker` crate directly; only cachekit::interop is consumed, and that module
+# is unconditional). `encryption`/`macros` were never used: dropped.
+cachekit-rs = { version = "0.5.0", default-features = false, features = ["workers", "cachekitio"] }

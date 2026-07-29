@@ -139,7 +139,9 @@ function isWindow(value: string | null): value is Window {
  *
  * Unknown operation → 404, missing/invalid window → 400 — both before any
  * cache read. Backend failures → 502, undecodable entries → 500; errors are
- * surfaced, never masked with fake data.
+ * surfaced, never masked with fake data. Stage 3: hot-path integrity-check
+ * failure → 500 (integrity_check_failed); hot path unreachable or binding
+ * missing → served with x-hotpath: unavailable.
  */
 export async function handleApi(
   url: URL,
