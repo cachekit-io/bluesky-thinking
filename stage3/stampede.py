@@ -70,10 +70,11 @@ async def main() -> int:
     print(f"cold key: {key}")
 
     started = time.perf_counter()
-    results = await asyncio.gather(*(stampede_probe("5m") for _ in range(N)))
+    try:
+        results = await asyncio.gather(*(stampede_probe("5m") for _ in range(N)))
+    finally:
+        backend.delete(key)  # leave the namespace as we found it, even on failure
     elapsed = time.perf_counter() - started
-
-    backend.delete(key)  # leave the namespace as we found it
 
     distinct = {tuple(sorted(r.items())) for r in results}
     print(f"\n{N} concurrent invocations finished in {elapsed:.2f}s")

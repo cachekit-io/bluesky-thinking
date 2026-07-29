@@ -64,7 +64,7 @@ All three SDKs address the cache with **interop/v1** keys (`bluesky-thinking:{op
 | Component | Host | Free-tier limit | Skyline's use | Cost |
 | :--- | :--- | :--- | :--- | ---: |
 | Jetstream feed | Bluesky public infra | none (public, no auth) | 1 WebSocket consumer | $0 |
-| Python ingester | Render free web service | 750 instance-hrs/mo, one always-on service¹ | one small always-on worker, kept warm by a CF Worker cron ping | $0 |
+| Python ingester | Render free web service | 750 instance-hrs/mo — enough for one continuously-running service¹ | one free web service, normally kept warm by a CF Worker cron ping | $0 |
 | Edge API + WASM | Cloudflare Workers free plan | 100k req/day, 10 ms CPU/invocation | cached reads, ≪ limits | $0 |
 | Dashboard | Cloudflare Workers Assets | static asset requests free | tiny static site | $0 |
 | Cache backend | CachekitIO (ours) | n/a — dogfood | one demo tenant | $0² |
