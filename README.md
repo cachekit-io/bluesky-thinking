@@ -16,8 +16,9 @@ interop test, and a working proof of CacheKit's differentiators:
   stores ciphertext only.
 - **≈ $0/month** — all third-party hosting stays inside free tiers (cost table below).
 
-> Status: **Stage 1 spike complete** (LAB-735). Architecture locked in
-> [`docs/architecture.md`](docs/architecture.md); build stages are groomed from it.
+> Status: **Stage 2 components merged, Stage 3 live integration in progress** (LAB-737).
+> Architecture locked in [`docs/architecture.md`](docs/architecture.md); build stages are groomed
+> from it.
 
 ## Architecture
 
@@ -29,11 +30,11 @@ flowchart LR
         ING[Python ingester + aggregator\ncachekit-py 0.15\n5m / 1h / 24h windows]
     end
 
-    ING -->|"@cache.io writes\ninterop/v1 keys"| CK[(CachekitIO\napi.cachekit.io\nnamespace: bluesky-thinking)]
+    ING -->|"@cache.io writes\ninterop/v1 keys"| CK[(CachekitIO\napi.dev.cachekit.io\nnamespace: bluesky-thinking)]
 
     subgraph Cloudflare edge - free plan
         API[TS edge API\n@cachekit-io/cachekit 0.1.3]
-        WASM[Rust-WASM hot path\ncachekit-rs 0.4\nkey derivation and edge compute]
+        WASM[Rust-WASM hot path\ncachekit-rs 0.5\nkey derivation and edge compute]
         DASH[Static dashboard\nWorkers Assets]
     end
 
@@ -55,22 +56,23 @@ All three SDKs address the cache with **interop/v1** keys (`bluesky-thinking:{op
 | `cachekit-rs` compiles for `wasm32-unknown-unknown` | ✅ SDK CI recipe + downstream consumer crate | [`spike/edge-worker/`](spike/edge-worker/) |
 | `cachekit-rs` Worker **deploys and runs** on Cloudflare | ✅ live at `lab-735-skyline-spike.raywalker.workers.dev`, 180 KiB gzipped, 2 ms startup | [`spike/edge-worker/`](spike/edge-worker/) |
 | Cross-SDK key byte-compatibility | ✅ Python (PyPI), TS (npm), Rust (live CF edge) all derive `bluesky-thinking:posts_per_minute:230037de…` | [`docs/architecture.md`](docs/architecture.md#locked-key-convention) |
-| CachekitIO namespace + credentials | ⏳ blocked on interactive `ck login` (human step) — runbook ready | [`docs/architecture.md`](docs/architecture.md#provisioning-runbook) |
-| Free-tier hosts chosen | ✅ Oracle Always Free (ingester) · Cloudflare Workers free (edge) · Render free (fallback) | [`docs/architecture.md`](docs/architecture.md#hosting) |
+| CachekitIO namespace + credentials | ✅ creds exist at `op://cachekit/ck-dev-bluesky-default`, round-trip verified against `api.dev.cachekit.io` (Stage 3) | [`docs/architecture.md`](docs/architecture.md#credentials) |
+| Free-tier hosts chosen | ✅ Render free web service (ingester) · Cloudflare Workers free (edge) | [`docs/architecture.md`](docs/architecture.md#hosting) |
 
 ## Cost table (AC-8)
 
 | Component | Host | Free-tier limit | Skyline's use | Cost |
 | :--- | :--- | :--- | :--- | ---: |
 | Jetstream feed | Bluesky public infra | none (public, no auth) | 1 WebSocket consumer | $0 |
-| Python ingester | Oracle Cloud Always Free (Ampere A1) | 2 OCPU / 12 GB RAM always-on¹ | ~0.25 OCPU / 512 MB | $0 |
+| Python ingester | Render free web service | 750 instance-hrs/mo — enough for one continuously-running service¹ | one free web service, normally kept warm by a CF Worker cron ping | $0 |
 | Edge API + WASM | Cloudflare Workers free plan | 100k req/day, 10 ms CPU/invocation | cached reads, ≪ limits | $0 |
 | Dashboard | Cloudflare Workers Assets | static asset requests free | tiny static site | $0 |
 | Cache backend | CachekitIO (ours) | n/a — dogfood | one demo tenant | $0² |
 | **Total** | | | | **$0/mo** |
 
-¹ Halved from 4 OCPU / 24 GB on 2026-06-15; still far more than needed. Fallback: Render free web
-service (750 instance-hrs/mo) kept warm by a Cloudflare Worker cron ping.
+¹ Free services spin down after 15 min without inbound traffic; a Cloudflare Worker cron trigger
+pings every 10 min to keep the ingester warm ($0). Restarts lose in-memory window state, mitigated
+by checkpointing aggregation state into CacheKit.
 ² CachekitIO is the platform being showcased — we build, run, and own it. No third-party line item.
 
 Fly.io was evaluated and **rejected**: its free tier was discontinued in 2024 (new orgs get a
@@ -85,6 +87,8 @@ hotpath/               — Stage-2 Rust-WASM hot-path Worker (cachekit-rs 0.5 on
                          interop key derivation, xxHash3 payload verification, window-slice
                          merging — live at skyline-hotpath.raywalker.workers.dev
 ingester/              — Stage-2 Python ingester + window aggregator (LAB-744): Jetstream → 5m/1h/24h windows → interop/v1 aggregates
+stage3/                — Stage-3 live-integration evidence harness (LAB-737): clean-namespace
+                         audit, SDK-free raw/ciphertext reader, stampede (distributed-lock) proof
 spike/decorators/      — AC-3 proof: the three decorators running on cachekit 0.15.0
 spike/edge-worker/     — AC-2 proof: deployable cachekit-rs Worker (the live spike)
 spike/roundtrip/       — AC-1 harness: CachekitIO round-trip, runs as soon as credentials exist

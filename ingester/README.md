@@ -11,19 +11,25 @@ byte-identical to what the TS edge API and Rust-WASM hot path read.
 cd ingester
 uv sync
 
-# Live: writes real CachekitIO entries (key from the provisioning runbook)
-CACHEKIT_API_KEY=ck_live_... uv run skyline-ingester
+# Live: writes real CachekitIO entries. Creds per docs/architecture.md#credentials:
+CACHEKIT_API_URL=https://api.dev.cachekit.io CACHEKIT_ALLOW_CUSTOM_HOST=true \
+    op run --env-file=../.op.env -- uv run skyline-ingester
 
 # Dry-run: no key -> same pipeline, in-process backend, every write logged
 uv run skyline-ingester
 ```
 
-Configuration (env or `.env`, via pydantic-settings; secrets are `SecretStr`):
+Configuration (env or `.env`, via pydantic-settings; secrets are `SecretStr`).
+In live mode the backend itself is built by the SDK's env-config path, so the
+`CACHEKIT_*` backend variables must be real process env vars (`op run`
+provides that) — the SDK does not read this service's `.env` file:
 
 | Variable | Default | Meaning |
 | :--- | :--- | :--- |
 | `CACHEKIT_API_KEY` | unset | CachekitIO key. Unset → dry-run mode. |
 | `CACHEKIT_MASTER_KEY` | unset | 64-hex master key for the `@cache.secure` sentiment cache. **Required in live mode** (fail closed — a live deploy without it refuses to start); unset in dry-run → secure cache disabled with a warning. |
+| `CACHEKIT_API_URL` | `https://api.cachekit.io` | Backend endpoint (the demo uses the dev instance, `https://api.dev.cachekit.io`). |
+| `CACHEKIT_ALLOW_CUSTOM_HOST` | unset | Required `true` for the dev instance — its hostname is outside the SDK's SSRF allowlist. |
 | `JETSTREAM_URL` | `wss://jetstream2.us-east.bsky.network/subscribe` | Jetstream endpoint. |
 | `PUBLISH_TICK_SECONDS` | `15` | Publish-loop poll interval. |
 | `CHECKPOINT_INTERVAL_SECONDS` | `120` | Window-state checkpoint cadence. |

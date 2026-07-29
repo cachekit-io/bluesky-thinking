@@ -7,17 +7,12 @@ Anything not locked here is a Stage-2 implementation choice.
 
 | Component | Language / SDK | Pinned version | Host |
 | :--- | :--- | :--- | :--- |
-| Ingester + window aggregator | Python / `cachekit` | `0.15.0` (PyPI) | Oracle Always Free VM (fallback: Render free) |
+| Ingester + window aggregator | Python / `cachekit` | `0.15.0` (PyPI) | Render free web service |
 | Edge API | TypeScript / `@cachekit-io/cachekit` | `0.1.3` (npm) | Cloudflare Workers (free plan) |
-| Edge hot path | Rust / `cachekit-rs` | git tag `cachekit-rs-v0.4.0`¹ | Cloudflare Workers, `wasm32-unknown-unknown` |
+| Edge hot path | Rust / `cachekit-rs` | `0.5.0` (crates.io) | Cloudflare Workers, `wasm32-unknown-unknown` |
 | Dashboard | static HTML/JS | — | Cloudflare Workers Assets |
-| Cache backend | CachekitIO | `api.cachekit.io` | ours (dogfood) |
+| Cache backend | CachekitIO | `api.dev.cachekit.io` | ours (dogfood) |
 | Data source | Bluesky Jetstream | public WebSocket | e.g. `wss://jetstream2.us-east.bsky.network/subscribe` |
-
-¹ crates.io only has `0.3.0`, which predates interop mode. `v0.4.0` is tagged and GitHub-released
-but its crates.io publish failed in CI (a since-fixed debug-step quoting bug aborted the workflow
-before `cargo publish` ran). Stage 2 uses the git-tag dependency; switch to the crates.io version
-once the publish is re-run. Tracked separately — do not block on it.
 
 ## Locked key convention
 
@@ -36,7 +31,7 @@ answer for cross-SDK sharing is **interop/v1** (`protocol/spec/interop-mode.md`)
   encoding of the flat bound argument array.
 - Values are one plain MessagePack document (no ByteStorage envelope, no LZ4).
 - All three SDKs ship it: `cachekit-py` 0.15.0 (`@cache(interop=…)`), `@cachekit-io/cachekit`
-  0.1.3 (`generateInteropKey` / `interop` wrap option), `cachekit-rs` v0.4.0
+  0.1.3 (`generateInteropKey` / `interop` wrap option), `cachekit-rs` 0.5.0
   (`interop_key()` / `#[cachekit(interop = …)]`).
 - Note: the spec header in `protocol/spec/interop-mode.md` still says "NOT yet implemented in any
   SDK" — stale; all three implementations exist and are vector-verified. Flagged upstream.
@@ -66,7 +61,7 @@ bluesky-thinking:posts_per_minute:230037def14c9a89b18603f313d982d6a3f7acd4af5147
 
 The `("5m")` args-hash is identical across operations — same canonical argument array, same hash;
 the operation segment provides the identity. Spike verification: `cachekit-py` 0.15.0 (local),
-`@cachekit-io/cachekit` 0.1.3 (local Node), and `cachekit-rs` v0.4.0 running **live on the
+`@cachekit-io/cachekit` 0.1.3 (local Node), and `cachekit-rs` 0.5.0 running **live on the
 Cloudflare edge** all derived `bluesky-thinking:posts_per_minute:230037de…` byte-identically.
 
 ### The secure cache (AC-6 path)
@@ -86,37 +81,57 @@ The SaaS derives its server-side namespace from the **key prefix**, not from the
 - Python auto-mode keys (`ns:bluesky-thinking:func:…`, used by the secure cache) → server-side
   namespace **`bluesky-thinking`**.
 
-Therefore the demo API key must allow **both** namespaces. Provision the key **unrestricted**
-inside a dedicated demo tenant (tenant isolation is the real boundary; a namespace allowlist adds
-nothing when the whole tenant is the demo) — or, if restricting anyway, allow
-`bluesky-thinking,default`. A key restricted to `bluesky-thinking` alone rejects every interop
-key the demo depends on.
+Therefore the demo API key must allow **both** namespaces. The existing demo key
+(`op://cachekit/ck-dev-bluesky-default`) is unrestricted inside its dedicated demo tenant (tenant
+isolation is the real boundary; a namespace allowlist adds nothing when the whole tenant is the
+demo) — verified: it round-trips both key classes. A key restricted to `bluesky-thinking` alone
+would reject every interop key the demo depends on.
 
 Distributed locking needs no enablement: `POST /v1/cache/{key}/lock` (and DELETE) are available to
 every authenticated caller — locking is inherent to the backend, per `protocol/spec/saas-api.md`.
 
-## Provisioning runbook
+## Credentials
 
-Requires an interactive browser login (Clerk) — **human step, ~5 minutes** (from `saas/cli`):
+Nothing to provision — the backend is the `dev.cachekit` instance and credentials already exist
+in 1Password at `op://cachekit/ck-dev-bluesky-default`:
+
+- `credential` field → the API key → `CACHEKIT_API_KEY`
+- `encryption_key` field → 64-hex master key → `CACHEKIT_MASTER_KEY`
+
+Load both via `op run --env-file` (or `op read` for one-off shells) — never commit them, never
+echo them. The gitignored env-file templates the runbooks reference contain only `op://`
+references (no secret material); recreate them at the repo root as:
 
 ```bash
-ck --env production login                 # browser opens; or mint a machine token from the dashboard
-ck --env production tenants create --name bluesky-thinking --plan free
-ck --env production keys create --tenant <tenant-uuid> --type sdk --name skyline-demo
-# → plaintext key shown ONCE; store as CACHEKIT_API_KEY (GitHub Actions secret + host env)
+# .op.env — full ingester credentials
+CACHEKIT_API_KEY=op://cachekit/ck-dev-bluesky-default/credential
+CACHEKIT_MASTER_KEY=op://cachekit/ck-dev-bluesky-default/encryption_key
+
+# .op.apikey.env — API key only (interop/evidence tooling; the master key in
+# env auto-enables encryption, which interop-mode scripts must not inherit)
+CACHEKIT_API_KEY=op://cachekit/ck-dev-bluesky-default/credential
 ```
 
-Then verify the round-trip end-to-end: `spike/roundtrip/roundtrip.py` (exists, runs against
-`api.cachekit.io` the moment `CACHEKIT_API_KEY` is set; also exercises `@cache.io`).
+`api.dev.cachekit.io` is not in the SDKs' SSRF host allowlists, so every SDK needs its
+config-level custom-host override alongside the credentials:
+
+- Python: env `CACHEKIT_API_URL=https://api.dev.cachekit.io` + `CACHEKIT_ALLOW_CUSTOM_HOST=true`
+- TS: `cachekitio({ apiUrl, allowCustomHost: true })`
+- Rust: `WorkersCachekitIO::builder().api_url(...).allow_custom_host(true)` — **currently
+  bypassed**: `WorkersCachekitIO` panics on every wasm32 request (LAB-1079), so the hot path does a
+  direct `worker::Fetch` GET until the SDK fix ships (`hotpath/README.md`)
+
+Round-trip verified end-to-end: `spike/roundtrip/roundtrip.py` (exists, runs against
+`api.dev.cachekit.io`; passed against the dev instance on 2026-07-29; also exercises `@cache.io`).
 
 ## Hosting
 
 | Decision | Rationale (verified 2026-07-24) |
 | :--- | :--- |
-| **Ingester → Oracle Cloud Always Free** (Ampere A1) | Only true $0 *always-on* compute left. Allowance halved to 2 OCPU / 12 GB on 2026-06-15 — still 8× what the ingester needs. **Human step**: signup requires a credit card (never charged on Always Free); A1 capacity is regional — pick a low-contention region (e.g. not us-east). |
-| **Ingester fallback → Render free web service** | No billing info needed. Constraint: free services spin down after 15 min without *inbound* traffic (an outbound Jetstream WebSocket doesn't count) — keep warm with a Cloudflare Worker cron trigger pinging every 10 min ($0). 750 instance-hrs/mo covers one always-on service. Restarts lose in-memory window state: mitigate by checkpointing aggregation state into CacheKit (more dogfood). |
+| **Ingester → Render free web service** | No billing info needed — ray already has a Render account. Constraint: free services spin down after 15 min without *inbound* traffic (an outbound Jetstream WebSocket doesn't count) — keep warm with a Cloudflare Worker cron trigger pinging every 10 min ($0). 750 instance-hrs/mo covers one always-on service. Restarts lose in-memory window state: mitigate by checkpointing aggregation state into CacheKit (more dogfood). |
+| **Oracle Cloud Always Free — earlier pick, rejected** | Would have been 8× the ingester's needs, but signup requires a credit card and ray has no Oracle account; Render needs no new signup. |
 | **Fly.io — rejected** | Free tier discontinued 2024; ~$2/mo minimum for an always-on machine breaks AC-8. |
-| **Edge → Cloudflare Workers free plan** | 100k requests/day, 10 ms CPU/invocation — cached analytics reads are single-digit ms. Static dashboard via Workers Assets (free). Cron triggers included (used for the Render keep-alive if the fallback is active). **Proven live by this spike**: `lab-735-skyline-spike.raywalker.workers.dev` (180 KiB gzipped upload, 2 ms startup, well under the 3 MB compressed script limit). |
+| **Edge → Cloudflare Workers free plan** | 100k requests/day, 10 ms CPU/invocation — cached analytics reads are single-digit ms. Static dashboard via Workers Assets (free). Cron triggers included (used for the Render keep-alive). **Proven live by this spike**: `lab-735-skyline-spike.raywalker.workers.dev` (180 KiB gzipped upload, 2 ms startup, well under the 3 MB compressed script limit). |
 
 ## Build-chain pins (from spike friction, so Stage 2 doesn't rediscover them)
 
@@ -124,17 +139,19 @@ Then verify the round-trip end-to-end: `spike/roundtrip/roundtrip.py` (exists, r
 - `wasm-bindgen-cli` 0.2.126 to match the crate graph — worker-build 0.1.x auto-downloads 0.2.105
   and fails; pre-install the matching CLI into its cache or PATH.
 - On wasm32 the CachekitIO backend is `cachekit::backend::workers::WorkersCachekitIO` (CF Fetch
-  API); the reqwest-based `CachekitIO` does not implement `Backend` on that target.
+  API); the reqwest-based `CachekitIO` does not implement `Backend` on that target. **LAB-1079**:
+  `WorkersCachekitIO` panics on every live wasm32 request (`SystemTime::now()` in its session
+  headers) — the hot path substitutes a direct `worker::Fetch` GET until the SDK fix is published.
 - Workers builds: `--no-default-features --features workers,cachekitio,encryption,macros`
   (`l1`/moka and `redis`/fred are native-only).
 
 ## Open items (flagged, not blocking the spec)
 
-1. **CachekitIO credentials** — human runs the provisioning runbook above; then
-   `spike/roundtrip/roundtrip.py` closes AC-1.
-2. **Oracle account** — human signup (credit card gate). Render fallback needs no billing info if
-   preferred.
-3. **cachekit-rs 0.4.0 crates.io publish** — failed CI run; re-publish so Stage 2 can drop the
-   git-tag dependency. Tracked as its own issue.
+1. ~~**CachekitIO credentials**~~ — resolved: creds exist at
+   `op://cachekit/ck-dev-bluesky-default`; `spike/roundtrip/roundtrip.py` round-trip verified
+   against `api.dev.cachekit.io` (2026-07-29), closing AC-1.
+2. ~~**Oracle account**~~ — resolved: Render account exists (ray, 2026-07-24); Oracle dropped.
+3. ~~**cachekit-rs crates.io publish**~~ — resolved by LAB-742: crates.io now carries up to
+   `0.8.0`; hotpath builds against `0.5.0`.
 4. **protocol/spec/interop-mode.md status header** — says "NOT yet implemented in any SDK"; all
    three SDKs ship it. One-line doc fix for the protocol repo owners.

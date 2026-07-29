@@ -13,7 +13,7 @@ Dev deployment: **https://skyline-hotpath.raywalker.workers.dev**
 | interop/v1 key derivation | `GET /v1/key/:operation/:window` | The five locked operations × `5m`/`1h`/`24h` (contract: [`docs/architecture.md`](../docs/architecture.md)). Returns the key + locked TTL. Off-contract input → 400. |
 | Payload integrity | `POST /v1/verify[?expected=<16-hex>]` | Body = raw cached payload. Returns xxHash3-64 (big-endian hex, the `StorageEnvelope` convention) + strict interop/v1 validity (single MessagePack document, no trailing bytes, CK frames flagged with a diagnostic). |
 | Window-slice aggregation | `POST /v1/merge` | JSON `{"slices": ["<base64 msgpack {str:int} doc>", …], "top": 50}` → merged top-N counts (count desc, key asc) + the canonical interop/v1 MessagePack of the result, ready to write back byte-identically. |
-| Cache read + verify | `GET /v1/cache/:operation/:window` | Derives the key, fetches via `WorkersCachekitIO`, checksums + strict-decodes the payload. **503 until the Stage-3 `CACHEKIT_API_KEY` secret is provisioned** — by design, not a bug. |
+| Cache read + verify | `GET /v1/cache/:operation/:window` | Derives the key, fetches the live backend, checksums + strict-decodes the payload. 503 only if the `CACHEKIT_API_KEY` secret is missing (set since Stage 3). The fetch is a direct `worker::Fetch` GET — **LAB-1079 workaround**: `WorkersCachekitIO` (cachekit-rs ≤ 0.8.0) panics on wasm32 (`SystemTime::now()` in its session headers); swap back once the SDK fix ships. Key derivation, interop decode and checksum stay on cachekit-rs / cachekit-core. |
 | Service info | `GET /` | Contract summary + endpoint list; doubles as a health check. |
 
 Example — the byte-locked spike vector, derived live on the edge:
@@ -47,5 +47,12 @@ $ worker-build --release                         # reproducible wasm32 build (th
 $ npx wrangler deploy                            # runs worker-build itself, then uploads
 ```
 
-Secrets: `CACHEKIT_API_KEY` via `wrangler secret put CACHEKIT_API_KEY` once the Stage-3
-provisioning runbook has been run. Nothing else is configurable.
+Secrets: `CACHEKIT_API_KEY` via `wrangler secret put CACHEKIT_API_KEY`, from
+`op://cachekit/ck-dev-bluesky-default/credential`
+([docs/architecture.md#credentials](../docs/architecture.md#credentials)).
+Config: `CACHEKIT_API_URL` (`wrangler.toml [vars]`) points at the dev
+instance. Nothing else is configurable.
+
+Stage 3 also bound this Worker into the TS edge's serving path: the edge
+holds a service binding (`env.HOTPATH`) and `POST /v1/verify`s every payload
+it serves — see [`edge/README.md`](../edge/README.md).

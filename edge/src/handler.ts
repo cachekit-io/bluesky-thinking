@@ -47,6 +47,63 @@ export interface Stats {
 }
 const stats: Stats = { hits: 0, misses: 0, errors: 0 };
 
+/**
+ * The Rust-WASM hot-path Worker, reached via a Cloudflare service binding
+ * (wrangler [[services]]) — never a public URL. Structural type: the repo
+ * doesn't depend on @cloudflare/workers-types, and a binding is just an
+ * object with fetch().
+ */
+export interface HotpathBinding {
+  fetch(input: string, init?: RequestInit): Promise<Response>;
+}
+
+type HotpathVerdict =
+  | { state: 'verified'; xxh3: string }
+  | { state: 'invalid'; xxh3: string; detail: string }
+  | { state: 'unavailable'; detail: string };
+
+/**
+ * Integrity-check a fetched payload on the Rust-WASM hot path
+ * (POST /v1/verify: xxHash3-64 + strict interop/v1 decode). Any transport or
+ * hot-path failure degrades to 'unavailable' — the caller decides what that
+ * means; this function never throws.
+ */
+async function verifyViaHotpath(hotpath: HotpathBinding, raw: Uint8Array): Promise<HotpathVerdict> {
+  try {
+    // The URL host is ignored by service bindings; only the path routes.
+    // Copy pins the generic to Uint8Array<ArrayBuffer>, which BodyInit
+    // accepts (backend.get returns Uint8Array<ArrayBufferLike>).
+    const res = await hotpath.fetch('https://skyline-hotpath/v1/verify', {
+      method: 'POST',
+      body: new Uint8Array(raw),
+    });
+    if (!res.ok) {
+      return { state: 'unavailable', detail: `hot path returned HTTP ${res.status}` };
+    }
+    const report = (await res.json()) as {
+      xxh3_64?: string;
+      valid_interop_value?: boolean;
+      interop_error?: string | null;
+    };
+    if (typeof report.xxh3_64 !== 'string') {
+      return { state: 'unavailable', detail: 'hot path returned no checksum' };
+    }
+    if (!report.valid_interop_value) {
+      return {
+        state: 'invalid',
+        xxh3: report.xxh3_64,
+        detail: report.interop_error ?? 'payload is not a valid interop/v1 document',
+      };
+    }
+    return { state: 'verified', xxh3: report.xxh3_64 };
+  } catch (error) {
+    return {
+      state: 'unavailable',
+      detail: error instanceof Error ? error.message : 'hot path fetch failed',
+    };
+  }
+}
+
 /** Test hook: reset per-isolate counters. */
 export function resetStats(): void {
   stats.hits = 0;
@@ -82,9 +139,15 @@ function isWindow(value: string | null): value is Window {
  *
  * Unknown operation → 404, missing/invalid window → 400 — both before any
  * cache read. Backend failures → 502, undecodable entries → 500; errors are
- * surfaced, never masked with fake data.
+ * surfaced, never masked with fake data. Stage 3: hot-path integrity-check
+ * failure → 500 (integrity_check_failed); hot path unreachable or binding
+ * missing → served with x-hotpath: unavailable.
  */
-export async function handleApi(url: URL, backend: Backend): Promise<Response> {
+export async function handleApi(
+  url: URL,
+  backend: Backend,
+  hotpath?: HotpathBinding,
+): Promise<Response> {
   const segment = url.pathname.slice('/api/'.length);
 
   if (segment === 'stats') {
@@ -140,6 +203,31 @@ export async function handleApi(url: URL, backend: Backend): Promise<Response> {
     );
   }
 
+  // Stage 3 (AC-3): every payload served through the edge is integrity-checked
+  // on the Rust-WASM hot path first. 'invalid' is a hard stop — a corrupt entry
+  // must never be served; 'unavailable' degrades honestly: the aggregate is
+  // real (it came from the backend), it just goes out unverified and says so.
+  // A missing binding is a deploy-config fault, not a reason to go silent:
+  // it degrades exactly like an unreachable hot path, header and all.
+  const verdict: HotpathVerdict = hotpath
+    ? await verifyViaHotpath(hotpath, raw)
+    : { state: 'unavailable', detail: 'HOTPATH service binding is not configured' };
+  // Structured fields: wrangler tail / Workers Logs can filter on these.
+  console.log('hotpath_verify', { operation: segment, window, ...verdict });
+  if (verdict.state === 'invalid') {
+    stats.errors += 1;
+    return json(500, {
+      error: 'integrity_check_failed',
+      detail: verdict.detail,
+      key,
+      xxh3_64: verdict.xxh3,
+    });
+  }
+  const hotpathHeaders: Record<string, string> = { 'x-hotpath': verdict.state };
+  if (verdict.state === 'verified') {
+    hotpathHeaders['x-hotpath-xxh3'] = verdict.xxh3;
+  }
+
   let data: unknown;
   try {
     data = decodeInteropValue(raw);
@@ -153,5 +241,5 @@ export async function handleApi(url: URL, backend: Backend): Promise<Response> {
   }
 
   stats.hits += 1;
-  return json(200, { operation: segment, window, data }, { 'x-cache': 'HIT' });
+  return json(200, { operation: segment, window, data }, { 'x-cache': 'HIT', ...hotpathHeaders });
 }

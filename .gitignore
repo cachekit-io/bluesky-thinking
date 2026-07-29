@@ -6,3 +6,6 @@ __pycache__/
 Cargo.lock
 .pytest_cache/
 .ruff_cache/
+.op.env
+
+.op.apikey.env
