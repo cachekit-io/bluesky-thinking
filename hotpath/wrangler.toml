@@ -7,6 +7,12 @@ compatibility_date = "2026-07-01"
 [build]
 command = "worker-build --release"
 
+[vars]
+# The dev.cachekit instance (docs/architecture.md#credentials). Outside the
+# SDK's SSRF host allowlist, so lib.rs opts out of the allowlist when this
+# var is present — trusted operator config, deploy-time decision.
+CACHEKIT_API_URL = "https://api.dev.cachekit.io"
+
 # Secrets (set via `wrangler secret put`, never in this file):
-# - CACHEKIT_API_KEY — activates GET /v1/cache/…; absent until the Stage-3
-#   provisioning runbook runs (docs/architecture.md).
+# - CACHEKIT_API_KEY — activates GET /v1/cache/…; from
+#   op://cachekit/ck-dev-bluesky-default/credential (docs/architecture.md#credentials).

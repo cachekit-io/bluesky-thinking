@@ -7,12 +7,14 @@
  * guidance: create once, reuse across requests).
  */
 import { cachekitio, type Backend } from '@cachekit-io/cachekit';
-import { handleApi } from './handler.js';
+import { handleApi, type HotpathBinding } from './handler.js';
 
 interface Env {
   CACHEKIT_API_KEY?: string;
-  /** Override for tests/staging; defaults to https://api.cachekit.io. */
+  /** Override for the dev instance / tests; defaults to https://api.cachekit.io. */
   CACHEKIT_API_URL?: string;
+  /** Service binding to the Rust-WASM hot-path Worker (wrangler [[services]]). */
+  HOTPATH?: HotpathBinding;
 }
 
 let backend: Backend | null = null;
@@ -42,9 +44,12 @@ export default {
 
     backend ??= cachekitio({
       apiKey: env.CACHEKIT_API_KEY,
-      ...(env.CACHEKIT_API_URL ? { apiUrl: env.CACHEKIT_API_URL } : {}),
+      // A non-default apiUrl (the dev instance) is outside the SDK's SSRF
+      // allowlist; the value comes from wrangler config, so opting out is
+      // an operator decision, not a request-time one.
+      ...(env.CACHEKIT_API_URL ? { apiUrl: env.CACHEKIT_API_URL, allowCustomHost: true } : {}),
     });
 
-    return handleApi(url, backend);
+    return handleApi(url, backend, env.HOTPATH);
   },
 };

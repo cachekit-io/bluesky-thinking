@@ -11,7 +11,13 @@ import {
   BackendError,
   type Backend,
 } from '@cachekit-io/cachekit';
-import { handleApi, resetStats, NAMESPACE, OPERATIONS } from '../src/handler.js';
+import {
+  handleApi,
+  resetStats,
+  NAMESPACE,
+  OPERATIONS,
+  type HotpathBinding,
+} from '../src/handler.js';
 
 function mockBackend(get: Backend['get']): Backend {
   return {
@@ -164,5 +170,68 @@ describe('GET /api/stats', () => {
       mockBackend(async () => null),
     );
     expect(await res.json()).toEqual({ hits: 0, misses: 0, errors: 0, hit_rate: null });
+  });
+});
+
+describe('hot-path integrity verification (Stage 3, AC-3)', () => {
+  const aggregate = { window: '5m', ppm: 42.0 };
+  const key = generateInteropKey(NAMESPACE, 'posts_per_minute', ['5m']);
+  const backend = () => storeOf({ [key]: aggregate });
+
+  function mockHotpath(respond: () => Promise<Response>): HotpathBinding {
+    return { fetch: respond };
+  }
+
+  it('serves verified payloads with x-hotpath headers', async () => {
+    const hotpath = mockHotpath(async () =>
+      Response.json({
+        xxh3_64: 'deadbeefcafef00d',
+        valid_interop_value: true,
+        interop_error: null,
+      }),
+    );
+    const res = await handleApi(api('/api/posts_per_minute?window=5m'), backend(), hotpath);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('x-cache')).toBe('HIT');
+    expect(res.headers.get('x-hotpath')).toBe('verified');
+    expect(res.headers.get('x-hotpath-xxh3')).toBe('deadbeefcafef00d');
+  });
+
+  it('refuses to serve a payload the hot path calls invalid', async () => {
+    const hotpath = mockHotpath(async () =>
+      Response.json({
+        xxh3_64: 'deadbeefcafef00d',
+        valid_interop_value: false,
+        interop_error: 'trailing bytes',
+      }),
+    );
+    const res = await handleApi(api('/api/posts_per_minute?window=5m'), backend(), hotpath);
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe('integrity_check_failed');
+  });
+
+  it('degrades honestly when the hot path is unavailable: real data, unverified header', async () => {
+    const hotpath = mockHotpath(async () => {
+      throw new Error('binding unavailable');
+    });
+    const res = await handleApi(api('/api/posts_per_minute?window=5m'), backend(), hotpath);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('x-hotpath')).toBe('unavailable');
+    expect(res.headers.get('x-hotpath-xxh3')).toBeNull();
+    const body = (await res.json()) as { data: { ppm: number } };
+    expect(body.data.ppm).toBe(42.0);
+  });
+
+  it('keeps the miss contract untouched: 404 + X-Cache MISS, no hot-path call', async () => {
+    let called = false;
+    const hotpath = mockHotpath(async () => {
+      called = true;
+      return Response.json({});
+    });
+    const res = await handleApi(api('/api/posts_per_minute?window=1h'), backend(), hotpath);
+    expect(res.status).toBe(404);
+    expect(res.headers.get('x-cache')).toBe('MISS');
+    expect(called).toBe(false);
   });
 });

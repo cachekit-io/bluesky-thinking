@@ -1335,6 +1335,7 @@ dependencies = [
  "hex",
  "serde",
  "serde_json",
+ "urlencoding",
  "wasm-bindgen",
  "worker",
 ]

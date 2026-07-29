@@ -45,3 +45,30 @@ def test_live_mode_without_master_key_fails_closed():
     settings = Settings(cachekit_api_key=SecretStr("ck_test_not_a_real_key"), cachekit_master_key=None)
     with pytest.raises(RuntimeError, match="fail closed"):
         build_publisher(settings, WindowStore())  # raises before any backend is constructed
+
+
+def test_live_mode_builds_backend_from_env(monkeypatch):
+    """Live mode must construct CachekitIOBackend via the SDK's env-config path.
+
+    Regression (LAB-737): passing api_key alone to the constructor raises
+    "Both api_url and api_key required if using manual config", so the
+    pre-Stage-3 live path could never start. Env config also carries the
+    CACHEKIT_API_URL / CACHEKIT_ALLOW_CUSTOM_HOST overrides the dev instance
+    (api.dev.cachekit.io — not in the SDK's SSRF host allowlist) needs.
+    """
+    from pydantic import SecretStr
+
+    from skyline_ingester.__main__ import build_publisher
+    from skyline_ingester.config import Settings
+    from skyline_ingester.windows import WindowStore
+
+    monkeypatch.setenv("CACHEKIT_API_KEY", "ck_test_not_a_real_key")
+    monkeypatch.setenv("CACHEKIT_API_URL", "https://api.dev.cachekit.io")
+    monkeypatch.setenv("CACHEKIT_ALLOW_CUSTOM_HOST", "true")
+    settings = Settings(
+        cachekit_api_key=SecretStr("ck_test_not_a_real_key"),
+        cachekit_master_key=SecretStr("a" * 64),
+    )
+    # Old code raised ValueError here; construction makes no network calls.
+    publisher = build_publisher(settings, WindowStore())
+    assert publisher.secure_enabled

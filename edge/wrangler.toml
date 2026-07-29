@@ -1,11 +1,34 @@
-# Skyline edge API + dashboard. Deploy/routing is Stage 4; this config is
-# complete for `wrangler dev` and a plain `wrangler deploy` on the free plan.
-# The CACHEKIT_API_KEY secret is provisioned in Stage 3
-# (docs/architecture.md provisioning runbook):
-#   wrangler secret put CACHEKIT_API_KEY
+# Skyline edge API + dashboard. Production routing is Stage 4; this config
+# deploys the dev worker on the free plan.
+# The CACHEKIT_API_KEY secret comes from op://cachekit/ck-dev-bluesky-default
+# (docs/architecture.md#credentials):
+#   op read "op://cachekit/ck-dev-bluesky-default/credential" | wrangler secret put CACHEKIT_API_KEY
 name = "skyline-edge"
 main = "src/worker.ts"
 compatibility_date = "2026-07-01"
+# nodejs_compat: @cachekit-io/cachekit 0.1.3 transitively requires node
+# builtins (string_decoder via redis-parser) that esbuild can't resolve
+# for Workers without it.
+compatibility_flags = ["nodejs_compat"]
+
+# @cachekit-io/cachekit 0.1.3 statically imports its NAPI core (.node
+# binaries — unbundleable and unrunnable on Workers). The edge never executes
+# that path (interop reads only); alias it to a throwing stub. 0.1.4 fixes
+# this properly with a WASM core but is uninstallable today (LAB-780).
+[alias]
+"@cachekit-io/cachekit-core-ts" = "./src/core-ts-stub.ts"
+
+[vars]
+# The dev.cachekit instance. Not in the SDK's SSRF host allowlist, hence the
+# explicit config-level opt-out (trusted operator config, same trust model as
+# the Python CACHEKIT_ALLOW_CUSTOM_HOST env var).
+CACHEKIT_API_URL = "https://api.dev.cachekit.io"
+
+# Stage 3 (AC-3): the Rust-WASM hot path, reached via service binding — not
+# a public URL. Every served aggregate is integrity-checked there first.
+[[services]]
+binding = "HOTPATH"
+service = "skyline-hotpath"
 
 # Static dashboard. Asset requests are served before the worker script runs;
 # unmatched paths (/api/*) fall through to the fetch handler.

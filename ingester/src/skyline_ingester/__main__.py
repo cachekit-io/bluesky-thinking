@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 
 from skyline_ingester.backends import MemoryBytesBackend
@@ -28,8 +29,13 @@ def build_publisher(settings: Settings, store: WindowStore) -> Publisher:
             raise RuntimeError("CACHEKIT_MASTER_KEY is required in live mode: the secure sentiment cache must fail closed")
         from cachekit.backends.cachekitio import CachekitIOBackend
 
-        backend = CachekitIOBackend(api_key=settings.cachekit_api_key.get_secret_value())
-        logger.info("live mode: publishing to CachekitIO")
+        # No-args = the SDK's env-config path (CACHEKIT_API_KEY, plus optional
+        # CACHEKIT_API_URL / CACHEKIT_ALLOW_CUSTOM_HOST for the dev instance).
+        # Passing api_key alone is rejected by the SDK ("Both api_url and
+        # api_key required if using manual config"), so live mode never came up
+        # before this fix. SDK config reads real env vars only — not .env.
+        backend = CachekitIOBackend()
+        logger.info("live mode: publishing to CachekitIO at %s", os.environ.get("CACHEKIT_API_URL", "https://api.cachekit.io"))
     else:
         backend = MemoryBytesBackend(log_writes=True)
         logger.warning("CACHEKIT_API_KEY not set — dry-run mode, writes are logged only")

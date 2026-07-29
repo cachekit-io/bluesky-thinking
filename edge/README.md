@@ -35,9 +35,36 @@ npm run lint && npm run format:check && npm run type-check
 if it fails, key derivation drifted from the cross-SDK contract — fix the drift,
 not the vectors.
 
-## Deploy (Stage 4)
+## Hot-path integration (Stage 3)
 
-`wrangler deploy` after `wrangler secret put CACHEKIT_API_KEY` (key provisioned
-per the [runbook](../docs/architecture.md#provisioning-runbook)). Live
-integration and production routing are Stage 3/4 concerns — nothing here
-requires credentials until then.
+The Worker holds a **service binding** to the Rust-WASM hot path
+(`wrangler.toml [[services]]`, `env.HOTPATH` → `skyline-hotpath`). Every
+payload served through `/api/{operation}` is first integrity-checked there
+(`POST /v1/verify`: xxHash3-64 + strict interop/v1 decode):
+
+- verified → served with `x-hotpath: verified` + `x-hotpath-xxh3: <16-hex>`
+- invalid → **500** `integrity_check_failed`; a corrupt entry is never served
+- hot path unreachable → served with `x-hotpath: unavailable` (the aggregate
+  is real — it came from the backend — it just goes out unverified and says so)
+
+Misses never call the hot path: 404 + `X-Cache: MISS`, unchanged.
+
+## Deploy
+
+`wrangler deploy`, then set the secret (creds per
+[docs/architecture.md#credentials](../docs/architecture.md#credentials)):
+
+```bash
+op read "op://cachekit/ck-dev-bluesky-default/credential" | wrangler secret put CACHEKIT_API_KEY
+```
+
+Dev deployment: **https://skyline-edge.raywalker.workers.dev** (the dev
+instance URL is a `[vars]` entry, `CACHEKIT_API_URL`). Production routing and
+a custom domain are Stage 4.
+
+Two build-time accommodations for `@cachekit-io/cachekit` 0.1.3 (both retire
+with the 0.1.4 WASM core, blocked on LAB-780): the `nodejs_compat` flag
+(transitive node builtins), and a wrangler `[alias]` stubbing the NAPI-native
+`@cachekit-io/cachekit-core-ts` — the edge never runs that path (interop
+reads only, no ByteStorage envelope), and the stub throws if that ever stops
+being true.
