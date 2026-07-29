@@ -109,11 +109,12 @@ async def _exchange(state: HealthState, reader: asyncio.StreamReader, writer: as
 async def _respond(state: HealthState, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
     try:
         await asyncio.wait_for(_exchange(state, reader, writer), _EXCHANGE_DEADLINE_SECONDS)
-    except (TimeoutError, ConnectionError, OSError, ValueError):
+    except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
         # Port scanners, half-open probes, oversized lines (ValueError from
-        # the reader limit): close without ceremony, and without dumping
-        # "task exception was never retrieved" noise into the deploy logs.
-        pass
+        # the reader limit): expected on a public listener, so close without
+        # escalating — but leave a debug trace so a systematic failure (e.g.
+        # every probe timing out) is diagnosable (Kody review, PR #9).
+        logger.debug("health connection aborted: %r", exc)
     finally:
         writer.close()
         with suppress(Exception):

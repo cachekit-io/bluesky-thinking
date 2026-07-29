@@ -75,15 +75,28 @@ export default {
       if (cached) return cached;
     }
 
-    backend ??= cachekitio({
-      apiKey: env.CACHEKIT_API_KEY,
-      // A non-default apiUrl (the dev instance) is outside the SDK's SSRF
-      // allowlist; the value comes from wrangler config, so opting out is
-      // an operator decision, not a request-time one.
-      ...(env.CACHEKIT_API_URL ? { apiUrl: env.CACHEKIT_API_URL, allowCustomHost: true } : {}),
-    });
+    // handleApi maps its own failure modes to 502/500 responses; this outer
+    // catch exists for what it can't — a throwing backend constructor or an
+    // unforeseen bug — so the caller gets a JSON 500 instead of a Workers
+    // 1101 (Kody review, PR #9).
+    let response: Response;
+    try {
+      backend ??= cachekitio({
+        apiKey: env.CACHEKIT_API_KEY,
+        // A non-default apiUrl (the dev instance) is outside the SDK's SSRF
+        // allowlist; the value comes from wrangler config, so opting out is
+        // an operator decision, not a request-time one.
+        ...(env.CACHEKIT_API_URL ? { apiUrl: env.CACHEKIT_API_URL, allowCustomHost: true } : {}),
+      });
+      response = await handleApi(url, backend, env.HOTPATH);
+    } catch (err) {
+      console.error('edge_unhandled', { path: url.pathname, err: String(err) });
+      return Response.json(
+        { error: 'internal', detail: 'unhandled edge failure' },
+        { status: 500 },
+      );
+    }
 
-    const response = await handleApi(url, backend, env.HOTPATH);
     if (cacheable && (response.status === 200 || response.status === 404)) {
       const ttl =
         response.status === 200 ? EDGE_CACHE_TTL_SECONDS.hit : EDGE_CACHE_TTL_SECONDS.negative;
@@ -113,9 +126,10 @@ export default {
       const res = await fetch(env.INGESTER_HEALTH_URL, { signal: AbortSignal.timeout(90_000) });
       // 503 = process up but Jetstream down — still logged, still keep-alive
       // traffic; the ping's job is inbound bytes, not adjudicating health.
-      console.log(`keep-alive: ${env.INGESTER_HEALTH_URL} -> ${res.status}`);
+      // Structured fields, same idiom as hotpath_verify in handler.ts.
+      console.log('keep-alive', { url: env.INGESTER_HEALTH_URL, status: res.status });
     } catch (err) {
-      console.log(`keep-alive: ${env.INGESTER_HEALTH_URL} unreachable: ${String(err)}`);
+      console.error('keep-alive_failed', { url: env.INGESTER_HEALTH_URL, err: String(err) });
     }
   },
 };
