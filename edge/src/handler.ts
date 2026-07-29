@@ -210,10 +210,8 @@ export async function handleApi(
   const verdict: HotpathVerdict = hotpath
     ? await verifyViaHotpath(hotpath, raw)
     : { state: 'unavailable', detail: 'HOTPATH service binding is not configured' };
-  console.log(
-    `hotpath verify ${segment}/${window}: ${verdict.state}` +
-      (verdict.state === 'unavailable' ? ` (${verdict.detail})` : ` xxh3=${verdict.xxh3}`),
-  );
+  // Structured fields: wrangler tail / Workers Logs can filter on these.
+  console.log('hotpath_verify', { operation: segment, window, ...verdict });
   if (verdict.state === 'invalid') {
     stats.errors += 1;
     return json(500, {
