@@ -55,7 +55,9 @@ def check_key(client: httpx.Client, api_url: str, key: str, args: argparse.Names
         print(f"ABSENT  {key}")
         return args.expect == "absent"
     if status != 200:
-        print(f"ERROR   {key}: HTTP {status} {body[:200]!r}")
+        # Status only — error bodies are not ours and can carry request
+        # context; this output gets recorded as evidence on tickets.
+        print(f"ERROR   {key}: HTTP {status}")
         return False
 
     digest = xxhash.xxh3_64(body).intdigest()

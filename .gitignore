@@ -8,5 +8,4 @@ Cargo.lock
 .ruff_cache/
 .op.env
 
-.op.env
 .op.apikey.env

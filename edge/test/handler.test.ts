@@ -234,4 +234,10 @@ describe('hot-path integrity verification (Stage 3, AC-3)', () => {
     expect(res.headers.get('x-cache')).toBe('MISS');
     expect(called).toBe(false);
   });
+
+  it('reports unavailable when no HOTPATH binding is configured at all', async () => {
+    const res = await handleApi(api('/api/posts_per_minute?window=5m'), backend());
+    expect(res.status).toBe(200);
+    expect(res.headers.get('x-hotpath')).toBe('unavailable');
+  });
 });

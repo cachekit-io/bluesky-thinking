@@ -59,7 +59,7 @@ export interface HotpathBinding {
 
 type HotpathVerdict =
   | { state: 'verified'; xxh3: string }
-  | { state: 'invalid'; xxh3?: string; detail: string }
+  | { state: 'invalid'; xxh3: string; detail: string }
   | { state: 'unavailable'; detail: string };
 
 /**
@@ -205,26 +205,27 @@ export async function handleApi(
   // on the Rust-WASM hot path first. 'invalid' is a hard stop — a corrupt entry
   // must never be served; 'unavailable' degrades honestly: the aggregate is
   // real (it came from the backend), it just goes out unverified and says so.
-  const hotpathHeaders: Record<string, string> = {};
-  if (hotpath) {
-    const verdict = await verifyViaHotpath(hotpath, raw);
-    console.log(
-      `hotpath verify ${segment}/${window}: ${verdict.state}` +
-        ('xxh3' in verdict && verdict.xxh3 ? ` xxh3=${verdict.xxh3}` : ''),
-    );
-    if (verdict.state === 'invalid') {
-      stats.errors += 1;
-      return json(500, {
-        error: 'integrity_check_failed',
-        detail: verdict.detail,
-        key,
-        xxh3_64: verdict.xxh3,
-      });
-    }
-    hotpathHeaders['x-hotpath'] = verdict.state;
-    if (verdict.state === 'verified') {
-      hotpathHeaders['x-hotpath-xxh3'] = verdict.xxh3;
-    }
+  // A missing binding is a deploy-config fault, not a reason to go silent:
+  // it degrades exactly like an unreachable hot path, header and all.
+  const verdict: HotpathVerdict = hotpath
+    ? await verifyViaHotpath(hotpath, raw)
+    : { state: 'unavailable', detail: 'HOTPATH service binding is not configured' };
+  console.log(
+    `hotpath verify ${segment}/${window}: ${verdict.state}` +
+      (verdict.state === 'unavailable' ? ` (${verdict.detail})` : ` xxh3=${verdict.xxh3}`),
+  );
+  if (verdict.state === 'invalid') {
+    stats.errors += 1;
+    return json(500, {
+      error: 'integrity_check_failed',
+      detail: verdict.detail,
+      key,
+      xxh3_64: verdict.xxh3,
+    });
+  }
+  const hotpathHeaders: Record<string, string> = { 'x-hotpath': verdict.state };
+  if (verdict.state === 'verified') {
+    hotpathHeaders['x-hotpath-xxh3'] = verdict.xxh3;
   }
 
   let data: unknown;

@@ -72,3 +72,23 @@ def test_live_mode_builds_backend_from_env(monkeypatch):
     # Old code raised ValueError here; construction makes no network calls.
     publisher = build_publisher(settings, WindowStore())
     assert publisher.secure_enabled
+
+
+def test_live_mode_requires_key_in_process_env(monkeypatch):
+    """A .env-only key selects live mode but the SDK's env config reads process
+    env only — the guard must fail with a clear message, not the SDK's
+    misleading "api_key Field required" (panel finding, LAB-737)."""
+    import pytest
+    from pydantic import SecretStr
+
+    from skyline_ingester.__main__ import build_publisher
+    from skyline_ingester.config import Settings
+    from skyline_ingester.windows import WindowStore
+
+    monkeypatch.delenv("CACHEKIT_API_KEY", raising=False)
+    settings = Settings(
+        cachekit_api_key=SecretStr("ck_test_from_dotenv_only"),
+        cachekit_master_key=SecretStr("a" * 64),
+    )
+    with pytest.raises(RuntimeError, match="real environment variable"):
+        build_publisher(settings, WindowStore())

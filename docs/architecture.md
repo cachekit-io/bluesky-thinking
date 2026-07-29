@@ -106,7 +106,9 @@ config-level custom-host override alongside the credentials:
 
 - Python: env `CACHEKIT_API_URL=https://api.dev.cachekit.io` + `CACHEKIT_ALLOW_CUSTOM_HOST=true`
 - TS: `cachekitio({ apiUrl, allowCustomHost: true })`
-- Rust: `WorkersCachekitIO::builder().api_url(...).allow_custom_host(true)`
+- Rust: `WorkersCachekitIO::builder().api_url(...).allow_custom_host(true)` — **currently
+  bypassed**: `WorkersCachekitIO` panics on every wasm32 request (LAB-1079), so the hot path does a
+  direct `worker::Fetch` GET until the SDK fix ships (`hotpath/README.md`)
 
 Round-trip verified end-to-end: `spike/roundtrip/roundtrip.py` (exists, runs against
 `api.dev.cachekit.io`; passed against the dev instance on 2026-07-29; also exercises `@cache.io`).
@@ -126,7 +128,9 @@ Round-trip verified end-to-end: `spike/roundtrip/roundtrip.py` (exists, runs aga
 - `wasm-bindgen-cli` 0.2.126 to match the crate graph — worker-build 0.1.x auto-downloads 0.2.105
   and fails; pre-install the matching CLI into its cache or PATH.
 - On wasm32 the CachekitIO backend is `cachekit::backend::workers::WorkersCachekitIO` (CF Fetch
-  API); the reqwest-based `CachekitIO` does not implement `Backend` on that target.
+  API); the reqwest-based `CachekitIO` does not implement `Backend` on that target. **LAB-1079**:
+  `WorkersCachekitIO` panics on every live wasm32 request (`SystemTime::now()` in its session
+  headers) — the hot path substitutes a direct `worker::Fetch` GET until the SDK fix is published.
 - Workers builds: `--no-default-features --features workers,cachekitio,encryption,macros`
   (`l1`/moka and `redis`/fred are native-only).
 

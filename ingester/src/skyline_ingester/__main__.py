@@ -33,7 +33,12 @@ def build_publisher(settings: Settings, store: WindowStore) -> Publisher:
         # CACHEKIT_API_URL / CACHEKIT_ALLOW_CUSTOM_HOST for the dev instance).
         # Passing api_key alone is rejected by the SDK ("Both api_url and
         # api_key required if using manual config"), so live mode never came up
-        # before this fix. SDK config reads real env vars only — not .env.
+        # before this fix.
+        if "CACHEKIT_API_KEY" not in os.environ:
+            # Settings reads .env; the SDK's env config reads process env only.
+            # Without this guard a .env-only key selects live mode and then dies
+            # in the SDK with a misleading "api_key Field required".
+            raise RuntimeError("CACHEKIT_API_KEY must be a real environment variable in live mode (the SDK does not read .env)")
         backend = CachekitIOBackend()
         logger.info("live mode: publishing to CachekitIO at %s", os.environ.get("CACHEKIT_API_URL", "https://api.cachekit.io"))
     else:
