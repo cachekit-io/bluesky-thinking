@@ -16,9 +16,9 @@ interop test, and a working proof of CacheKit's differentiators:
   stores ciphertext only.
 - **≈ $0/month** — all third-party hosting stays inside free tiers (cost table below).
 
-> Status: **Stage 2 components merged, Stage 3 live integration in progress** (LAB-737).
-> Architecture locked in [`docs/architecture.md`](docs/architecture.md); build stages are groomed
-> from it.
+> Status: **Stage 3 merged (live cross-SDK integration proven), Stage 4 deploy in progress**
+> (LAB-738). Architecture locked in [`docs/architecture.md`](docs/architecture.md); build stages
+> are groomed from it.
 
 ## Architecture
 
@@ -26,8 +26,8 @@ interop test, and a working proof of CacheKit's differentiators:
 flowchart LR
     JS[Bluesky Jetstream\npublic WebSocket] -->|filtered JSON events| ING
 
-    subgraph Always-free VM
-        ING[Python ingester + aggregator\ncachekit-py 0.15\n5m / 1h / 24h windows]
+    subgraph Render free web service
+        ING[Python ingester + aggregator\ncachekit-py 0.15\n5m / 1h / 24h windows\n+ /health on PORT]
     end
 
     ING -->|"@cache.io writes\ninterop/v1 keys"| CK[(CachekitIO\napi.dev.cachekit.io\nnamespace: bluesky-thinking)]
@@ -61,22 +61,43 @@ All three SDKs address the cache with **interop/v1** keys (`bluesky-thinking:{op
 
 ## Cost table (AC-8)
 
-| Component | Host | Free-tier limit | Skyline's use | Cost |
+Third-party hosting only, with the **binding** limit for each row — not just "free". Verified
+against the providers' published limits, 2026-07-29.
+
+| Component | Host | Binding free-tier limit | Skyline's use | Cost |
 | :--- | :--- | :--- | :--- | ---: |
-| Jetstream feed | Bluesky public infra | none (public, no auth) | 1 WebSocket consumer | $0 |
-| Python ingester | Render free web service | 750 instance-hrs/mo — enough for one continuously-running service¹ | one free web service, normally kept warm by a CF Worker cron ping | $0 |
-| Edge API + WASM | Cloudflare Workers free plan | 100k req/day, 10 ms CPU/invocation | cached reads, ≪ limits | $0 |
-| Dashboard | Cloudflare Workers Assets | static asset requests free | tiny static site | $0 |
+| Jetstream feed | Bluesky public infra | none (public, no auth) | 1 outbound WebSocket | $0 |
+| Python ingester | Render free **web service**¹ | **750 instance-hrs/month, workspace-wide.** A 31-day month is 744 h, so exactly **one** always-on free service fits, with ~6 h to spare — a second would exhaust the budget and suspend every free service in the workspace | one always-on service, kept warm by the CF cron ping | $0 |
+| Edge API + dashboard + Rust-WASM hot path | Cloudflare Workers free plan | **100k requests/day and 10 ms CPU per invocation, shared across both Workers** (`skyline-edge` incl. its cron, `skyline-hotpath`) | cached reads, ≪ limits; the hot path is reached by service binding (its subrequests don't hit the public URL) | $0 |
+| Keep-alive cron | Cloudflare cron trigger on `skyline-edge` | cron triggers are free; each firing counts as a request in the same 100k/day budget | ~144 pings/day (every 10 min) ≈ **4,464/month — 0.14 % of the daily request budget** | $0 |
 | Cache backend | CachekitIO (ours) | n/a — dogfood | one demo tenant | $0² |
 | **Total** | | | | **$0/mo** |
 
-¹ Free services spin down after 15 min without inbound traffic; a Cloudflare Worker cron trigger
-pings every 10 min to keep the ingester warm ($0). Restarts lose in-memory window state, mitigated
-by checkpointing aggregation state into CacheKit.
+¹ Web services are the **only** service type on Render's free tier — background workers and cron
+jobs are paid, which is why the ingester serves `GET /health` on `$PORT` and why the keep-alive is
+a Cloudflare cron, not a Render one. Free services spin down after 15 min without *inbound* traffic
+(the outbound Jetstream socket doesn't count); the cron ping supplies that traffic. Restarts lose
+in-memory window state, mitigated by checkpointing aggregation state into CacheKit (`posts_per_minute`
+and `lang_mix` restore exactly; per-minute trending counters are top-K-truncated in the snapshot, so
+long-tail counts are approximate after a restart).
 ² CachekitIO is the platform being showcased — we build, run, and own it. No third-party line item.
 
 Fly.io was evaluated and **rejected**: its free tier was discontinued in 2024 (new orgs get a
-one-time trial credit only; an always-on 256 MB machine bills ≈ $2/mo).
+one-time trial credit only; an always-on 256 MB machine bills ≈ $2/mo). Oracle Cloud's always-free
+VM was dropped in Stage 3 grooming (credit-card requirement); Render replaced it.
+
+## Deploy (Stage 4)
+
+No CI/CD by design — a demo deploys by hand:
+
+- **Ingester (Render)**: [`render.yaml`](render.yaml) is the blueprint. First deploy is manual —
+  Render dashboard → *New → Blueprint* → connect this repo, then paste the two secrets
+  (`CACHEKIT_API_KEY`, `CACHEKIT_MASTER_KEY` from `op://cachekit/ck-dev-bluesky-default`). The
+  ingester **fails closed** without both. Subsequent deploys ride Render's git-push auto-deploy.
+- **Edge + hot path (Cloudflare)**: `cd edge && npx wrangler deploy` ·
+  `cd hotpath && npx wrangler deploy` (see each component's README for secrets).
+- **Verification**: [`stage4/verify.sh`](stage4/verify.sh) probes reachability, `X-Cache: HIT`,
+  payload freshness and the hit-rate counters against the live deployment.
 
 ## Repository layout
 

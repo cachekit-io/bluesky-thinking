@@ -1,0 +1,40 @@
+# Render Blueprint for the Skyline ingester (LAB-738 AC-0/AC-1).
+#
+# Free-tier constraints this file encodes (render.com/docs/free, 2026-07-29):
+# - Only WEB services are free — hence the ingester serves GET /health on $PORT
+#   (skyline_ingester/health.py) instead of running as a background worker.
+# - Free services spin down after 15 min without INBOUND traffic; the outbound
+#   Jetstream socket does not count. The keep-alive is a Cloudflare Worker cron
+#   (edge/wrangler.toml [triggers]) pinging /health every 10 minutes — Render's
+#   own cron jobs are not free.
+# - The filesystem is ephemeral (wiped on spin-down/redeploy). Window state
+#   survives restarts via the CacheKit checkpoint, never via disk.
+#
+# First deploy is manual (dashboard: New > Blueprint > connect this repo).
+# The two secrets come from op://cachekit/ck-dev-bluesky-default:
+#   CACHEKIT_API_KEY    <- the `credential` field
+#   CACHEKIT_MASTER_KEY <- the `encryption_key` field (64-hex)
+# The ingester fails closed without both (live mode refuses to start).
+services:
+  - type: web
+    name: skyline-ingester
+    runtime: python
+    plan: free
+    region: oregon # the demo's single origin region; the edge is the global tier
+    rootDir: ingester
+    buildCommand: uv sync --locked
+    startCommand: uv run skyline-ingester
+    # /health is 503 while Jetstream is disconnected, so Render's health check
+    # doubles as a dead-consumer restart (checkpoint restore makes that safe).
+    healthCheckPath: /health
+    envVars:
+      - key: CACHEKIT_API_KEY
+        sync: false # secret — set in the dashboard, never committed
+      - key: CACHEKIT_MASTER_KEY
+        sync: false # secret — set in the dashboard, never committed
+      - key: CACHEKIT_API_URL
+        value: https://api.dev.cachekit.io
+      - key: CACHEKIT_ALLOW_CUSTOM_HOST
+        value: "true" # dev instance is outside the SDK's SSRF allowlist
+      - key: JETSTREAM_URL
+        value: wss://jetstream2.us-east.bsky.network/subscribe

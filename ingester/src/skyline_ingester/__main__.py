@@ -14,6 +14,7 @@ import time
 
 from skyline_ingester.backends import MemoryBytesBackend
 from skyline_ingester.config import Settings
+from skyline_ingester.health import HealthState, serve_health
 from skyline_ingester.jetstream import consume
 from skyline_ingester.publisher import Publisher
 from skyline_ingester.windows import WINDOW_TTLS, WindowStore
@@ -51,7 +52,7 @@ def build_publisher(settings: Settings, store: WindowStore) -> Publisher:
     return publisher
 
 
-async def publish_loop(publisher: Publisher, tick_seconds: float) -> None:
+async def publish_loop(publisher: Publisher, tick_seconds: float, health: HealthState | None = None) -> None:
     next_due = dict.fromkeys(WINDOW_TTLS, 0.0)
     while True:
         now = time.time()
@@ -60,6 +61,8 @@ async def publish_loop(publisher: Publisher, tick_seconds: float) -> None:
                 published = await asyncio.to_thread(publisher.publish_window, window)
                 logger.info("published %d aggregates for window %s", published, window)
                 next_due[window] = now + ttl / 2
+                if health is not None and published:
+                    health.last_publish_at = time.time()
         await asyncio.sleep(tick_seconds)
 
 
@@ -76,10 +79,12 @@ async def checkpoint_loop(publisher: Publisher, interval_seconds: float) -> None
 async def run(settings: Settings) -> None:
     store = WindowStore()
     publisher = build_publisher(settings, store)
+    health = HealthState()
     await asyncio.to_thread(publisher.restore_checkpoint)
     await asyncio.gather(
-        consume(settings.jetstream_url, store),
-        publish_loop(publisher, settings.publish_tick_seconds),
+        serve_health(health, settings.port),
+        consume(settings.jetstream_url, store, health),
+        publish_loop(publisher, settings.publish_tick_seconds, health),
         checkpoint_loop(publisher, settings.checkpoint_interval_seconds),
     )
 

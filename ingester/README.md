@@ -31,9 +31,26 @@ provides that) — the SDK does not read this service's `.env` file:
 | `CACHEKIT_API_URL` | `https://api.cachekit.io` | Backend endpoint (the demo uses the dev instance, `https://api.dev.cachekit.io`). |
 | `CACHEKIT_ALLOW_CUSTOM_HOST` | unset | Required `true` for the dev instance — its hostname is outside the SDK's SSRF allowlist. |
 | `JETSTREAM_URL` | `wss://jetstream2.us-east.bsky.network/subscribe` | Jetstream endpoint. |
+| `PORT` | `8080` | `/health` listener port (Render injects this on deploy). |
 | `PUBLISH_TICK_SECONDS` | `15` | Publish-loop poll interval. |
 | `CHECKPOINT_INTERVAL_SECONDS` | `120` | Window-state checkpoint cadence. |
 | `TOP_N` | `50` | Entries kept in trending lists. |
+
+## Health endpoint (Stage 4, LAB-738)
+
+The ingester's whole HTTP surface is `GET /health` on `$PORT` — it exists because Render's free
+tier only hosts *web services*, which must answer HTTP, and because the keep-alive cron
+(`edge/wrangler.toml [triggers]`) needs something to ping. Liveness only, no aggregate data, no
+key material:
+
+```json
+{"status": "ok", "jetstream_connected": true, "events_seen": 12345,
+ "last_event_age_seconds": 0.4, "last_publish_age_seconds": 7.1, "uptime_seconds": 900.0}
+```
+
+Returns **503** whenever the Jetstream socket is down, so a dead consumer inside a live process is
+visible from outside — Render's health check then restarts the service, and the CacheKit
+checkpoint makes that restart safe. Deployment blueprint: [`../render.yaml`](../render.yaml).
 
 ## What it publishes
 

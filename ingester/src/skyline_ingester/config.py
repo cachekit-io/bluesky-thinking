@@ -15,6 +15,10 @@ class Settings(BaseSettings):
     # (AC-6 groundwork). Absent -> the secure cache is disabled, everything else runs.
     cachekit_master_key: SecretStr | None = None
 
+    # PORT: injected by Render for its free-tier port scan; the /health
+    # listener (LAB-738 AC-0) binds it.
+    port: int = 8080
+
     jetstream_url: str = "wss://jetstream2.us-east.bsky.network/subscribe"
     publish_tick_seconds: float = 15.0
     checkpoint_interval_seconds: float = 120.0
