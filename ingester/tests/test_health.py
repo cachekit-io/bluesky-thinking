@@ -97,6 +97,20 @@ async def _server_end_to_end() -> None:
         status, headers, _ = await _request(port, b"POST /health HTTP/1.1\r\nhost: x\r\ncontent-length: 0\r\n\r\n")
         assert status == 405
         assert headers["allow"] == "GET, HEAD"
+
+        # Oversized request line: the reader limit turns it into a ValueError
+        # inside the handler, which must close the connection quietly instead
+        # of escaping as an unretrieved task exception (expert-panel finding).
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        writer.write(b"GET /" + b"a" * 16384 + b" HTTP/1.1\r\n\r\n")
+        await writer.drain()
+        assert await reader.read() == b""
+        writer.close()
+        await writer.wait_closed()
+
+        # And the listener still answers afterwards.
+        status, _, _ = await _request(port, b"GET /health HTTP/1.1\r\nhost: x\r\n\r\n")
+        assert status == 200
     finally:
         server.close()
         await server.wait_closed()

@@ -52,7 +52,7 @@ def build_publisher(settings: Settings, store: WindowStore) -> Publisher:
     return publisher
 
 
-async def publish_loop(publisher: Publisher, tick_seconds: float, health: HealthState | None = None) -> None:
+async def publish_loop(publisher: Publisher, tick_seconds: float, health: HealthState) -> None:
     next_due = dict.fromkeys(WINDOW_TTLS, 0.0)
     while True:
         now = time.time()
@@ -61,8 +61,8 @@ async def publish_loop(publisher: Publisher, tick_seconds: float, health: Health
                 published = await asyncio.to_thread(publisher.publish_window, window)
                 logger.info("published %d aggregates for window %s", published, window)
                 next_due[window] = now + ttl / 2
-                if health is not None and published:
-                    health.last_publish_at = time.time()
+                if published:
+                    health.published()
         await asyncio.sleep(tick_seconds)
 
 

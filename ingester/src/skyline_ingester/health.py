@@ -24,9 +24,15 @@ from contextlib import suppress
 logger = logging.getLogger(__name__)
 
 _REASONS = {200: "OK", 404: "Not Found", 405: "Method Not Allowed", 503: "Service Unavailable"}
-_LINE_TIMEOUT_SECONDS = 5.0
-# A request line / header line longer than this is not a health probe.
+# One deadline for the whole exchange (read + respond). Per-line timeouts
+# alone let a client drip one header every few seconds and hold the
+# connection — and its task on the shared ingest loop — open forever
+# (expert-panel finding, CWE-400).
+_EXCHANGE_DEADLINE_SECONDS = 10.0
+# Line length is enforced by the StreamReader limit= (readline raises
+# ValueError past it); this also bounds per-connection buffer memory.
 _MAX_LINE_BYTES = 8192
+_MAX_HEADER_LINES = 100
 
 
 class HealthState:
@@ -48,6 +54,9 @@ class HealthState:
         self.events_seen += 1
         self.last_event_at = self._now()
 
+    def published(self) -> None:
+        self.last_publish_at = self._now()
+
     def snapshot(self) -> tuple[int, dict]:
         """(HTTP status, body) for /health — 503 whenever Jetstream is down."""
         now = self._now()
@@ -66,39 +75,45 @@ class HealthState:
         }
 
 
+async def _exchange(state: HealthState, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    request_line = await reader.readline()
+    method, path, *_ = (*request_line.decode("latin-1").split(), "", "")
+    # Drain headers so well-behaved clients aren't reset mid-send; the count
+    # cap plus the caller's overall deadline bound hostile ones.
+    for _ in range(_MAX_HEADER_LINES):
+        line = await reader.readline()
+        if line in (b"\r\n", b"\n", b""):
+            break
+    extra_headers = ""
+    if method not in ("GET", "HEAD"):
+        status, body = 405, {"error": "method_not_allowed"}
+        extra_headers = "allow: GET, HEAD\r\n"
+    elif path.partition("?")[0] != "/health":
+        status, body = 404, {"error": "not_found"}
+    else:
+        status, body = state.snapshot()
+    payload = json.dumps(body).encode()
+    writer.write(
+        (
+            f"HTTP/1.1 {status} {_REASONS[status]}\r\n"
+            f"content-type: application/json\r\n"
+            f"content-length: {len(payload)}\r\n"
+            f"{extra_headers}"
+            f"connection: close\r\n\r\n"
+        ).encode()
+        + (b"" if method == "HEAD" else payload)
+    )
+    await writer.drain()
+
+
 async def _respond(state: HealthState, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
     try:
-        request_line = await asyncio.wait_for(reader.readline(), _LINE_TIMEOUT_SECONDS)
-        if len(request_line) > _MAX_LINE_BYTES:
-            return
-        method, path, *_ = (*request_line.decode("latin-1").split(), "", "")
-        # Drain headers so well-behaved clients aren't reset mid-send.
-        while True:
-            line = await asyncio.wait_for(reader.readline(), _LINE_TIMEOUT_SECONDS)
-            if line in (b"\r\n", b"\n", b"") or len(line) > _MAX_LINE_BYTES:
-                break
-        extra_headers = ""
-        if method not in ("GET", "HEAD"):
-            status, body = 405, {"error": "method_not_allowed"}
-            extra_headers = "allow: GET, HEAD\r\n"
-        elif path.partition("?")[0] != "/health":
-            status, body = 404, {"error": "not_found"}
-        else:
-            status, body = state.snapshot()
-        payload = json.dumps(body).encode()
-        writer.write(
-            (
-                f"HTTP/1.1 {status} {_REASONS[status]}\r\n"
-                f"content-type: application/json\r\n"
-                f"content-length: {len(payload)}\r\n"
-                f"{extra_headers}"
-                f"connection: close\r\n\r\n"
-            ).encode()
-            + (b"" if method == "HEAD" else payload)
-        )
-        await writer.drain()
-    except (TimeoutError, ConnectionError, OSError):
-        pass  # port scanners and half-open probes; nothing to answer
+        await asyncio.wait_for(_exchange(state, reader, writer), _EXCHANGE_DEADLINE_SECONDS)
+    except (TimeoutError, ConnectionError, OSError, ValueError):
+        # Port scanners, half-open probes, oversized lines (ValueError from
+        # the reader limit): close without ceremony, and without dumping
+        # "task exception was never retrieved" noise into the deploy logs.
+        pass
     finally:
         writer.close()
         with suppress(Exception):
@@ -106,9 +121,8 @@ async def _respond(state: HealthState, reader: asyncio.StreamReader, writer: asy
 
 
 async def start_health_server(state: HealthState, port: int, host: str = "0.0.0.0") -> asyncio.Server:
-    server = await asyncio.start_server(lambda r, w: _respond(state, r, w), host=host, port=port)
-    bound = server.sockets[0].getsockname()[1] if server.sockets else port
-    logger.info("health endpoint listening on %s:%d", host, bound)
+    server = await asyncio.start_server(lambda r, w: _respond(state, r, w), host=host, port=port, limit=_MAX_LINE_BYTES)
+    logger.info("health endpoint listening on %s:%d", host, server.sockets[0].getsockname()[1])
     return server
 
 

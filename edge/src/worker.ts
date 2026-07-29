@@ -21,8 +21,22 @@ interface Env {
 
 let backend: Backend | null = null;
 
+/** Structural slice of ExecutionContext (repo doesn't use workers-types). */
+interface Ctx {
+  waitUntil(promise: Promise<unknown>): void;
+}
+
+/** Structural slice of the Workers-only caches.default (not in lib.dom). */
+interface EdgeCache {
+  match(key: string): Promise<Response | undefined>;
+  put(key: string, response: Response): Promise<void>;
+}
+
+/** POP-cache TTLs for the miss-minting guard below. */
+const EDGE_CACHE_TTL_SECONDS = { hit: 15, negative: 10 } as const;
+
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx?: Ctx): Promise<Response> {
     const url = new URL(request.url);
 
     if (!url.pathname.startsWith('/api/')) {
@@ -44,6 +58,23 @@ export default {
       );
     }
 
+    // Miss-minting guard (Stage-3 panel finding, closed in LAB-738): these
+    // URLs are public and the backend bills misses, so an unauthenticated
+    // client must not be able to reach CachekitIO at will. Front every
+    // aggregate read with the POP cache, 404s included (negative caching) —
+    // repeat requests cost a Cloudflare cache hit, not a billable miss.
+    // /api/stats stays uncached: it's per-isolate module state, no backend
+    // call to protect, and caching it would blind the dashboard's counters.
+    // Scope note: caches.default is per-POP, so this bounds minting to one
+    // backend read per URL per POP per TTL rather than eliminating it.
+    // absent under vitest / the node demo script
+    const edgeCache = (globalThis as { caches?: { default?: EdgeCache } }).caches?.default;
+    const cacheable = edgeCache !== undefined && url.pathname !== '/api/stats';
+    if (cacheable) {
+      const cached = await edgeCache.match(request.url);
+      if (cached) return cached;
+    }
+
     backend ??= cachekitio({
       apiKey: env.CACHEKIT_API_KEY,
       // A non-default apiUrl (the dev instance) is outside the SDK's SSRF
@@ -52,7 +83,18 @@ export default {
       ...(env.CACHEKIT_API_URL ? { apiUrl: env.CACHEKIT_API_URL, allowCustomHost: true } : {}),
     });
 
-    return handleApi(url, backend, env.HOTPATH);
+    const response = await handleApi(url, backend, env.HOTPATH);
+    if (cacheable && (response.status === 200 || response.status === 404)) {
+      const ttl =
+        response.status === 200 ? EDGE_CACHE_TTL_SECONDS.hit : EDGE_CACHE_TTL_SECONDS.negative;
+      const copy = new Response(response.body, response); // mutable headers
+      copy.headers.set('cache-control', `public, s-maxage=${ttl}`);
+      const store = edgeCache.put(request.url, copy.clone());
+      if (ctx) ctx.waitUntil(store);
+      else await store;
+      return copy;
+    }
+    return response;
   },
 
   /**

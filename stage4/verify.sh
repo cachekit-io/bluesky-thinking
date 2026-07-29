@@ -10,6 +10,8 @@
 set -euo pipefail
 
 EDGE="${EDGE_URL:-https://skyline-edge.raywalker.workers.dev}"
+# Guessed name-based URL; if the first Render deploy lands suffixed, update it
+# here AND in edge/wrangler.toml (INGESTER_HEALTH_URL).
 INGESTER="${INGESTER_URL:-https://skyline-ingester.onrender.com}"
 WINDOW="${WINDOW:-5m}"
 # Locked contract: 5m TTL is 60 s, republished at TTL/2 — anything older than
@@ -20,7 +22,7 @@ hitrate() {
     local duration="${1:-3600}" interval=60 elapsed=0
     echo "sampling $EDGE/api/stats every ${interval}s for ${duration}s (per-isolate counters)"
     while [ "$elapsed" -le "$duration" ]; do
-        printf '%s %s\n' "$(date -u +%FT%TZ)" "$(curl -fsS "$EDGE/api/stats")" || true
+        printf '%s %s\n' "$(date -u +%FT%TZ)" "$(curl -fsS "$EDGE/api/stats")"
         sleep "$interval"
         elapsed=$((elapsed + interval))
     done
