@@ -54,16 +54,18 @@ jobs:
       - name: Clippy (wasm32)
         run: cargo clippy --target wasm32-unknown-unknown --locked -- -D warnings
       # Build-chain pins from docs/architecture.md §Build-chain pins:
-      # worker-build@^0.1 with wasm-bindgen-cli 0.2.126 pre-installed on PATH —
-      # worker-build 0.1.x auto-downloads CLI 0.2.105 and fails against the
-      # crate graph's `wasm-bindgen = "=0.2.126"` pin.
-      - name: Install wasm-bindgen-cli 0.2.126 (pinned, checksummed)
+      # worker-build 0.1.x ignores PATH and hardcodes CLI 0.2.105 into its own
+      # cache (~/.cache/worker-build/wasm-bindgen-*-0.2.105/), which fails
+      # against the crate graph's `wasm-bindgen = "=0.2.126"` pin. Fix per the
+      # docs: pre-install the matching 0.2.126 binary INTO that cache dir —
+      # the 0.2.105 dir name is deliberate, it's the path worker-build invokes.
+      - name: Seed worker-build cache with wasm-bindgen-cli 0.2.126 (pinned, checksummed)
         run: |
           curl -sSfL -o /tmp/wb.tar.gz https://github.com/wasm-bindgen/wasm-bindgen/releases/download/0.2.126/wasm-bindgen-0.2.126-x86_64-unknown-linux-musl.tar.gz
           echo "064948d58e2d6c0a745216477a639ba696216d6309aaa902939d1b865b1d869d  /tmp/wb.tar.gz" | sha256sum -c -
-          mkdir -p /tmp/wb126
-          tar xzf /tmp/wb.tar.gz -C /tmp/wb126 --strip-components=1
-          echo "/tmp/wb126" >> "$GITHUB_PATH"
+          mkdir -p "$HOME/.cache/worker-build/wasm-bindgen-x86_64-unknown-linux-musl-0.2.105"
+          tar xzf /tmp/wb.tar.gz -C "$HOME/.cache/worker-build/wasm-bindgen-x86_64-unknown-linux-musl-0.2.105" --strip-components=1
+          "$HOME/.cache/worker-build/wasm-bindgen-x86_64-unknown-linux-musl-0.2.105/wasm-bindgen" --version
       - name: Install worker-build 0.1.14 (pinned)
         run: cargo install worker-build --version 0.1.14 --locked
       - name: Worker build (wasm32, release)
