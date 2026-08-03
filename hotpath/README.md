@@ -47,6 +47,10 @@ $ worker-build --release                         # reproducible wasm32 build (th
 $ npx wrangler deploy                            # runs worker-build itself, then uploads
 ```
 
+CI ([`hotpath-qa`](../.github/workflows/hotpath-qa.yml)) runs everything above except the deploy —
+native tests + clippy, wasm32 clippy, and the pinned `worker-build --release` — on every PR and
+push touching `hotpath/`.
+
 Secrets: `CACHEKIT_API_KEY` via `wrangler secret put CACHEKIT_API_KEY`, from
 `op://cachekit/ck-dev-bluesky-default/credential`
 ([docs/architecture.md#credentials](../docs/architecture.md#credentials)).

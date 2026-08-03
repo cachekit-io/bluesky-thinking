@@ -1,0 +1,41 @@
+name: edge-qa
+
+on:
+  pull_request:
+    paths:
+      - "edge/**"
+      - ".github/workflows/edge-qa.yml"
+  push:
+    branches: [main]
+    paths:
+      - "edge/**"
+      - ".github/workflows/edge-qa.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  qa:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: edge
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: edge/package-lock.json
+      # Lockfile-respecting install — LAB-831: a PR editing package.json without
+      # the lockfile (or pinning an uninstallable version) must fail here.
+      - name: Install (locked)
+        run: npm ci
+      - name: Lint
+        run: npm run lint
+      - name: Type check
+        run: npm run type-check
+      - name: Format check
+        run: npm run format:check
+      - name: Tests (no network, no creds)
+        run: npm test
