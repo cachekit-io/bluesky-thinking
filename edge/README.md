@@ -37,8 +37,7 @@ npm run demo          # dashboard + real handler on http://localhost:8788, seede
 npm run lint && npm run format:check && npm run type-check
 ```
 
-CI ([`edge-qa`](../.github/workflows/edge-qa.yml)) runs exactly these — `npm ci` (lockfile-strict),
-lint, type-check, format check, tests — on every PR and push touching `edge/`.
+CI ([`edge-qa`](../.github/workflows/edge-qa.yml)) gates every PR and push touching `edge/`.
 
 `test/keys.test.ts` pins the byte-locked key vectors from
 [`docs/architecture.md`](../docs/architecture.md#byte-locked-example-keys-generated-by-shipped-sdks-verified-3-way);

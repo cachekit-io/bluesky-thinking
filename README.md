@@ -89,10 +89,8 @@ VM was dropped in Stage 3 grooming (credit-card requirement); Render replaced it
 ## Deploy (Stage 4)
 
 No CD by design — a demo deploys by hand. CI, however, gates all three components on PR + push
-(path-filtered): [`ingester-qa`](.github/workflows/ingester-qa.yml) (ruff + pytest),
-[`edge-qa`](.github/workflows/edge-qa.yml) (npm ci, eslint, tsc, prettier, vitest) and
-[`hotpath-qa`](.github/workflows/hotpath-qa.yml) (cargo test, clippy on native + wasm32, and the
-pinned `worker-build --release`).
+(path-filtered): [`ingester-qa`](.github/workflows/ingester-qa.yml),
+[`edge-qa`](.github/workflows/edge-qa.yml) and [`hotpath-qa`](.github/workflows/hotpath-qa.yml).
 
 - **Ingester (Render)**: [`render.yaml`](render.yaml) is the blueprint. First deploy is manual —
   Render dashboard → *New → Blueprint* → connect this repo, then paste the two secrets

@@ -26,7 +26,7 @@ jobs:
         with:
           toolchain: stable
           components: clippy
-      - uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: hotpath
       - name: Tests (no network, no creds)
@@ -41,6 +41,10 @@ jobs:
     defaults:
       run:
         working-directory: hotpath
+    env:
+      # The 0.2.105 dir name is the path worker-build 0.1.14 hardcodes — the
+      # exact worker-build pin below and this dir name move together.
+      WB_CACHE_DIR: /home/runner/.cache/worker-build/wasm-bindgen-x86_64-unknown-linux-musl-0.2.105
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable
@@ -48,25 +52,28 @@ jobs:
           toolchain: stable
           targets: wasm32-unknown-unknown
           components: clippy
-      - uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: hotpath
       - name: Clippy (wasm32)
         run: cargo clippy --target wasm32-unknown-unknown --locked -- -D warnings
-      # Build-chain pins from docs/architecture.md §Build-chain pins:
-      # worker-build 0.1.x ignores PATH and hardcodes CLI 0.2.105 into its own
-      # cache (~/.cache/worker-build/wasm-bindgen-*-0.2.105/), which fails
-      # against the crate graph's `wasm-bindgen = "=0.2.126"` pin. Fix per the
-      # docs: pre-install the matching 0.2.126 binary INTO that cache dir —
-      # the 0.2.105 dir name is deliberate, it's the path worker-build invokes.
+      # worker-build 0.1.x ignores PATH — seed its cache with the CLI the crate
+      # graph pins (=0.2.126). Canonical: docs/architecture.md §Build-chain pins.
       - name: Seed worker-build cache with wasm-bindgen-cli 0.2.126 (pinned, checksummed)
         run: |
           curl -sSfL -o /tmp/wb.tar.gz https://github.com/wasm-bindgen/wasm-bindgen/releases/download/0.2.126/wasm-bindgen-0.2.126-x86_64-unknown-linux-musl.tar.gz
           echo "064948d58e2d6c0a745216477a639ba696216d6309aaa902939d1b865b1d869d  /tmp/wb.tar.gz" | sha256sum -c -
-          mkdir -p "$HOME/.cache/worker-build/wasm-bindgen-x86_64-unknown-linux-musl-0.2.105"
-          tar xzf /tmp/wb.tar.gz -C "$HOME/.cache/worker-build/wasm-bindgen-x86_64-unknown-linux-musl-0.2.105" --strip-components=1
-          "$HOME/.cache/worker-build/wasm-bindgen-x86_64-unknown-linux-musl-0.2.105/wasm-bindgen" --version
+          mkdir -p "$WB_CACHE_DIR"
+          tar xzf /tmp/wb.tar.gz -C "$WB_CACHE_DIR" --strip-components=1
+          "$WB_CACHE_DIR/wasm-bindgen" --version
       - name: Install worker-build 0.1.14 (pinned)
         run: cargo install worker-build --version 0.1.14 --locked
       - name: Worker build (wasm32, release)
         run: worker-build --release
+      # If a future worker-build pin hardcodes a different CLI version, it
+      # ignores the seed and downloads an unchecksummed binary — fail if the
+      # seeded dir is no longer the only one worker-build has.
+      - name: Assert the seeded (checksummed) CLI was the one used
+        run: |
+          test -x "$WB_CACHE_DIR/wasm-bindgen"
+          [ "$(ls -d "$HOME"/.cache/worker-build/wasm-bindgen-* | wc -l)" -eq 1 ]

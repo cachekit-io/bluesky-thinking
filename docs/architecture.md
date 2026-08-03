@@ -138,9 +138,10 @@ Round-trip verified end-to-end: `spike/roundtrip/roundtrip.py` (exists, runs aga
 - `worker-build@^0.1` (0.2.x requires `worker` ≥ 0.8; `cachekit-rs` pins `worker` 0.4).
 - `wasm-bindgen-cli` 0.2.126 to match the crate graph — worker-build 0.1.x auto-downloads 0.2.105
   and fails; pre-install the matching CLI **into its cache** at
-  `~/.cache/worker-build/wasm-bindgen-x86_64-unknown-linux-musl-0.2.105/` (the 0.2.105 dir name is
-  the hardcoded path worker-build invokes — PATH alone is ignored, verified in CI 2026-08-03; see
-  `.github/workflows/hotpath-qa.yml`).
+  `~/.cache/worker-build/wasm-bindgen-<host-triple>-0.2.105/` (PATH alone is ignored, verified in
+  CI 2026-08-03). The `0.2.105` dir name is the path worker-build **0.1.14** hardcodes — CI pins
+  worker-build exactly for that reason, so the two must be bumped together; CI's exact incantation
+  is in `.github/workflows/hotpath-qa.yml`.
 - On wasm32 the CachekitIO backend is `cachekit::backend::workers::WorkersCachekitIO` (CF Fetch
   API); the reqwest-based `CachekitIO` does not implement `Backend` on that target. **LAB-1079**:
   `WorkersCachekitIO` panics on every live wasm32 request (`SystemTime::now()` in its session
