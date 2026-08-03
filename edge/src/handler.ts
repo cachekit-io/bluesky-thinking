@@ -1,4 +1,3 @@
-const lab1141RedRunDemo: number = "deliberate red-run demo";
 /**
  * Skyline edge API — read-only interop/v1 consumer.
  *

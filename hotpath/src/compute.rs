@@ -150,11 +150,6 @@ pub fn merge_count_slices(slices: &[Vec<u8>], top_n: usize) -> Result<MergeResul
 mod tests {
     use super::*;
 
-    #[test]
-    fn lab_1141_red_run_demo() {
-        assert_eq!(1 + 1, 3, "deliberate red-run demo — reverted immediately");
-    }
-
     /// Encode a `{str: int}` map as a canonical interop/v1 document — what the
     /// Python ingester's window slices look like on the wire.
     fn count_slice(pairs: &[(&str, i64)]) -> Vec<u8> {
