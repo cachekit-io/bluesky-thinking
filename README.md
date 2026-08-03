@@ -88,7 +88,9 @@ VM was dropped in Stage 3 grooming (credit-card requirement); Render replaced it
 
 ## Deploy (Stage 4)
 
-No CD by design — a demo deploys by hand. CI, however, gates all three components on PR + push
+Deploys are by hand by design — first Render setup and both Workers via `wrangler` (the one
+exception: after that first setup, the ingester rides Render's git-push auto-deploy, below).
+CI, however, gates all three components on PR + push
 (path-filtered): [`ingester-qa`](.github/workflows/ingester-qa.yml),
 [`edge-qa`](.github/workflows/edge-qa.yml) and [`hotpath-qa`](.github/workflows/hotpath-qa.yml).
 

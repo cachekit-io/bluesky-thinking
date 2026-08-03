@@ -22,6 +22,8 @@ jobs:
         working-directory: hotpath
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable
         with:
           toolchain: stable
@@ -47,6 +49,8 @@ jobs:
       WB_CACHE_DIR: /home/runner/.cache/worker-build/wasm-bindgen-x86_64-unknown-linux-musl-0.2.105
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable
         with:
           toolchain: stable
