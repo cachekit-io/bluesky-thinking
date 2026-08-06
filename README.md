@@ -18,7 +18,10 @@ interop test, and a working proof of CacheKit's differentiators:
 
 > Status: **live** — dashboard + API at
 > [`skyline-edge.raywalker.workers.dev`](https://skyline-edge.raywalker.workers.dev), ingester on
-> Render, hot path at `skyline-hotpath.raywalker.workers.dev`. Re-verify any time with
+> Render ([`skyline-ingester.onrender.com/health`](https://skyline-ingester.onrender.com/health)),
+> hot path at
+> [`skyline-hotpath.raywalker.workers.dev`](https://skyline-hotpath.raywalker.workers.dev).
+> Re-verify any time with
 > [`stage4/verify.sh`](stage4/verify.sh) (reachability, `X-Cache: HIT` from a non-origin POP,
 > payload freshness). Architecture locked in [`docs/architecture.md`](docs/architecture.md).
 
