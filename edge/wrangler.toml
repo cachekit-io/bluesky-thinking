@@ -8,7 +8,8 @@ main = "src/worker.ts"
 compatibility_date = "2026-07-01"
 # nodejs_compat: @cachekit-io/cachekit 0.1.3 transitively requires node
 # builtins (string_decoder via redis-parser) that esbuild can't resolve
-# for Workers without it.
+# for Workers without it. 0.1.5's workerd export pulls in no node builtins,
+# so drop this flag together with the [alias] below when Renovate PR #7 lands.
 compatibility_flags = ["nodejs_compat"]
 
 # @cachekit-io/cachekit 0.1.3 statically imports its NAPI core (.node
