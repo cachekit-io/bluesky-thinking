@@ -9,11 +9,11 @@ or faked.
 
 ## API
 
-| Route                                  | Description                                                                                                                                                                                                          |
-| :------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GET /api/{operation}?window={window}` | Cached aggregate. `operation` ∈ `trending_hashtags` · `trending_links` · `lang_mix` · `posts_per_minute` · `top_emoji`; `window` ∈ `5m` · `1h` · `24h` (required — interop binding rules forbid default parameters). |
+| Route                                  | Description                                                                                                                                                                                                                                                                                                    |
+| :------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /api/{operation}?window={window}` | Cached aggregate. `operation` ∈ `trending_hashtags` · `trending_links` · `lang_mix` · `posts_per_minute` · `top_emoji`; `window` ∈ `5m` · `1h` · `24h` (required — interop binding rules forbid default parameters).                                                                                           |
 | `GET /api/stats`                       | Per-isolate `hits` / `misses` / `errors` / `hit_rate` + a `scope` string restating this: counters reset when Cloudflare recycles the isolate, and `hit_rate` is aggregate-key availability at this isolate — not an SDK L1 rate, and not the end-user rate (POP cache hits are served before the worker runs). |
-| `GET /`                                | Static dashboard (Workers Assets).                                                                                                                                                                                   |
+| `GET /`                                | Static dashboard (Workers Assets).                                                                                                                                                                                                                                                                             |
 
 Every aggregate response carries `X-Cache: HIT|MISS`. Status codes: unknown
 operation → 404, missing/invalid window → 400 (both before any cache read),

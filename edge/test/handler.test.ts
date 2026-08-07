@@ -196,6 +196,8 @@ describe('GET /api/stats', () => {
     expect(body.scope).toContain('reset when Cloudflare recycles the isolate');
     expect(body.scope).toContain('aggregate-key availability');
     expect(body.scope).toContain('not an SDK L1 hit rate');
+    expect(body.scope).toContain('not the end-user rate');
+    expect(body.scope).toContain('POP cache hits are served before this worker runs');
   });
 });
 
