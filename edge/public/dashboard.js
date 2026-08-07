@@ -1,3 +1,6 @@
+// @ts-check
+
+/** @type {[string, string][]} */
 export const OPERATIONS = [
   ['posts_per_minute', 'Posts per minute'],
   ['trending_hashtags', 'Trending hashtags'],
@@ -6,25 +9,39 @@ export const OPERATIONS = [
   ['top_emoji', 'Top emoji'],
 ];
 
-// This matches the live verification check in stage4/verify.sh. The ingester
-// refreshes often enough that five minutes old is a useful, visible warning.
-export const STALE_AFTER_SECONDS = 300;
+/** @type {Record<string, number>} */
+export const FRESHNESS_SECONDS = { '5m': 60, '1h': 300, '24h': 900 };
 export const WINDOWS = new Set(['5m', '1h', '24h']);
 
-const esc = (value) =>
-  String(value).replace(
-    /[&<>\"]/g,
-    (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[character],
+/** @param {unknown} value */
+function esc(value) {
+  return String(value).replace(
+    /[&<>"]/g,
+    (character) =>
+      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[character] ?? character,
   );
+}
 
-const fmt = (value) =>
-  Intl.NumberFormat('en', {
+/** @param {number} value */
+function fmt(value) {
+  return Intl.NumberFormat('en', {
     notation: value >= 10000 ? 'compact' : 'standard',
     maximumFractionDigits: 2,
   }).format(value);
+}
 
-const isNumber = (value) => typeof value === 'number' && Number.isFinite(value);
+/** @param {unknown} value @returns {value is number} */
+function isNumber(value) {
+  return typeof value === 'number' && Number.isFinite(value);
+}
 
+/** @param {number} seconds */
+function freshnessLabel(seconds) {
+  const minutes = seconds / 60;
+  return `${minutes} minute${minutes === 1 ? '' : 's'}`;
+}
+
+/** @param {any[]} items @param {string} nameKey @param {string} valueKey @param {{ percent?: boolean, links?: boolean }} [options] */
 function rankedRows(items, nameKey, valueKey, { percent = false, links = false } = {}) {
   const rows = items
     .filter((item) => item && typeof item[nameKey] === 'string' && isNumber(item[valueKey]))
@@ -33,46 +50,50 @@ function rankedRows(items, nameKey, valueKey, { percent = false, links = false }
   if (!rows.length) return null;
 
   const max = Math.max(rows[0][valueKey], 1);
-  return `<div class="rows" aria-label="Ranked results">${rows
-    .map((item, index) => {
+  return `<ol class="rows">${rows
+    .map((item) => {
       const name = item[nameKey];
       const value = Math.max(item[valueKey], 0);
       const label = percent ? `${(value * 100).toFixed(1)}%` : fmt(value);
       const display = links
         ? externalLink(name)
         : `<span class="name" title="${esc(name)}">${esc(name)}</span>`;
-      return `<div class="row">
-        <span class="rank" aria-label="Rank ${index + 1}">${index + 1}</span>
+      return `<li class="row">
         ${display}
         <span class="bar-track" aria-hidden="true"><span class="bar" style="width:${Math.max(1, Math.min(100, (value / max) * 100))}%"></span></span>
         <span class="num">${label}</span>
-      </div>`;
+      </li>`;
     })
-    .join('')}</div>`;
+    .join('')}</ol>`;
 }
 
+/** @param {any} langs */
 function languageRows(langs) {
-  if (!langs || typeof langs !== 'object' || Array.isArray(langs)) return null;
   return rankedRows(
-    Object.entries(langs).map(([lang, share]) => ({ lang, share })),
+    Object.entries(langs).map(([lang, share]) => ({
+      lang: lang === 'other' ? 'Other languages' : lang,
+      share,
+    })),
     'lang',
     'share',
     { percent: true },
   );
 }
 
+/** @param {string} uri */
 function externalLink(uri) {
   try {
     const url = new URL(uri);
     if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new Error('unsafe protocol');
     const escaped = esc(url.href);
-    return `<a class="name" href="${escaped}" target="_blank" rel="noopener noreferrer" title="${escaped}" aria-label="${escaped} (opens in a new tab)">${escaped}</a>`;
+    return `<a class="name" href="${escaped}" target="_blank" rel="noopener noreferrer" title="${escaped}">${escaped}</a>`;
   } catch {
     return `<span class="name" title="${esc(uri)}">${esc(uri)}</span>`;
   }
 }
 
 /** Render only the documented live payload shapes; never inspect metadata as data. */
+/** @param {string} operation @param {any} data */
 export function renderOperation(operation, data) {
   if (!data || typeof data !== 'object' || Array.isArray(data)) return renderMalformed();
 
@@ -81,23 +102,28 @@ export function renderOperation(operation, data) {
       if (!isNumber(data.ppm)) return renderMalformed();
       return `<p class="hero">${fmt(data.ppm)} <small>posts/minute</small></p>${sampleSize(data)}`;
     case 'trending_hashtags':
+      if (!Array.isArray(data.hashtags)) return renderMalformed();
       return rankingOrEmpty(
-        rankedRows(data.hashtags ?? [], 'tag', 'count'),
+        rankedRows(data.hashtags, 'tag', 'count'),
         'No hashtags in this window yet.',
       );
     case 'trending_links':
+      if (!Array.isArray(data.links)) return renderMalformed();
       return rankingOrEmpty(
-        rankedRows(data.links ?? [], 'uri', 'count', { links: true }),
+        rankedRows(data.links, 'uri', 'count', { links: true }),
         'No external links in this window yet.',
       );
     case 'lang_mix':
+      if (!data.langs || typeof data.langs !== 'object' || Array.isArray(data.langs))
+        return renderMalformed();
       return rankingOrEmpty(
         languageRows(data.langs),
         'No language mix is available for this window yet.',
       );
     case 'top_emoji':
+      if (!Array.isArray(data.emoji)) return renderMalformed();
       return rankingOrEmpty(
-        rankedRows(data.emoji ?? [], 'emoji', 'count'),
+        rankedRows(data.emoji, 'emoji', 'count'),
         'No emoji in this window yet.',
       );
     default:
@@ -105,12 +131,14 @@ export function renderOperation(operation, data) {
   }
 }
 
+/** @param {any} data */
 function sampleSize(data) {
   return isNumber(data.total_posts)
-    ? `<p class="meta sample-size">${fmt(data.total_posts)} posts sampled</p>`
+    ? `<p class="meta">${fmt(data.total_posts)} posts sampled</p>`
     : '';
 }
 
+/** @param {string | null} rows @param {string} emptyMessage */
 function rankingOrEmpty(rows, emptyMessage) {
   return rows ?? `<p class="empty">${emptyMessage}</p>`;
 }
@@ -119,7 +147,8 @@ function renderMalformed() {
   return '<p class="error">This aggregate has an unexpected payload shape. Try refreshing; if it persists, the ingester needs attention.</p>';
 }
 
-export function formatGeneratedAt(value, now = Date.now()) {
+/** @param {unknown} value @param {string} selectedWindow @param {number} [now] */
+export function formatGeneratedAt(value, selectedWindow, now = Date.now()) {
   if (!isNumber(value)) return '';
   const date = new Date(value * 1000);
   if (Number.isNaN(date.valueOf())) return '';
@@ -128,10 +157,15 @@ export function formatGeneratedAt(value, now = Date.now()) {
     dateStyle: 'medium',
     timeStyle: 'medium',
   }).format(date);
-  const stale = now - date.valueOf() > STALE_AFTER_SECONDS * 1000;
-  return `<time datetime="${absolute}" title="${absolute}">as of ${esc(local)}</time>${stale ? ' <span class="stale" role="status">Stale — older than 5 minutes.</span>' : ''}`;
+  const freshness = FRESHNESS_SECONDS[selectedWindow] ?? FRESHNESS_SECONDS['5m'] ?? 60;
+  const stale = now - date.valueOf() > freshness * 1000;
+  const warning = stale
+    ? ` <span class="stale">Stale — older than ${freshnessLabel(freshness)}.</span>`
+    : '';
+  return `<time datetime="${absolute}" title="${absolute}">as of ${esc(local)}</time>${warning}`;
 }
 
+/** @param {string} error */
 function errorMessage(error) {
   switch (error) {
     case 'decode_error':
@@ -140,14 +174,25 @@ function errorMessage(error) {
       return 'The cache backend could not be reached. Please try again shortly.';
     case 'integrity_check_failed':
       return 'The integrity check rejected this aggregate. It will not be displayed.';
+    case 'network_error':
+      return 'The network request failed. Check your connection and try again.';
+    case 'not_configured':
+      return 'The Skyline API is not configured yet. Please try again later.';
+    case 'invalid_window':
+      return 'The selected time window is invalid. Choose 5m, 1h, or 24h.';
+    case 'cache_status_unknown':
+      return 'The server did not confirm the cache status, so this aggregate is not displayed.';
     default:
-      return error || 'The aggregate request failed. Please try again shortly.';
+      return 'The aggregate request failed. Please try again shortly.';
   }
 }
 
-export function renderCardMarkup(title, state, selectedWindow, now = Date.now()) {
-  const badge = { HIT: 'hit', MISS: 'miss', ERR: 'err' }[state.cache] ?? 'err';
-  const timestamp = formatGeneratedAt(state.data?.generated_at, now);
+/** @param {string} title @param {any} state @param {string} selectedWindow */
+export function renderCardMarkup(title, state, selectedWindow) {
+  /** @type {Record<string, string>} */
+  const badgeClasses = { HIT: 'hit', MISS: 'miss', ERR: 'err' };
+  const badge = badgeClasses[state.cache] ?? 'err';
+  const timestamp = formatGeneratedAt(state.data?.generated_at, selectedWindow);
   const meta = `window ${esc(selectedWindow)}${timestamp ? ` · ${timestamp}` : ''}`;
   let content;
   if (state.error) content = `<p class="error">${esc(errorMessage(state.error))}</p>`;
@@ -156,38 +201,48 @@ export function renderCardMarkup(title, state, selectedWindow, now = Date.now())
       '<p class="empty">No cached aggregate for this window yet — the ingester is still collecting posts.</p>';
   else content = renderOperation(state.operation, state.data);
   const hotpath =
-    state.hotpath === 'unavailable'
+    state.hotpath !== 'verified'
       ? '<p class="warning">Integrity verification is temporarily unavailable; this is live cache data, but it is unverified.</p>'
       : '';
-  return `<h2>${esc(title)} <span class="badge ${badge}">${esc(state.cache)}</span></h2>
-    <p class="meta">${meta}</p>${hotpath}${content}`;
+  return `<h2>${esc(title)} <span class="badge ${badge}">${esc(state.cache)}</span></h2><p class="meta">${meta}</p>${hotpath}${content}`;
 }
 
+/** @param {string} search */
 export function windowFromSearch(search) {
   const selected = new URLSearchParams(search).get('window');
-  return WINDOWS.has(selected) ? selected : '5m';
+  return selected && WINDOWS.has(selected) ? selected : '5m';
 }
 
-function setWindowInUrl(browserWindow, selectedWindow) {
-  const url = new URL(browserWindow.location.href);
+/** @param {string} selectedWindow */
+function setWindowInUrl(selectedWindow) {
+  const url = new URL(window.location.href);
   url.searchParams.set('window', selectedWindow);
-  browserWindow.history.replaceState({}, '', url);
+  window.history.replaceState({}, '', url);
 }
 
-export function initDashboard(document, browserWindow) {
-  let currentWindow = windowFromSearch(browserWindow.location.search);
+function initDashboard() {
+  let currentWindow = windowFromSearch(window.location.search);
   let refreshVersion = 0;
   const grid = document.getElementById('grid');
   const tiles = document.getElementById('tiles');
-  const buttons = [...document.querySelectorAll('.windows button')];
+  const windowControl = document.querySelector('.windows');
+  if (!grid || !tiles || !windowControl) return;
+  const dashboardGrid = grid;
+  const dashboardTiles = tiles;
+  /** @type {HTMLButtonElement[]} */
+  const buttons = /** @type {HTMLButtonElement[]} */ (
+    Array.from(document.querySelectorAll('.windows button'))
+  );
 
+  /** @param {string} next */
   function selectWindow(next) {
     currentWindow = next;
-    setWindowInUrl(browserWindow, next);
+    setWindowInUrl(next);
     for (const button of buttons)
       button.setAttribute('aria-pressed', String(button.dataset.window === next));
   }
 
+  /** @param {HTMLElement} element @param {string} operation @param {string} title @param {string} selectedWindow @param {number} version */
   async function loadOperation(element, operation, title, selectedWindow, version) {
     try {
       const response = await fetch(
@@ -196,14 +251,12 @@ export function initDashboard(document, browserWindow) {
       const body = await response.json();
       if (version !== refreshVersion) return;
       if (response.ok) {
+        const cache = response.headers.get('x-cache');
         element.innerHTML = renderCardMarkup(
           title,
-          {
-            cache: response.headers.get('x-cache') ?? 'HIT',
-            operation,
-            data: body.data,
-            hotpath: response.headers.get('x-hotpath'),
-          },
+          cache
+            ? { cache, operation, data: body.data, hotpath: response.headers.get('x-hotpath') }
+            : { cache: 'ERR', operation, error: 'cache_status_unknown' },
           selectedWindow,
         );
         return;
@@ -214,7 +267,7 @@ export function initDashboard(document, browserWindow) {
       }
       element.innerHTML = renderCardMarkup(
         title,
-        { cache: 'ERR', operation, error: body.error || body.detail || `HTTP ${response.status}` },
+        { cache: 'ERR', operation, error: body.detail || body.error || 'internal' },
         selectedWindow,
       );
     } catch {
@@ -227,26 +280,34 @@ export function initDashboard(document, browserWindow) {
     }
   }
 
+  /** @param {number} version */
   async function loadStats(version) {
     try {
       const response = await fetch('/api/stats');
       const stats = await response.json();
+      if (
+        !response.ok ||
+        !isNumber(stats.hits) ||
+        !isNumber(stats.misses) ||
+        !isNumber(stats.errors)
+      )
+        throw new Error('stats unavailable');
       if (version !== refreshVersion) return;
       const rate = stats.hit_rate === null ? '—' : `${(stats.hit_rate * 100).toFixed(1)}%`;
-      tiles.innerHTML = [
+      dashboardTiles.innerHTML = [
         ['Cache hit rate', rate],
         ['Hits', fmt(stats.hits)],
         ['Misses', fmt(stats.misses)],
         ['Errors', fmt(stats.errors)],
       ]
         .map(
-          ([label, value]) =>
-            `<div class="tile"><div class="label">${label}</div><div class="value">${value}</div></div>`,
+          ([label, item]) =>
+            `<div class="tile"><div class="label">${label}</div><div class="value">${item}</div></div>`,
         )
         .join('');
     } catch {
       if (version === refreshVersion)
-        tiles.innerHTML =
+        dashboardTiles.innerHTML =
           '<div class="tile"><div class="label">Stats unavailable</div><div class="value">—</div></div>';
     }
   }
@@ -254,29 +315,29 @@ export function initDashboard(document, browserWindow) {
   function refresh() {
     const version = ++refreshVersion;
     const selectedWindow = currentWindow;
-    if (!grid.children.length)
-      grid.innerHTML = OPERATIONS.map(
+    if (!dashboardGrid.children.length)
+      dashboardGrid.innerHTML = OPERATIONS.map(
         ([operation]) => `<section class="card" id="card-${operation}"></section>`,
       ).join('');
     loadStats(version);
-    for (const [operation, title] of OPERATIONS)
-      loadOperation(
-        document.getElementById(`card-${operation}`),
-        operation,
-        title,
-        selectedWindow,
-        version,
-      );
+    for (const [operation, title] of OPERATIONS) {
+      const card = document.getElementById(`card-${operation}`);
+      if (card) loadOperation(card, operation, title, selectedWindow, version);
+    }
   }
 
-  document.querySelector('.windows').addEventListener('click', (event) => {
+  windowControl.addEventListener('click', (event) => {
+    if (!(event.target instanceof Element)) return;
     const button = event.target.closest('button[data-window]');
-    if (!button || !WINDOWS.has(button.dataset.window)) return;
-    selectWindow(button.dataset.window);
+    const next = button instanceof HTMLButtonElement ? button.dataset.window : undefined;
+    if (!next || !WINDOWS.has(next)) return;
+    selectWindow(next);
     refresh();
   });
 
   selectWindow(currentWindow);
   refresh();
-  browserWindow.setInterval(refresh, 30_000);
+  window.setInterval(refresh, 30_000);
 }
+
+if (typeof document !== 'undefined') initDashboard();

@@ -18,11 +18,11 @@ and the posts/minute card also shows its sample size. The selection is retained 
 the `?window=` URL parameter.
 
 `generated_at` is Unix seconds and is rendered as both localized text and an
-accessible ISO timestamp. A payload older than **five minutes (300 seconds)** is
-called out as stale; this is the same freshness threshold used by
-[`stage4/verify.sh`](../stage4/verify.sh). Empty aggregates, cache misses,
-backend/decode failures, and temporarily unavailable hot-path verification have
-separate dashboard copy.
+accessible ISO timestamp. Staleness follows the ingester publishing cadence: 5m
+payloads warn after **1 minute**, 1h after **5 minutes**, and 24h after **15
+minutes** (the respective aggregate TTLs). Empty aggregates, cache misses,
+backend/decode failures, absent cache proof, and temporarily unavailable hot-path
+verification have separate dashboard copy.
 
 ## API
 
@@ -50,7 +50,7 @@ backend read per URL per POP per TTL.
 ```bash
 npm install
 npm test              # mocked backend — no network, no CACHEKIT_API_KEY
-npm run demo          # dashboard + real handler on http://localhost:8788, seeded in-memory backend
+npm run demo          # dashboard assets + real handler on http://localhost:8788; unknown assets return 404
 npm run lint && npm run format:check && npm run type-check
 ```
 

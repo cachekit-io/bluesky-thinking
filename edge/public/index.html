@@ -143,7 +143,7 @@
       }
       .row {
         display: grid;
-        grid-template-columns: 1.25rem minmax(5rem, 40%) 1fr auto;
+        grid-template-columns: minmax(5rem, 40%) 1fr auto;
         gap: 0.6rem;
         align-items: center;
       }
@@ -155,10 +155,8 @@
       .row a.name {
         color: var(--ink);
       }
-      .rank {
-        color: var(--ink-2);
-        font-size: 0.75rem;
-        font-variant-numeric: tabular-nums;
+      .rows {
+        padding-left: 1.5rem;
       }
       .bar-track {
         background: var(--line);
@@ -193,14 +191,6 @@
       .warning {
         font-size: 0.85rem;
         margin-top: 0.75rem;
-      }
-      pre {
-        margin-top: 0.75rem;
-        font:
-          0.78rem/1.4 'JetBrains Mono',
-          monospace;
-        color: var(--ink-2);
-        overflow-x: auto;
       }
       .hero {
         font-size: 2.6rem;

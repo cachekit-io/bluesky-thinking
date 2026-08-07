@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
-  STALE_AFTER_SECONDS,
+  FRESHNESS_SECONDS,
   formatGeneratedAt,
   renderCardMarkup,
   renderOperation,
@@ -20,9 +20,9 @@ describe('Skyline dashboard payload renderers', () => {
         { tag: 'bluesky', count: 7 },
       ],
     });
-
+    expect(markup).toContain('<ol class="rows">');
+    expect(markup).toContain('<li class="row">');
     expect(markup).toContain('cachekit');
-    expect(markup).toContain('Rank 1');
     expect(markup).not.toContain('1.75');
     expect(markup).not.toContain('912');
   });
@@ -57,6 +57,15 @@ describe('Skyline dashboard payload renderers', () => {
     expect(renderOperation(operation, payload)).toContain(expected);
   });
 
+  it('rejects missing or wrong-shape rankings instead of calling them empty', () => {
+    expect(renderOperation('trending_hashtags', { hashtags: {} })).toContain(
+      'unexpected payload shape',
+    );
+    expect(renderOperation('trending_links', {})).toContain('unexpected payload shape');
+    expect(renderOperation('lang_mix', { langs: [] })).toContain('unexpected payload shape');
+    expect(renderOperation('top_emoji', { emoji: '🔥' })).toContain('unexpected payload shape');
+  });
+
   it('escapes labels and only makes http(s) links outbound links', () => {
     const markup = renderOperation('trending_links', {
       links: [
@@ -64,21 +73,32 @@ describe('Skyline dashboard payload renderers', () => {
         { uri: 'https://example.com/?q="<tag>', count: 1 },
       ],
     });
-
     expect(markup).not.toContain('href="javascript:');
     expect(markup).toContain('rel="noopener noreferrer"');
     expect(markup).toContain('%3Ctag%3E');
   });
 
-  it('shows localized time and a stale warning after the documented five-minute threshold', () => {
-    const now = (generated_at + STALE_AFTER_SECONDS + 1) * 1000;
-    const markup = formatGeneratedAt(generated_at, now);
-
-    expect(markup).toContain('datetime="2025-07-');
-    expect(markup).toContain('Stale — older than 5 minutes.');
+  it('uses the per-window freshness cadence instead of one global stale threshold', () => {
+    expect(
+      formatGeneratedAt(
+        generated_at,
+        '5m',
+        (generated_at + (FRESHNESS_SECONDS['5m'] ?? 60) + 1) * 1000,
+      ),
+    ).toContain('older than 1 minute');
+    expect(formatGeneratedAt(generated_at, '24h', (generated_at + 450) * 1000)).not.toContain(
+      'Stale',
+    );
+    expect(
+      formatGeneratedAt(
+        generated_at,
+        '24h',
+        (generated_at + (FRESHNESS_SECONDS['24h'] ?? 900) + 1) * 1000,
+      ),
+    ).toContain('older than 15 minutes');
   });
 
-  it('keeps error states actionable and distinguishes unavailable verification', () => {
+  it('keeps failure states actionable and fails closed on unverified cache evidence', () => {
     expect(
       renderCardMarkup(
         'Links',
@@ -89,7 +109,14 @@ describe('Skyline dashboard payload renderers', () => {
     expect(
       renderCardMarkup(
         'Links',
-        { cache: 'HIT', operation: 'trending_links', data: { links: [] }, hotpath: 'unavailable' },
+        { cache: 'ERR', operation: 'trending_links', error: 'network_error' },
+        '5m',
+      ),
+    ).toContain('Check your connection');
+    expect(
+      renderCardMarkup(
+        'Links',
+        { cache: 'HIT', operation: 'trending_links', data: { links: [] } },
         '5m',
       ),
     ).toContain('unverified');
@@ -98,5 +125,84 @@ describe('Skyline dashboard payload renderers', () => {
   it('reads only the supported window from the URL', () => {
     expect(windowFromSearch('?window=24h')).toBe('24h');
     expect(windowFromSearch('?window=7d')).toBe('5m');
+  });
+});
+
+class ElementStub {
+  dataset: Record<string, string> = {};
+  children: unknown[] = [];
+  content = '';
+  set innerHTML(value: string) {
+    this.content = value;
+    this.children = value.includes('card-') ? [{}] : [];
+  }
+  get innerHTML() {
+    return this.content;
+  }
+  addEventListener() {}
+  setAttribute() {}
+}
+
+describe('dashboard bootstrap smoke test', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('boots from the module tag and renders live aggregate cards', async () => {
+    const grid = new ElementStub();
+    const tiles = new ElementStub();
+    const cards = new Map<string, ElementStub>();
+    Object.defineProperty(grid, 'innerHTML', {
+      set(value: string) {
+        grid.content = value;
+        grid.children = [{}];
+        for (const operation of [
+          'posts_per_minute',
+          'trending_hashtags',
+          'trending_links',
+          'lang_mix',
+          'top_emoji',
+        ])
+          cards.set(`card-${operation}`, new ElementStub());
+      },
+      get: () => grid.content,
+    });
+    const documentStub = {
+      getElementById: (id: string) => ({ grid, tiles, ...Object.fromEntries(cards) })[id] ?? null,
+      querySelector: () => new ElementStub(),
+      querySelectorAll: () => [new ElementStub(), new ElementStub(), new ElementStub()],
+    };
+    vi.stubGlobal('document', documentStub);
+    vi.stubGlobal('window', {
+      location: { href: 'https://skyline.example/?window=5m', search: '?window=5m' },
+      history: { replaceState: vi.fn() },
+      setInterval: vi.fn(),
+    });
+    vi.stubGlobal('fetch', async (input: string) => {
+      if (input === '/api/stats')
+        return Response.json({ hits: 1, misses: 0, errors: 0, hit_rate: 1 });
+      const operation = input.match(/\/api\/([^?]+)/)?.[1];
+      const data = {
+        posts_per_minute: { generated_at, total_posts: 3, ppm: 0.6 },
+        trending_hashtags: {
+          generated_at,
+          total_posts: 3,
+          hashtags: [{ tag: 'cachekit', count: 3 }],
+        },
+        trending_links: {
+          generated_at,
+          total_posts: 3,
+          links: [{ uri: 'https://example.com', count: 3 }],
+        },
+        lang_mix: { generated_at, total_posts: 3, langs: { en: 1 } },
+        top_emoji: { generated_at, total_posts: 3, emoji: [{ emoji: '🔥', count: 3 }] },
+      }[operation ?? 'posts_per_minute'];
+      return Response.json({ data }, { headers: { 'x-cache': 'HIT', 'x-hotpath': 'verified' } });
+    });
+
+    await import('../public/dashboard.js?smoke');
+    await vi.waitFor(() =>
+      expect(cards.get('card-trending_hashtags')?.innerHTML).toContain('cachekit'),
+    );
+    expect(grid.innerHTML).toContain('card-trending_hashtags');
+    expect(tiles.innerHTML).toContain('Cache hit rate');
   });
 });
