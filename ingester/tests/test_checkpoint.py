@@ -97,16 +97,22 @@ def test_restore_tolerates_malformed_checkpoints(caplog):
     # A corrupt / partial checkpoint must degrade to a skip, never raise — a raise
     # here propagates through asyncio.run and crashes startup into a boot loop.
     good = int(NOW // 60)
-    bad = [
+    structurally_bad = [
         {**_snapshot([]), "buckets": "not-a-list"},
         _snapshot([[good]]),  # item is not a (minute, dict) pair
         _snapshot([[good, "not-a-dict"]]),
         _snapshot([["not-an-int", {}]]),
-        _snapshot([[good, {"n": "x"}]]),  # non-numeric count
-        _snapshot([[good, {"n": float("inf")}]]),  # int(inf) -> OverflowError
     ]
-    for snap in bad:
+    for snap in structurally_bad:
         assert WindowStore().restore(snap, NOW) == 0  # skipped, no raise
+    # Invalid scalar values are dropped in place; they no longer erase the
+    # otherwise recoverable minute.
+    for value in ("x", float("inf")):
+        store = WindowStore()
+        assert store.restore(_snapshot([[good, {"n": value}]]), NOW) == 1
+        merged = store.merged("24h", NOW)
+        assert merged.n == 0
+        assert merged.excluded["checkpoint_invalid_count"] == 1
     # a valid bucket alongside a broken one is still restored — and the skip is
     # logged, not silent: an operator must be able to see checkpoint corruption.
     mixed = _snapshot([[good, {"n": 5}], [good - 1, "broken"]])
@@ -115,11 +121,11 @@ def test_restore_tolerates_malformed_checkpoints(caplog):
     assert any("corrupt checkpoint bucket" in r.getMessage() for r in caplog.records)
 
 
-def test_restore_rejects_poisoned_but_valid_counter_values():
+def test_restore_drops_only_poisoned_entries_and_keeps_the_bucket():
     # Panel round-2 MAJ: a structurally valid checkpoint with a non-numeric counter
     # VALUE used to pass restore() and detonate later in merged()/most_common(),
     # where the publisher's except turns it into silent misses for up to 24h.
-    # It must fail at restore, skipping only the poisoned bucket.
+    # Each unsafe entry must be omitted without erasing unrelated minute totals.
     good = int(NOW // 60)
     poisoned = _snapshot(
         [
@@ -135,8 +141,42 @@ def test_restore_rejects_poisoned_but_valid_counter_values():
         ]
     )
     store = WindowStore()
-    assert store.restore(poisoned, NOW) == 1
+    assert store.restore(poisoned, NOW) == 8
     merged = store.merged("24h", NOW)  # must never raise
-    assert merged.tags.most_common(5) == [("ok", 2)]
-    assert merged.langs == {"1": 2}
-    assert merged.n == 2
+    assert merged.tags.most_common(5) == [("ok", 2), ("safe", 1)]
+    assert merged.langs == {}
+    assert merged.n == 10
+    assert merged.excluded == {
+        "checkpoint_invalid_count": 3,
+        "checkpoint_invalid_exclusion": 1,
+        "checkpoint_invalid_label": 1,
+        "checkpoint_invalid_lang": 1,
+        "checkpoint_invalid_tag": 1,
+        "checkpoint_invalid_url": 1,
+    }
+    assert merged.signal_candidates == sum(merged.excluded.values())
+
+
+def test_restore_filters_poisoned_language_and_emoji_without_losing_totals():
+    good = int(NOW // 60)
+    snap = _snapshot(
+        [
+            [
+                good,
+                {
+                    "n": 500,
+                    "langs": {"en": 450, "<script>alert(1)</script>": 50},
+                    "emoji": {"🔥": 2, "CONTACT ops@evil.example": 99},
+                },
+            ]
+        ]
+    )
+    store = WindowStore()
+    assert store.restore(snap, NOW) == 1
+    assert store.build_value("lang_mix", "5m", NOW)["langs"] == {"en": 1.0}
+    assert store.build_value("top_emoji", "5m", NOW)["emoji"] == [{"emoji": "🔥", "count": 2}]
+    merged = store.merged("5m", NOW)
+    assert merged.n == 500
+    assert merged.excluded["checkpoint_invalid_lang"] == 1
+    assert merged.excluded["checkpoint_invalid_emoji"] == 1
+    assert merged.signal_candidates == 2

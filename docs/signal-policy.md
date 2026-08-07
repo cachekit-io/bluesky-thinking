@@ -15,8 +15,10 @@ For ranking, each candidate is:
 
 1. normalized with Unicode NFKC (so compatibility forms such as full-width
    Latin characters share a key);
-2. case-folded with Unicode `casefold()` for its canonical key;
-3. limited to 64 characters and one complete token of Unicode word characters,
+2. case-folded with Unicode `casefold()` and NFKC-normalized again for an
+   idempotent canonical key;
+3. limited to 64 characters in both display and canonical form, and one
+   complete token of Unicode word characters,
    with hyphens allowed only between word-character groups.
 
 For text fallback, `#` must begin at a non-word/non-`#` boundary. Whitespace
@@ -24,10 +26,16 @@ and punctuation other than an internal hyphen end the token. A facet is already
 supposed to carry one bare tag, so a facet containing whitespace, surrounding
 `#`, or other punctuation is rejected rather than truncated.
 
-The public `canonical` field is the ranking key. The `tag` display field is the
+The existing public `tag` field remains the case-folded ranking key. The
+additive `canonical` field repeats that key explicitly, while `display` is the
 most frequent NFKC-normalized spelling seen in the selected window, with a
-lexical tie-break. Display case is therefore preserved without splitting the
-count.
+lexical tie-break. Display case is therefore preserved without changing the
+meaning of `tag` or splitting the count.
+
+Work per post is bounded before normalization: at most 4,096 text characters,
+64 facet features, 32 hashtag candidates, and 16 link candidates are examined.
+If supplied tag facets produce no usable tag, the same bounded text fallback is
+still applied.
 
 The following canonical tags are explicitly excluded:
 `adult`, `follow4follow`, `followforfollow`, `nsfw`, `porn`, `porno`,
@@ -37,8 +45,9 @@ The following canonical tags are explicitly excluded:
 
 Only syntactically valid `http` and `https` URLs are candidates. Canonical URLs:
 
-- lowercase and IDNA-encode the host;
-- canonicalize global IP literals and reject non-global addresses;
+- lowercase and IDNA-encode the host before every host-safety check;
+- canonicalize global IP literals and reject non-global addresses, including
+  Unicode-dot spellings that become IP literals after IDNA;
 - remove a trailing host dot and the default port (80 for HTTP, 443 for HTTPS);
 - preserve the path and meaningful query components byte-for-byte;
 - remove the fragment;
@@ -62,8 +71,9 @@ resources.
 ## Source contribution bound and privacy
 
 One source can contribute a given canonical hashtag, URL, or domain at most once
-per rolling five minutes. The limit is per signal family: two distinct URLs on
-one domain can both enter the URL ranking, while that source contributes only
+per rolling five minutes of process time. Untrusted event timestamps determine
+the event's minute bucket but never expire this ledger. The limit is per signal
+family: two distinct URLs on one domain can both enter the URL ranking, while that source contributes only
 once to the domain ranking during the horizon.
 
 The Jetstream DID exists only as a local argument at the ingestion boundary.
@@ -73,7 +83,9 @@ each process. Only these opaque tuple digests and expiry timestamps live in the
 five-minute ledger.
 
 The key, digests, and raw DIDs are never put in minute buckets, checkpoints,
-CacheKit values, logs, history, or health output. The ledger is not restored:
+CacheKit values, logs, history, or health output. `/health` exposes only an
+aggregate `events_missing_source` counter so a Jetstream schema change cannot
+silently empty all public trend rankings. The ledger is not restored:
 after a process restart the key rotates and the five-minute bound starts fresh.
 That small, explicit continuity gap is preferable to creating a durable
 pseudonymous author index. A post without a usable source can still count toward
@@ -106,6 +118,9 @@ Every public aggregate includes:
 - `normalization_version`: the policy version above;
 - `total_events_considered`: structurally valid post-create events in the
   selected window (also retained as `total_posts` for compatibility);
+- `total_signal_candidates`: accepted or excluded tag, URL, domain, and
+  restored-checkpoint decisions in the selected window — the denominator for
+  the exclusion counts;
 - `excluded_count_by_reason`: aggregate counts of candidate signal
   contributions omitted for normalization, safety, in-event duplication,
   missing source, or the rolling source bound.
@@ -118,13 +133,19 @@ unique events: one post can contain more than one excluded candidate.
 `ingester/tests/fixtures/signal_quality_events.jsonl` contains case and Unicode
 variants, tracking URLs, a repetitive source, broad distinct-source activity,
 malformed/dangerous URLs, and representative explicit adult/spam terms. The
-test evaluates the same recorded input before and after source bounding:
+test evaluates the same recorded input before and after source bounding in the
+5-minute window:
 
 | Signal | Normalized, before source bound | Published after policy |
 | :--- | ---: | ---: |
 | `flashsale` from one repetitive source | 6 | 1 |
 | `community` from four distinct sources | 4 | 4 |
 
-The repetitive source no longer outranks broader activity. The fixture also
+The repetitive source no longer outranks broader activity in that 5-minute
+snapshot. The rule is a rate bound, not a permanent per-source cap: a source can
+contribute the same signal at most 12 times in 1 hour and 288 times in 24 hours
+when it contributes once at each five-minute horizon. Those longer-window
+limits have separate regression coverage; the policy does not claim to detect
+sock puppets or rotated tag variants. The fixture also
 asserts exact exclusion-reason totals and that no fixture DID appears in a
 bucket checkpoint or any public aggregate.

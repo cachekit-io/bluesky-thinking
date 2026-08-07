@@ -86,8 +86,8 @@ jobs are paid, which is why the ingester serves `GET /health` on `$PORT` and why
 a Cloudflare cron, not a Render one. Free services spin down after 15 min without *inbound* traffic
 (the outbound Jetstream socket doesn't count); the cron ping supplies that traffic. Restarts lose
 in-memory window state, mitigated by checkpointing aggregation state into CacheKit (`posts_per_minute`
-and `lang_mix` restore exactly; per-minute trending counters are top-K-truncated in the snapshot, so
-long-tail counts are approximate after a restart).
+and signal-candidate totals restore exactly; per-minute trending and language counters are
+top-K-truncated in the snapshot, so long-tail counts are approximate after a restart).
 ² CachekitIO is the platform being showcased — we build, run, and own it. No third-party line item.
 
 Fly.io was evaluated and **rejected**: its free tier was discontinued in 2024 (new orgs get a

@@ -44,6 +44,25 @@ def test_lang_normalization(fixture_lines):
     assert "ja-jp" not in langs and "ja-JP" not in langs
 
 
+def test_invalid_language_is_collapsed_to_und(fixture_lines):
+    event = json.loads(fixture_lines[0])
+    event["commit"]["record"]["langs"] = ["<script>alert(1)</script>"]
+    features = extract_post(event)
+    assert features is not None and features.lang == "und"
+
+
+def test_invalid_facet_falls_back_to_text_and_candidate_work_is_bounded(fixture_lines):
+    event = json.loads(fixture_lines[0])
+    event["commit"]["record"]["text"] = "#body " + " #tag" * 10_000
+    event["commit"]["record"]["facets"] = [{"features": [{"$type": "app.bsky.richtext.facet#tag", "tag": "#invalid"}]}]
+    features = extract_post(event)
+    assert features is not None
+    assert features.hashtags[0] == "body"
+    assert len(features.hashtags) <= 32
+    assert features.exclusions["malformed_tag"] == 1
+    assert features.exclusions["candidate_limit_tag"] > 0
+
+
 def test_emoji_extraction_counts_zwj_sequence_once(fixture_lines):
     family = next(p for p in _posts(fixture_lines) if "👨‍👩‍👧" in p.emoji)
     assert family.emoji == ["👨‍👩‍👧", "❤️"]

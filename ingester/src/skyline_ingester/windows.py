@@ -19,10 +19,11 @@ import heapq
 import logging
 import secrets
 import threading
+import time
 from collections import Counter
 from dataclasses import dataclass, field
 
-from skyline_ingester.extract import PostFeatures
+from skyline_ingester.extract import EMOJI_RE, PostFeatures, is_primary_language
 from skyline_ingester.policy import (
     EXCLUSION_REASONS,
     NORMALIZATION_VERSION,
@@ -43,6 +44,7 @@ SOURCE_DEDUPE_SECONDS = 5 * 60
 # Checkpoint truncation: keep the per-minute head of each counter so the
 # serialized snapshot stays small enough for one cache entry.
 _K_TAGS, _K_LINKS, _K_DOMAINS, _K_EMOJI, _K_LANGS = 20, 20, 20, 10, 15
+_MAX_CHECKPOINT_COUNT = 10_000_000
 
 
 @dataclass(slots=True)
@@ -50,6 +52,7 @@ class Bucket:
     """One minute of counters — also the shape a window merge accumulates into."""
 
     n: int = 0
+    signal_candidates: int = 0
     tags: Counter = field(default_factory=Counter)
     links: Counter = field(default_factory=Counter)
     domains: Counter = field(default_factory=Counter)
@@ -66,6 +69,7 @@ class Bucket:
         # fast path), so each copy stays cheap enough to run under the lock.
         return Bucket(
             n=self.n,
+            signal_candidates=self.signal_candidates,
             tags=self.tags.copy(),
             links=self.links.copy(),
             domains=self.domains.copy(),
@@ -108,9 +112,12 @@ class WindowStore:
                 self._prune(minute)
             bucket.n += 1
             bucket.excluded.update(feats.exclusions)
+            bucket.signal_candidates += (
+                sum(feats.exclusions.values()) + len(feats.hashtags) + len(feats.links) + len(feats.domains)
+            )
             source_digest = self._source_digest(source_id)
             for tag in feats.hashtags:
-                if self._accept_signal(source_digest, "tag", tag, feats.ts):
+                if self._accept_signal(source_digest, "tag", tag):
                     bucket.tags[tag] += 1
                     label = feats.hashtag_labels.get(tag, tag)
                     bucket.tag_labels.setdefault(tag, Counter())[label] += 1
@@ -118,13 +125,13 @@ class WindowStore:
                     reason = "missing_source_tag" if source_digest is None else "duplicate_source_tag"
                     bucket.excluded[reason] += 1
             for link in feats.links:
-                if self._accept_signal(source_digest, "url", link, feats.ts):
+                if self._accept_signal(source_digest, "url", link):
                     bucket.links[link] += 1
                 else:
                     reason = "missing_source_url" if source_digest is None else "duplicate_source_url"
                     bucket.excluded[reason] += 1
             for domain in feats.domains:
-                if self._accept_signal(source_digest, "domain", domain, feats.ts):
+                if self._accept_signal(source_digest, "domain", domain):
                     bucket.domains[domain] += 1
                 else:
                     reason = "missing_source_domain" if source_digest is None else "duplicate_source_domain"
@@ -147,7 +154,7 @@ class WindowStore:
             return None
         return hashlib.blake2b(encoded, key=self._dedupe_key, digest_size=16).digest()
 
-    def _accept_signal(self, source_digest: bytes | None, family: str, value: str, ts: float) -> bool:
+    def _accept_signal(self, source_digest: bytes | None, family: str, value: str) -> bool:
         """Accept one source/signal contribution per rolling five minutes.
 
         Caller holds self._lock. The digest is process-keyed, non-portable, and
@@ -156,19 +163,19 @@ class WindowStore:
         """
         if source_digest is None:
             return False
-        while self._seen_expiry and self._seen_expiry[0][0] <= ts:
+        now = time.monotonic()
+        while self._seen_expiry and self._seen_expiry[0][0] <= now:
             expiry, digest = heapq.heappop(self._seen_expiry)
             seen_at = self._seen.get(digest)
-            if seen_at is not None and seen_at + SOURCE_DEDUPE_SECONDS <= ts and seen_at + SOURCE_DEDUPE_SECONDS == expiry:
+            if seen_at is not None and seen_at + SOURCE_DEDUPE_SECONDS == expiry:
                 del self._seen[digest]
         material = source_digest + b"\0" + family.encode("ascii") + b"\0" + value.encode("utf-8")
         digest = hashlib.blake2b(material, key=self._dedupe_key, digest_size=16).digest()
         seen_at = self._seen.get(digest)
-        if seen_at is not None and abs(ts - seen_at) < SOURCE_DEDUPE_SECONDS:
+        if seen_at is not None:
             return False
-        if seen_at is None or ts > seen_at:
-            self._seen[digest] = ts
-            heapq.heappush(self._seen_expiry, (ts + SOURCE_DEDUPE_SECONDS, digest))
+        self._seen[digest] = now
+        heapq.heappush(self._seen_expiry, (now + SOURCE_DEDUPE_SECONDS, digest))
         return True
 
     def _prune(self, newest_minute: int) -> None:
@@ -202,6 +209,7 @@ class WindowStore:
         out = Bucket()
         for _minute, b in self._copy_range(lo, now_min):
             out.n += b.n
+            out.signal_candidates += b.signal_candidates
             out.tags.update(b.tags)
             out.links.update(b.links)
             out.domains.update(b.domains)
@@ -257,12 +265,18 @@ class WindowStore:
             "generated_at": int(now),
             "total_posts": m.n,
             "total_events_considered": m.n,
+            "total_signal_candidates": m.signal_candidates,
             "excluded_count_by_reason": dict(sorted(m.excluded.items())),
             "normalization_version": NORMALIZATION_VERSION,
         }
         if operation == "trending_hashtags":
             value["hashtags"] = [
-                {"tag": _display_label(m.tag_labels.get(tag), tag), "canonical": tag, "count": count}
+                {
+                    "tag": tag,
+                    "display": _display_label(m.tag_labels.get(tag), tag),
+                    "canonical": tag,
+                    "count": count,
+                }
                 for tag, count in m.tags.most_common(top_n)
             ]
         elif operation == "trending_links":
@@ -291,6 +305,7 @@ class WindowStore:
             "window": window,
             "generated_at": int(now),
             "total_events_considered": m.n,
+            "total_signal_candidates": m.signal_candidates,
             "excluded_count_by_reason": dict(sorted(m.excluded.items())),
             "normalization_version": NORMALIZATION_VERSION,
             "langs": {lang: {"avg": round(s / c, 4), "n": c} for lang, (s, c) in sorted(m.sent.items()) if c},
@@ -300,8 +315,9 @@ class WindowStore:
         """Truncated, msgpack-friendly dump of the buckets for checkpointing.
 
         Per-bucket counters are cut to their top-K entries, so long-tail counts
-        are approximate after a restore; posts_per_minute and lang_mix totals
-        stay exact (bucket n / langs are kept in full up to _K_LANGS languages).
+        are approximate after a restore; post and signal-candidate totals stay
+        exact. Long-tail language
+        counts, like the trend counters, are approximate after restore.
 
         Per-language sentiment (`sent`) is deliberately NOT persisted: it is the
         cleartext source of the @cache.secure sentiment cache, and this checkpoint
@@ -326,6 +342,7 @@ class WindowStore:
                     minute,
                     {
                         "n": b.n,
+                        "signal_candidates": b.signal_candidates,
                         "tags": dict(b.tags.most_common(_K_TAGS)),
                         "links": dict(b.links.most_common(_K_LINKS)),
                         "domains": dict(b.domains.most_common(_K_DOMAINS)),
@@ -375,22 +392,53 @@ class WindowStore:
                     minute, d = item
                     if not isinstance(minute, int) or minute <= floor or minute > ceiling:
                         continue
-                    # Coerce keys/values, not just presence: a poisoned-but-valid
-                    # checkpoint (e.g. a counter value of "not-a-number", or a
-                    # negative count that skews ppm/lang_mix) would pass restore
-                    # and detonate later inside merged()/most_common(), where the
-                    # publisher's except swallows it into silent misses for up to
-                    # 24h. A bad entry must fail HERE, skipping only its bucket.
-                    b = Bucket(
-                        n=_non_negative(int(d.get("n", 0))),
-                        tags=_coerced_counter(d.get("tags"), key_validator=_is_canonical_tag),
-                        links=_coerced_counter(d.get("links"), key_validator=_is_canonical_link),
-                        domains=_coerced_counter(d.get("domains"), key_validator=_is_canonical_domain),
-                        langs=_coerced_counter(d.get("langs")),
-                        emoji=_coerced_counter(d.get("emoji")),
-                        tag_labels=_coerced_tag_labels(d.get("tag_labels")),
-                        excluded=_coerced_counter(d.get("excluded"), key_validator=EXCLUSION_REASONS.__contains__),
+                    if not isinstance(d, dict):
+                        raise TypeError("checkpoint bucket payload is not a map")
+                    rejected: Counter[str] = Counter()
+                    excluded = _coerced_counter(
+                        d.get("excluded"),
+                        key_validator=EXCLUSION_REASONS.__contains__,
+                        reject_reason="checkpoint_invalid_exclusion",
+                        rejected=rejected,
                     )
+                    b = Bucket(
+                        n=_coerced_count(d.get("n", 0), rejected),
+                        signal_candidates=_coerced_count(d.get("signal_candidates", 0), rejected),
+                        tags=_coerced_counter(
+                            d.get("tags"),
+                            key_validator=_is_canonical_tag,
+                            reject_reason="checkpoint_invalid_tag",
+                            rejected=rejected,
+                        ),
+                        links=_coerced_counter(
+                            d.get("links"),
+                            key_validator=_is_canonical_link,
+                            reject_reason="checkpoint_invalid_url",
+                            rejected=rejected,
+                        ),
+                        domains=_coerced_counter(
+                            d.get("domains"),
+                            key_validator=_is_canonical_domain,
+                            reject_reason="checkpoint_invalid_domain",
+                            rejected=rejected,
+                        ),
+                        langs=_coerced_counter(
+                            d.get("langs"),
+                            key_validator=is_primary_language,
+                            reject_reason="checkpoint_invalid_lang",
+                            rejected=rejected,
+                        ),
+                        emoji=_coerced_counter(
+                            d.get("emoji"),
+                            key_validator=lambda value: EMOJI_RE.fullmatch(value) is not None,
+                            reject_reason="checkpoint_invalid_emoji",
+                            rejected=rejected,
+                        ),
+                        tag_labels=_coerced_tag_labels(d.get("tag_labels"), rejected),
+                        excluded=excluded,
+                    )
+                    b.excluded.update(rejected)
+                    b.signal_candidates += sum(rejected.values())
                 except (ValueError, TypeError, AttributeError, OverflowError) as exc:
                     # %.120r: entries come from the untrusted checkpoint and can
                     # be arbitrarily large — cap what one bad bucket puts in a log.
@@ -405,34 +453,55 @@ class WindowStore:
         return restored
 
 
-def _non_negative(value: int) -> int:
-    if value < 0:
-        raise ValueError("negative count in checkpoint")
+def _coerced_count(value, rejected: Counter[str]) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0 or value > _MAX_CHECKPOINT_COUNT:
+        rejected["checkpoint_invalid_count"] += 1
+        return 0
     return value
 
 
-def _coerced_counter(data, *, key_validator=None) -> Counter:
-    # str keys / non-negative int values, or ValueError|TypeError|OverflowError
-    # (int(float("inf"))) — restore() skips the bucket.
+def _coerced_counter(data, *, key_validator, reject_reason: str, rejected: Counter[str]) -> Counter:
+    """Restore safe entries and account for each rejected entry independently."""
     output = Counter()
-    for raw_key, value in (data or {}).items():
-        key = str(raw_key)
-        if key_validator is not None and (not isinstance(raw_key, str) or not key_validator(key)):
-            raise ValueError(f"unsafe counter key: {key[:80]!r}")
-        output[key] = _non_negative(int(value))
+    if data is None:
+        return output
+    if not isinstance(data, dict):
+        rejected[reject_reason] += 1
+        return output
+    for raw_key, value in data.items():
+        if not isinstance(raw_key, str) or not key_validator(raw_key):
+            rejected[reject_reason] += 1
+            continue
+        before = rejected["checkpoint_invalid_count"]
+        count = _coerced_count(value, rejected)
+        if rejected["checkpoint_invalid_count"] != before:
+            continue
+        output[raw_key] = count
     return output
 
 
-def _coerced_tag_labels(data) -> dict[str, Counter]:
+def _coerced_tag_labels(data, rejected: Counter[str]) -> dict[str, Counter]:
     output: dict[str, Counter] = {}
-    for canonical, labels in (data or {}).items():
+    if data is None:
+        return output
+    if not isinstance(data, dict):
+        rejected["checkpoint_invalid_label"] += 1
+        return output
+    for canonical, labels in data.items():
         if not isinstance(canonical, str) or not _is_canonical_tag(canonical):
-            raise ValueError(f"unsafe label canonical key: {str(canonical)[:80]!r}")
-        counter = _coerced_counter(labels)
-        for display in counter:
+            rejected["checkpoint_invalid_label"] += 1
+            continue
+
+        def valid_display(display: str, *, expected: str = canonical) -> bool:
             tag, _reason = normalize_hashtag(display)
-            if tag is None or tag.canonical != canonical:
-                raise ValueError(f"display label does not match canonical tag: {display[:80]!r}")
+            return tag is not None and tag.canonical == expected
+
+        counter = _coerced_counter(
+            labels,
+            key_validator=valid_display,
+            reject_reason="checkpoint_invalid_label",
+            rejected=rejected,
+        )
         output[canonical] = counter
     return output
 

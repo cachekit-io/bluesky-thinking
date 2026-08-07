@@ -45,6 +45,7 @@ key material:
 
 ```json
 {"status": "ok", "jetstream_connected": true, "events_seen": 12345,
+ "events_missing_source": 0,
  "last_event_age_seconds": 0.4, "last_publish_age_seconds": 7.1, "uptime_seconds": 900.0}
 ```
 
@@ -63,12 +64,12 @@ set/replace, so that gap is inherent to the decorator API.
 
 Values are interop/v1 plain MessagePack, top-level maps with string keys. All carry
 `window` (str), `generated_at` (unix seconds, int), `total_posts` (int),
-`total_events_considered` (int), `excluded_count_by_reason` (map), and
-`normalization_version` (str), plus:
+`total_events_considered` (int), `total_signal_candidates` (int),
+`excluded_count_by_reason` (map), and `normalization_version` (str), plus:
 
 | Operation | Payload field |
 | :--- | :--- |
-| `trending_hashtags` | `hashtags`: `[{tag, canonical, count}]`, top 50; `tag` preserves the most frequent display spelling |
+| `trending_hashtags` | `hashtags`: `[{tag, canonical, display, count}]`, top 50; `tag` remains canonical and `display` preserves the most frequent spelling |
 | `trending_links` | `links`: `[{uri, count}]` and `domains`: `[{domain, count}]`, top 50 |
 | `lang_mix` | `langs`: `{lang: share}` (floats summing to ~1; top 25 + `other`) |
 | `posts_per_minute` | `ppm`: float |
@@ -88,8 +89,8 @@ backend never sees it in the clear. Ciphertext-only verification against the liv
 Window state is checkpointed into CacheKit (auto-mode key, TTL 26 h) every
 `CHECKPOINT_INTERVAL_SECONDS` and restored on startup, so a process restart doesn't zero the 24h
 window (the spec's Render-restart mitigation). Per-minute counters are truncated to their top-K
-entries in the snapshot — long-tail trending counts are approximate after a restore;
-`posts_per_minute` and `lang_mix` stay exact.
+entries in the snapshot — long-tail trending and language counts are approximate after a restore;
+`posts_per_minute` and `total_signal_candidates` stay exact.
 
 The checkpoint is stored **unencrypted**, so it deliberately omits the per-language sentiment
 totals: those are the cleartext source of the `@cache.secure` value, and persisting them in the
@@ -98,7 +99,8 @@ zero-knowledge property. Sentiment is not restart-critical — the secure 1h win
 an hour of a restart; the aggregate counts above are unaffected.
 
 The checkpoint is equally **untrusted on read-back** (a backend operator can poison it): `restore()`
-validates and coerces every entry, skipping corrupt ones with a warning instead of crashing startup,
+validates every entry, dropping unsafe counter keys and values individually instead of erasing the
+rest of their minute or crashing startup,
 and ignores any legacy `sent` field entirely — restoring it would let a poisoned checkpoint choose
 the plaintext that the next secure publish encrypts.
 

@@ -47,6 +47,7 @@ class HealthState:
         self.started_at = now_fn()
         self.jetstream_connected = False
         self.events_seen = 0
+        self.events_missing_source = 0
         self.last_event_at: float | None = None
         self.last_publish_at: float | None = None
 
@@ -56,6 +57,9 @@ class HealthState:
 
     def published(self) -> None:
         self.last_publish_at = self._now()
+
+    def missing_source(self) -> None:
+        self.events_missing_source += 1
 
     def snapshot(self) -> tuple[int, dict]:
         """(HTTP status, body) for /health — 503 whenever Jetstream is down."""
@@ -69,6 +73,7 @@ class HealthState:
             "status": "ok" if status == 200 else "degraded",
             "jetstream_connected": self.jetstream_connected,
             "events_seen": self.events_seen,
+            "events_missing_source": self.events_missing_source,
             "last_event_age_seconds": age(self.last_event_at),
             "last_publish_age_seconds": age(self.last_publish_at),
             "uptime_seconds": round(now - self.started_at, 1),

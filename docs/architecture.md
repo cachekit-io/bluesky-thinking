@@ -52,9 +52,10 @@ types)**. One string argument, everywhere. TS wrappers must not add default para
 
 Aggregate values use the additive
 [`skyline-normalization-v1` public signal contract](signal-policy.md). Every
-operation carries `normalization_version`, `total_events_considered`, and
-`excluded_count_by_reason`. Hashtag rows include display `tag`, `canonical`,
-and `count`; `trending_links` includes both canonical `links` and normalized
+operation carries `normalization_version`, `total_events_considered`,
+`total_signal_candidates`, and `excluded_count_by_reason`. Hashtag rows retain
+canonical `tag` and add `canonical`, majority-spelling `display`, and `count`;
+`trending_links` includes both canonical `links` and normalized
 `domains`. Operation names, arguments, keys, TTLs, and interop encoding are
 unchanged.
 

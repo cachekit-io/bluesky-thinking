@@ -26,7 +26,13 @@ MAX_BACKOFF = 60.0
 MAX_FUTURE_SKEW_SECONDS = 300.0
 
 
-def ingest_raw(raw: str | bytes, store: WindowStore, *, now_fn: Callable[[], float] = time.time) -> int | None:
+def ingest_raw(
+    raw: str | bytes,
+    store: WindowStore,
+    *,
+    now_fn: Callable[[], float] = time.time,
+    health: HealthState | None = None,
+) -> int | None:
     """Parse one Jetstream frame into the store; returns the event's time_us cursor.
 
     Future-dated events (beyond MAX_FUTURE_SKEW_SECONDS of wall-clock) are dropped
@@ -48,10 +54,15 @@ def ingest_raw(raw: str | bytes, store: WindowStore, *, now_fn: Callable[[], flo
         return None
     feats = extract_post(event)
     if feats is not None:
+        source_id = event.get("did")
+        if not isinstance(source_id, str) or not source_id:
+            logger.warning("Jetstream post missing source DID; trend signals excluded")
+            if health is not None:
+                health.missing_source()
         # The raw DID crosses only this call boundary. WindowStore immediately
         # folds it into a process-keyed contribution digest and never stores or
         # logs the identifier itself.
-        store.add(feats, source_id=event.get("did"))
+        store.add(feats, source_id=source_id)
     return time_us
 
 
@@ -78,7 +89,7 @@ async def consume(base_url: str, store: WindowStore, health: HealthState) -> Non
                 logger.info("connected to Jetstream: %s", url)
                 health.jetstream_connected = True
                 async for raw in ws:
-                    time_us = ingest_raw(raw, store)
+                    time_us = ingest_raw(raw, store, health=health)
                     if time_us is not None:
                         # Reset on real events, not on handshake: a server that
                         # accepts-then-closes must not defeat the backoff.

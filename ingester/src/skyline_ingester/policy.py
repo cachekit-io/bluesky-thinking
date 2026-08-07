@@ -70,6 +70,16 @@ TRACKING_PARAMETERS = frozenset(
 
 EXCLUSION_REASONS = frozenset(
     {
+        "candidate_limit_tag",
+        "candidate_limit_url",
+        "checkpoint_invalid_count",
+        "checkpoint_invalid_domain",
+        "checkpoint_invalid_emoji",
+        "checkpoint_invalid_exclusion",
+        "checkpoint_invalid_label",
+        "checkpoint_invalid_lang",
+        "checkpoint_invalid_tag",
+        "checkpoint_invalid_url",
         "duplicate_in_event_domain",
         "duplicate_in_event_tag",
         "duplicate_in_event_url",
@@ -123,7 +133,12 @@ def normalize_hashtag(value: object) -> tuple[NormalizedHashtag | None, str | No
         return None, "malformed_tag"
     if not any(ch.isalnum() for ch in display):
         return None, "malformed_tag"
-    canonical = display.casefold()
+    # casefold() can create a sequence that is no longer normalized (for
+    # example, sharp-s next to a combining mark). Normalize again so a
+    # canonical tag is idempotent when it crosses the checkpoint boundary.
+    canonical = unicodedata.normalize("NFKC", display.casefold())
+    if len(canonical) > MAX_TAG_LENGTH:
+        return None, "malformed_tag"
     if canonical in FILTERED_TAGS:
         return None, "filtered_tag"
     return NormalizedHashtag(canonical=canonical, display=display), None
@@ -195,6 +210,10 @@ def normalize_link(value: object) -> tuple[NormalizedLink | None, str | None]:
 
     query = _strip_tracking_parameters(parts.query)
     uri = urlunsplit((scheme, authority, parts.path or "/", query, ""))
+    # urlunsplit inserts the canonical root slash, so the output can be one
+    # byte longer than a pathless input. Bound the value we actually publish.
+    if len(uri) > MAX_URL_LENGTH:
+        return None, "malformed_url"
     return NormalizedLink(uri=uri, domain=host), None
 
 
@@ -202,7 +221,7 @@ def normalize_domain(value: object) -> tuple[str | None, str | None]:
     """Normalize one bare public host for domain ranking."""
     if not isinstance(value, str) or not value or len(value) > 253:
         return None, "unsafe_host"
-    host, _is_ipv6 = _normalize_host(value)
+    host = _normalize_host(value)
     if host is None:
         return None, "unsafe_host"
     if _domain_matches(host, FILTERED_DOMAINS):
@@ -210,34 +229,36 @@ def normalize_domain(value: object) -> tuple[str | None, str | None]:
     return host, None
 
 
-def _normalize_host(raw_host: str) -> tuple[str | None, bool]:
-    host = raw_host.rstrip(".").casefold()
-    if not host or "%" in host:
-        return None, False
+def _normalize_host(raw_host: str) -> str | None:
+    # IDNA maps several Unicode dot and digit forms. All security checks must
+    # run on that final ASCII spelling; checking first lets e.g. U+FF0E split
+    # 169.254.169．254 into a private address only after validation.
+    if "%" in raw_host:
+        return None
+    try:
+        host = raw_host.encode("idna").decode("ascii").rstrip(".").casefold()
+    except UnicodeError:
+        return None
+    if not host or len(host) > 253:
+        return None
     try:
         address = ipaddress.ip_address(host)
     except ValueError:
         address = None
     if address is not None:
-        return (address.compressed, isinstance(address, ipaddress.IPv6Address)) if address.is_global else (None, False)
+        return address.compressed if address.is_global else None
 
     # Reject browser-dependent numeric host spellings (e.g. 2130706433 or
     # 0x7f000001) instead of risking an alternate spelling of a local address.
     numeric_labels = host.split(".")
     if host.isdecimal() or host.startswith("0x") or all(label.isdecimal() or label.startswith("0x") for label in numeric_labels):
-        return None, False
+        return None
     if host == "localhost" or host.endswith(_LOCAL_SUFFIXES) or "." not in host:
-        return None, False
-    try:
-        ascii_host = host.encode("idna").decode("ascii").casefold()
-    except UnicodeError:
-        return None, False
-    if len(ascii_host) > 253:
-        return None, False
-    labels = ascii_host.split(".")
+        return None
+    labels = host.split(".")
     if any(_DNS_LABEL_RE.fullmatch(label) is None for label in labels):
-        return None, False
-    return ascii_host, False
+        return None
+    return host
 
 
 def _is_tag_word_character(value: str) -> bool:

@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from skyline_ingester.extract import PostFeatures, extract_post
+from skyline_ingester.health import HealthState
 from skyline_ingester.jetstream import ingest_raw
 from skyline_ingester.policy import NORMALIZATION_VERSION, normalize_hashtag, normalize_link
 from skyline_ingester.windows import SOURCE_DEDUPE_SECONDS, WindowStore
@@ -30,6 +31,16 @@ def test_hashtag_nfkc_casefold_and_display_preservation():
     sharp_s, reason = normalize_hashtag("Straße")
     assert reason is None
     assert sharp_s is not None and sharp_s.canonical == "strasse" and sharp_s.display == "Straße"
+
+    combining, reason = normalize_hashtag("ß́")
+    assert reason is None
+    assert combining is not None and combining.canonical == "sś"
+    renormalized, reason = normalize_hashtag(combining.canonical)
+    assert reason is None
+    assert renormalized is not None and renormalized.canonical == combining.canonical
+
+    too_long, reason = normalize_hashtag("ß" * 40)
+    assert too_long is None and reason == "malformed_tag"
 
 
 @pytest.mark.parametrize("value", ["cache kit", "cache!", "-cache", "cache-", "_", 123])
@@ -76,6 +87,10 @@ def test_link_canonicalization_preserves_resource_identity():
         ("http://127.0.0.1/admin", "unsafe_host"),
         ("http://127.1/admin", "unsafe_host"),
         ("http://localhost/admin", "unsafe_host"),
+        ("http://169.254.169．254/latest/meta-data/", "unsafe_host"),
+        ("http://127。0。0。1/admin", "unsafe_host"),
+        ("http://192.168.1｡1/admin", "unsafe_host"),
+        ("http://a.b．local/admin", "unsafe_host"),
         ("https://spam.example.com/offer", "filtered_domain"),
         ("https://example.com/%not-escaped", "malformed_url"),
     ],
@@ -83,6 +98,13 @@ def test_link_canonicalization_preserves_resource_identity():
 def test_dangerous_or_filtered_links_are_rejected(value, reason):
     link, actual = normalize_link(value)
     assert link is None and actual == reason
+
+
+def test_link_output_length_is_bounded_after_root_slash_insertion():
+    prefix = "https://example.com?x="
+    value = prefix + "a" * (2_048 - len(prefix))
+    link, reason = normalize_link(value)
+    assert link is None and reason == "malformed_url"
 
 
 def test_recorded_before_after_keeps_broad_activity_above_one_repetitive_source():
@@ -101,9 +123,9 @@ def test_recorded_before_after_keeps_broad_activity_above_one_repetitive_source(
 
     hashtag_value = store.build_value("trending_hashtags", "5m", NOW)
     after = {item["canonical"]: item for item in hashtag_value["hashtags"]}
-    assert after["community"] == {"tag": "Community", "canonical": "community", "count": 4}
-    assert after["strasse"] == {"tag": "Straße", "canonical": "strasse", "count": 3}
-    assert after["flashsale"] == {"tag": "FlashSale", "canonical": "flashsale", "count": 1}
+    assert after["community"] == {"tag": "community", "display": "Community", "canonical": "community", "count": 4}
+    assert after["strasse"] == {"tag": "strasse", "display": "Straße", "canonical": "strasse", "count": 3}
+    assert after["flashsale"] == {"tag": "flashsale", "display": "FlashSale", "canonical": "flashsale", "count": 1}
     assert after["community"]["count"] > after["flashsale"]["count"]
 
     link_value = store.build_value("trending_links", "5m", NOW)
@@ -120,9 +142,15 @@ def test_recorded_before_after_keeps_broad_activity_above_one_repetitive_source(
     assert excluded["filtered_domain"] == 1
     assert excluded["unsafe_host"] == 1
     assert excluded["malformed_tag"] == 1
+    accepted = sum(item["count"] for item in hashtag_value["hashtags"])
+    accepted += sum(item["count"] for item in link_value["links"])
+    accepted += sum(item["count"] for item in link_value["domains"])
+    assert link_value["total_signal_candidates"] == accepted + sum(excluded.values())
 
 
-def test_source_bound_is_rolling_and_allows_a_new_contribution_at_the_horizon():
+def test_source_bound_is_rolling_on_monotonic_time(monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr("skyline_ingester.windows.time.monotonic", lambda: clock[0])
     store = WindowStore(dedupe_key=b"x" * 32)
     features = PostFeatures(
         ts=NOW,
@@ -134,8 +162,10 @@ def test_source_bound_is_rolling_and_allows_a_new_contribution_at_the_horizon():
         hashtag_labels={"broad": "Broad"},
     )
     store.add(features, source_id="did:plc:one")
+    clock[0] += SOURCE_DEDUPE_SECONDS - 1
     features.ts = NOW + SOURCE_DEDUPE_SECONDS - 1
     store.add(features, source_id="did:plc:one")
+    clock[0] += 1
     features.ts = NOW + SOURCE_DEDUPE_SECONDS
     store.add(features, source_id="did:plc:one")
 
@@ -144,11 +174,53 @@ def test_source_bound_is_rolling_and_allows_a_new_contribution_at_the_horizon():
     assert merged.excluded["duplicate_source_tag"] == 1
 
 
+def test_future_event_timestamp_cannot_expire_source_ledger(monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr("skyline_ingester.windows.time.monotonic", lambda: clock[0])
+    event = _quality_events()[0]
+    store = WindowStore(dedupe_key=b"x" * 32)
+    ingest_raw(json.dumps(event), store, now_fn=lambda: NOW)
+
+    future = {**event, "time_us": int((NOW + SOURCE_DEDUPE_SECONDS) * 1_000_000)}
+    ingest_raw(json.dumps(future), store, now_fn=lambda: NOW)
+    clock[0] += 1
+    again = {**event, "time_us": int((NOW + 1) * 1_000_000)}
+    ingest_raw(json.dumps(again), store, now_fn=lambda: NOW)
+
+    merged = store.merged("1h", NOW + SOURCE_DEDUPE_SECONDS)
+    assert merged.tags["flashsale"] == 1
+    assert merged.excluded["duplicate_source_tag"] == 2
+
+
+def test_source_bound_rate_is_explicit_across_1h_and_24h(monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr("skyline_ingester.windows.time.monotonic", lambda: clock[0])
+    store = WindowStore(dedupe_key=b"x" * 32)
+    features = PostFeatures(
+        ts=NOW,
+        lang="en",
+        hashtags=["bounded"],
+        links=[],
+        emoji=[],
+        sentiment=None,
+        hashtag_labels={"bounded": "Bounded"},
+    )
+    for interval in range(288):
+        features.ts = NOW + interval * SOURCE_DEDUPE_SECONDS
+        store.add(features, source_id="did:plc:one")
+        clock[0] += SOURCE_DEDUPE_SECONDS
+
+    latest = features.ts
+    assert store.merged("1h", latest).tags["bounded"] == 12
+    assert store.merged("24h", latest).tags["bounded"] == 288
+
+
 def test_missing_source_cannot_bypass_public_trend_bound():
     event = _quality_events()[0]
     event.pop("did")
     store = WindowStore(dedupe_key=b"x" * 32)
-    ingest_raw(json.dumps(event), store, now_fn=lambda: NOW)
+    health = HealthState(now_fn=lambda: NOW)
+    ingest_raw(json.dumps(event), store, now_fn=lambda: NOW, health=health)
 
     tags = store.build_value("trending_hashtags", "5m", NOW)
     links = store.build_value("trending_links", "5m", NOW)
@@ -158,6 +230,7 @@ def test_missing_source_cannot_bypass_public_trend_bound():
     assert tags["excluded_count_by_reason"]["missing_source_tag"] == 1
     assert links["excluded_count_by_reason"]["missing_source_url"] == 1
     assert links["excluded_count_by_reason"]["missing_source_domain"] == 1
+    assert health.snapshot()[1]["events_missing_source"] == 1
 
 
 def test_source_identifiers_never_enter_buckets_checkpoints_or_public_values():

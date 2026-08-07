@@ -45,6 +45,7 @@ def test_snapshot_never_leaks_payload_or_keys() -> None:
     assert set(body) == {
         "status",
         "jetstream_connected",
+        "events_missing_source",
         "events_seen",
         "last_event_age_seconds",
         "last_publish_age_seconds",
