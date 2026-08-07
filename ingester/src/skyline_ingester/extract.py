@@ -14,6 +14,7 @@ from skyline_ingester.policy import hashtag_candidate_fingerprint, hashtags_from
 
 POST_COLLECTION = "app.bsky.feed.post"
 MAX_TEXT_LENGTH = 4_096
+MAX_FACET_FEATURES = 64
 MAX_TAG_CANDIDATES = 32
 MAX_LINK_CANDIDATES = 16
 _PRIMARY_LANGUAGE_RE = re.compile(r"[a-z]{2,8}")
@@ -131,13 +132,19 @@ def extract_post(event: dict) -> PostFeatures | None:
     facets = record.get("facets") or []
     if not isinstance(facets, list):
         facets = []
+    features_examined = 0
     for facet in facets:
+        if features_examined >= MAX_FACET_FEATURES:
+            break
         if not isinstance(facet, dict):
             continue
         features = facet.get("features") or []
         if not isinstance(features, list):
             continue
         for feature in features:
+            if features_examined >= MAX_FACET_FEATURES:
+                break
+            features_examined += 1
             if not isinstance(feature, dict):
                 continue
             ftype = feature.get("$type")
@@ -155,11 +162,10 @@ def extract_post(event: dict) -> PostFeatures | None:
     if isinstance(embed, dict) and embed.get("$type") == "app.bsky.embed.external":
         external = embed.get("external") or {}
         uri = external.get("uri") if isinstance(external, dict) else None
-        if uri:
-            if len(link_candidates) < MAX_LINK_CANDIDATES:
-                link_candidates.append(uri)
-            else:
-                exclusions["candidate_limit_url"] += 1
+        if len(link_candidates) < MAX_LINK_CANDIDATES:
+            link_candidates.append(uri)
+        else:
+            exclusions["candidate_limit_url"] += 1
 
     hashtags: list[str] = []
     hashtag_labels: dict[str, str] = {}

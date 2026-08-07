@@ -99,13 +99,22 @@ EXCLUSION_REASONS = frozenset(
 
 _BAD_PERCENT_ESCAPE_RE = re.compile(r"%(?![0-9a-fA-F]{2})")
 _DNS_LABEL_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+# Provider/suffix sweep last verified against public docs and DNS on
+# 2026-08-07. Keep parked former providers conservatively denied.
 _LOCAL_HOSTS = frozenset(
     {
         "1u.ms",
+        "backname.io",
+        "ip.es.io",
+        "l0pb.dev",
+        "l0pb.me",
+        "lacolhost.com",
+        "lndo.site",
         "local.gd",
         "localho.st",
         "localhost",
         "localhost.direct",
+        "localhst.co.uk",
         "localtest.me",
         "lvh.me",
         "nip.io",
@@ -114,7 +123,21 @@ _LOCAL_HOSTS = frozenset(
         "vcap.me",
     }
 )
-_LOCAL_SUFFIXES = (".home", ".internal", ".lan", ".local", ".localhost")
+_LOCAL_SUFFIXES = frozenset(
+    {
+        "corp",
+        "home",
+        "home.arpa",
+        "internal",
+        "intra",
+        "intranet",
+        "lan",
+        "local",
+        "localdomain",
+        "localhost",
+        "private",
+    }
+)
 _IPV4_EMBEDDED_NETWORKS = tuple(ipaddress.IPv6Network(prefix) for prefix in ("::/96", "64:ff9b::/96", "::ffff:0:0:0/96"))
 _DISALLOWED_IP_NETWORKS = tuple(ipaddress.ip_network(prefix) for prefix in ("192.88.99.0/24", "5f00::/16", "64:ff9b:1::/48"))
 
@@ -305,7 +328,7 @@ def _normalize_host(raw_host: str) -> str | None:
     labels = host.split(".")
     if all(label.isdecimal() or label.startswith("0x") for label in labels):
         return None
-    if _domain_matches(host, _LOCAL_HOSTS) or host.endswith(_LOCAL_SUFFIXES) or "." not in host:
+    if _domain_matches(host, _LOCAL_HOSTS) or _domain_matches(host, _LOCAL_SUFFIXES) or "." not in host:
         return None
     if any(_DNS_LABEL_RE.fullmatch(label) is None for label in labels):
         return None

@@ -71,7 +71,7 @@ def test_facet_and_feature_overflow_is_visible(fixture_lines):
     features = extract_post(event)
     assert features is not None
     assert len(features.hashtags) == 32
-    assert features.exclusions["candidate_limit_tag"] == 168
+    assert features.exclusions["candidate_limit_tag"] == 32
 
     record["facets"] = [
         {"features": [{"$type": "app.bsky.richtext.facet#tag", "tag": f"tag{facet}_{index}"} for index in range(20)]}
@@ -79,7 +79,7 @@ def test_facet_and_feature_overflow_is_visible(fixture_lines):
     ]
     features = extract_post(event)
     assert features is not None
-    assert len(features.hashtags) + features.exclusions["candidate_limit_tag"] == 4_000
+    assert len(features.hashtags) + features.exclusions["candidate_limit_tag"] == 64
 
     record["facets"] = [{"features": [{"$type": "app.bsky.richtext.facet#mention", "did": "did:plc:x"}]} for _ in range(100)]
     features = extract_post(event)
@@ -89,6 +89,12 @@ def test_facet_and_feature_overflow_is_visible(fixture_lines):
     features = extract_post(event)
     assert features is not None
     assert features.exclusions == {"malformed_tag": 10}
+
+    record["facets"] = []
+    record["embed"] = {"$type": "app.bsky.embed.external", "external": {"uri": ""}}
+    features = extract_post(event)
+    assert features is not None
+    assert features.exclusions == {"malformed_url": 1}
 
 
 def test_emoji_extraction_counts_zwj_sequence_once(fixture_lines):

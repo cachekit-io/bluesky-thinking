@@ -92,8 +92,8 @@ the live SaaS is Stage 3.
 Window state is checkpointed into CacheKit (auto-mode key, TTL 26 h) every
 `CHECKPOINT_INTERVAL_SECONDS` and restored on startup, so a process restart doesn't zero the 24h
 window (the spec's Render-restart mitigation). Per-minute counters are truncated to their top-K
-entries in the snapshot — long-tail trending and language counts are approximate after a restore;
-`posts_per_minute` and `total_signal_candidates` stay exact.
+entries in the snapshot — long-tail trending, language, and emoji counts are approximate after a
+restore; `posts_per_minute` and `total_signal_candidates` stay exact.
 
 The checkpoint is stored **unencrypted**, so it deliberately omits the per-language sentiment
 totals: those are the cleartext source of the `@cache.secure` value, and persisting them in the
@@ -105,10 +105,11 @@ The checkpoint is equally **untrusted on read-back** (a backend operator can poi
 validates every entry, dropping unsafe counter keys and values individually instead of erasing the
 rest of their minute or crashing startup,
 and ignores any legacy `sent` field entirely — restoring it would let a poisoned checkpoint choose
-the plaintext that the next secure publish encrypts. Restore work is capped to the same per-counter
-top-K sizes of accepted entries written by `snapshot()` and at most one 24-hour window
-of minute buckets, so an oversized operator-poisoned map cannot turn startup into a memory
-or CPU boot loop.
+the plaintext that the next secure publish encrypts. Restore keeps the same per-counter top-K
+accepted entries written by `snapshot()`, examines at most 512 additional rejected raw entries
+per map, charges any unexamined remainder, and considers at most one 24-hour window of minute
+buckets. An oversized operator-poisoned map therefore cannot turn startup into a memory or CPU
+boot loop while a bounded invalid prefix still cannot displace valid history.
 
 Checkpoint schema v2 is tied to `skyline-normalization-v1`. A checkpoint from
 an older normalization version is rejected instead of mixing incompatible
@@ -126,8 +127,10 @@ For public tags, URLs, and domains, one source contributes a given canonical
 value at most once per rolling five minutes. The raw DID crosses one local call
 boundary, is immediately folded into a process-keyed tuple digest, and is never
 stored or logged. The random key and opaque five-minute ledger are excluded from
-buckets, checkpoints, cache values, and history, and rotate on restart. Full
-canonicalization, safety, filter-list, tracking-parameter, and transparency
+buckets, checkpoints, cache values, and history, and rotate on restart. The
+ledger holds at most 100,000 tuples; a fast replay that fills it evicts the
+oldest-expiring tuple, weakening the bound temporarily instead of risking OOM.
+Full canonicalization, safety, filter-list, tracking-parameter, and transparency
 semantics: [public signal policy](../docs/signal-policy.md).
 
 After a reconnect, a backlog delivered faster than real time shares the current

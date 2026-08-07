@@ -216,7 +216,7 @@ def test_restore_filters_unsafe_aliases_without_losing_minute():
     assert merged.excluded["checkpoint_invalid_domain"] == 2
 
 
-def test_restore_caps_untrusted_bucket_and_counter_cardinality():
+def test_restore_caps_untrusted_bucket_and_counter_cardinality(monkeypatch):
     good = int(NOW // 60)
     tags = {f"tag{index}": index + 1 for index in range(100)}
     store = WindowStore(max_minutes=2)
@@ -226,18 +226,34 @@ def test_restore_caps_untrusted_bucket_and_counter_cardinality():
     assert len(merged.tags) == 20
     assert merged.excluded["checkpoint_invalid_tag"] == 80
 
-    invalid = {f"#invalid{index}": 1 for index in range(20)}
+    invalid = {f"#invalid{index}": 1 for index in range(500)}
     real = {f"real{index}": index + 1 for index in range(20)}
     store = WindowStore()
     assert store.restore(_snapshot([[good, {"tags": {**invalid, **real}}]]), NOW) == 1
     merged = store.merged("5m", NOW)
     assert merged.tags == real
-    assert merged.excluded["checkpoint_invalid_tag"] == 20
+    assert merged.excluded["checkpoint_invalid_tag"] == 500
 
-    invalid_labels = {f"invalid{index}": "not-a-map" for index in range(20)}
+    invalid_labels = {f"invalid{index}": "not-a-map" for index in range(500)}
     real_labels = {f"real{index}": {f"Real{index}": index + 1} for index in range(20)}
     store = WindowStore()
     assert store.restore(_snapshot([[good, {"tag_labels": {**invalid_labels, **real_labels}}]]), NOW) == 1
     merged = store.merged("5m", NOW)
     assert set(merged.tag_labels) == set(real_labels)
-    assert merged.excluded["checkpoint_invalid_label"] == 20
+    assert merged.excluded["checkpoint_invalid_label"] == 500
+
+    calls = 0
+
+    def reject_every_key(_value):
+        nonlocal calls
+        calls += 1
+        return False
+
+    with monkeypatch.context() as patch:
+        patch.setattr("skyline_ingester.windows._is_canonical_tag", reject_every_key)
+        store = WindowStore()
+        oversized = {f"invalid{index}": 1 for index in range(2_000)}
+        assert store.restore(_snapshot([[good, {"tags": oversized}]]), NOW) == 1
+    merged = store.merged("5m", NOW)
+    assert calls == 532
+    assert merged.excluded["checkpoint_invalid_tag"] == 2_000

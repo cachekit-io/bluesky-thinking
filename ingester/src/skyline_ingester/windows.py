@@ -42,7 +42,9 @@ OPERATIONS = ("trending_hashtags", "trending_links", "lang_mix", "posts_per_minu
 
 SNAPSHOT_VERSION = 2
 SOURCE_DEDUPE_SECONDS = 5 * 60
+MAX_SOURCE_LEDGER_ENTRIES = 100_000
 _EXPIRY_SWEEP_LIMIT = 4_096
+_RESTORE_SCAN_SLACK = 512
 # Checkpoint truncation: keep the per-minute head of each counter so the
 # serialized snapshot stays small enough for one cache entry.
 _K_TAGS, _K_LINKS, _K_DOMAINS, _K_EMOJI, _K_LANGS = 20, 20, 20, 10, 15
@@ -168,6 +170,21 @@ class WindowStore:
                 del self._seen[digest]
             swept += 1
 
+    def _evict_oldest_seen(self) -> None:
+        """Evict one live ledger entry while bounding stale-heap cleanup."""
+        swept = 0
+        while self._seen_expiry and swept < _EXPIRY_SWEEP_LIMIT:
+            expiry, digest = heapq.heappop(self._seen_expiry)
+            seen_at = self._seen.get(digest)
+            if seen_at is not None and seen_at + SOURCE_DEDUPE_SECONDS == expiry:
+                del self._seen[digest]
+                return
+            swept += 1
+        if self._seen:
+            # Assignment order tracks accepted contribution time. This fallback
+            # bounds work even if the heap contains an adversarial stale prefix.
+            del self._seen[next(iter(self._seen))]
+
     def _accept_signal(self, source_digest: bytes | None, family: str, value: str, now: float) -> bool:
         """Accept one source/signal contribution per rolling five minutes.
 
@@ -182,6 +199,11 @@ class WindowStore:
         seen_at = self._seen.get(digest)
         if seen_at is not None and seen_at + SOURCE_DEDUPE_SECONDS > now:
             return False
+        if seen_at is not None:
+            # Reinsert at the end so dict order remains an oldest-first fallback.
+            del self._seen[digest]
+        if len(self._seen) >= MAX_SOURCE_LEDGER_ENTRIES:
+            self._evict_oldest_seen()
         self._seen[digest] = now
         heapq.heappush(self._seen_expiry, (now + SOURCE_DEDUPE_SECONDS, digest))
         return True
@@ -409,8 +431,8 @@ class WindowStore:
                         max_entries=len(EXCLUSION_REASONS),
                     )
                     b = Bucket(
-                        n=_coerced_count(d.get("n", 0), rejected),
-                        signal_candidates=_coerced_count(d.get("signal_candidates", 0), rejected),
+                        n=_coerced_count(d.get("n", 0), rejected) or 0,
+                        signal_candidates=_coerced_count(d.get("signal_candidates", 0), rejected) or 0,
                         tags=_coerced_counter(
                             d.get("tags"),
                             key_validator=_is_canonical_tag,
@@ -465,10 +487,10 @@ class WindowStore:
         return restored
 
 
-def _coerced_count(value, rejected: Counter[str]) -> int:
+def _coerced_count(value, rejected: Counter[str]) -> int | None:
     if not isinstance(value, int) or isinstance(value, bool) or value < 0 or value > _MAX_CHECKPOINT_COUNT:
         rejected["checkpoint_invalid_count"] += 1
-        return 0
+        return None
     return value
 
 
@@ -481,17 +503,15 @@ def _coerced_counter(data, *, key_validator, reject_reason: str, rejected: Count
         rejected[reject_reason] += 1
         return output
     for index, (raw_key, value) in enumerate(data.items()):
-        if len(output) >= max_entries:
+        if index >= max_entries + _RESTORE_SCAN_SLACK or len(output) >= max_entries:
             rejected[reject_reason] += len(data) - index
             break
         if not isinstance(raw_key, str) or not key_validator(raw_key):
             rejected[reject_reason] += 1
             continue
-        before = rejected["checkpoint_invalid_count"]
         count = _coerced_count(value, rejected)
-        if rejected["checkpoint_invalid_count"] != before:
-            continue
-        output[raw_key] = count
+        if count is not None:
+            output[raw_key] = count
     return output
 
 
@@ -503,7 +523,7 @@ def _coerced_tag_labels(data, rejected: Counter[str]) -> dict[str, Counter]:
         rejected["checkpoint_invalid_label"] += 1
         return output
     for index, (canonical, labels) in enumerate(data.items()):
-        if len(output) >= _K_TAGS:
+        if index >= _K_TAGS + _RESTORE_SCAN_SLACK or len(output) >= _K_TAGS:
             rejected["checkpoint_invalid_label"] += len(data) - index
             break
         if not isinstance(canonical, str) or not _is_canonical_tag(canonical):

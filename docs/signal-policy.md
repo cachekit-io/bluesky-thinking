@@ -31,14 +31,15 @@ additive `display` field is the most frequent NFKC-normalized spelling seen in
 the selected window, with a lexical tie-break. Display case is therefore
 preserved without changing the meaning of `tag` or splitting the count.
 
-Work per post is bounded before normalization: at most 4,096 text characters,
-32 hashtag candidates, and 16 link candidates are normalized. The ingester scans
-the frame's declared facet features only to identify tag/link candidates; other
-feature types do not enter the signal denominator. Genuine tag/link declarations
-beyond their family cap are reported as `candidate_limit_tag` or
-`candidate_limit_url`. If supplied tag facets produce no usable tag, the same
-bounded text fallback is still applied. Repeated rejected spellings within one
-post count once per normalized token, whether they came from facets or text.
+Work per post is bounded before normalization: at most 4,096 text characters
+and 64 declared facet features are examined, then at most 32 hashtag candidates
+and 16 link candidates are normalized. Other feature types and declarations
+beyond the 64-feature examination ceiling do not enter the signal denominator.
+Genuine tag/link declarations examined beyond their family cap are reported as
+`candidate_limit_tag` or `candidate_limit_url`. If supplied tag facets produce
+no usable tag, the same bounded text fallback is still applied. Repeated rejected
+spellings within one post count once per normalized token, whether they came from
+facets or text.
 
 The following canonical tags are explicitly excluded:
 `adult`, `follow4follow`, `followforfollow`, `nsfw`, `porn`, `porno`,
@@ -86,9 +87,12 @@ complete `(source, signal family, canonical value)` tuple. The key is random for
 each process. Only these opaque tuple digests and expiry timestamps live in the
 five-minute ledger.
 
-The key, digests, and raw DIDs are never put in minute buckets, checkpoints,
-CacheKit values, logs, history, or health output. `/health` exposes only an
-aggregate `events_missing_source` counter so a Jetstream schema change cannot
+The ledger holds at most 100,000 live tuple digests. If a fast replay fills that
+ceiling inside five minutes, the oldest-expiring contribution is forgotten early;
+this can weaken the source bound temporarily, but keeps replay from exhausting
+memory. The key, digests, and raw DIDs are never put in minute buckets,
+checkpoints, CacheKit values, logs, history, or health output. `/health` exposes
+only an aggregate `events_missing_source` counter so a Jetstream schema change cannot
 silently empty all public trend rankings. The ledger is not restored:
 after a process restart the key rotates and the five-minute bound starts fresh.
 That small, explicit continuity gap is preferable to creating a durable
@@ -122,16 +126,22 @@ Skyline rejects:
 - credentials in an authority;
 - control characters, whitespace, backslashes, bad percent escapes, invalid
   hosts/ports, browser-dependent numeric hosts, and overlong URLs;
-- localhost, single-label or local-network names, non-global IP literals, and
-  syntactic private-target names;
+- localhost, single-label names, non-global IP literals, and syntactic
+  private-target names;
+- an exact host or subdomain in the local-network suffix families `corp`, `home`,
+  `home.arpa`, `internal`, `intra`, `intranet`, `lan`, `local`, `localdomain`,
+  `localhost`, or `private`;
 - an exact host or subdomain of the reviewed wildcard-DNS/loopback providers
-  `1u.ms`, `local.gd`, `localho.st`, `localhost.direct`, `localtest.me`,
-  `lvh.me`, `nip.io`, `sslip.io`, `traefik.me`, or `vcap.me`;
+  `1u.ms`, `backname.io`, `ip.es.io`, `l0pb.dev`, `l0pb.me`, `lacolhost.com`,
+  `lndo.site`, `local.gd`, `localho.st`, `localhost.direct`, `localhst.co.uk`,
+  `localtest.me`, `lvh.me`, `nip.io`, `sslip.io`, `traefik.me`, or `vcap.me`;
 - an exact host or subdomain of `pornhub.com`, `redtube.com`, `xhamster.com`,
   `xnxx.com`, or `xvideos.com`.
 
-This intentionally small explicit filter is reviewable. It is not a crawler,
-page classifier, or permanent blocklist of people.
+The provider and suffix sets were re-swept against public provider documentation
+and DNS on 2026-08-07; parked former providers remain conservatively denied. This
+explicit filter is reviewable, but requires periodic re-verification. It is not a
+crawler, page classifier, or permanent blocklist of people.
 
 ## Transparency fields
 
@@ -148,7 +158,10 @@ Every public aggregate includes:
   missing source, or the rolling source bound.
 
 Exclusion counts are contribution counts, not unique people and not necessarily
-unique events: one post can contain more than one excluded candidate.
+unique events: one post can contain more than one excluded candidate. Checkpoint
+restore retains per-minute top-K entries, so long-tail tag, URL/domain, language,
+and emoji rankings are approximate immediately after a restart; event and signal
+candidate totals remain exact.
 
 ## Recorded evaluation
 

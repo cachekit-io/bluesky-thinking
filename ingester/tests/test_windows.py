@@ -64,6 +64,18 @@ def test_expired_source_cleanup_is_bounded_per_event(monkeypatch):
     assert len(store._seen_expiry) == 904
 
 
+def test_source_ledger_evicts_oldest_at_hard_cap(monkeypatch):
+    monkeypatch.setattr("skyline_ingester.windows.MAX_SOURCE_LEDGER_ENTRIES", 3)
+    store = WindowStore(dedupe_key=b"x" * 32)
+    source_digest = b"s" * 16
+    for index in range(4):
+        assert store._accept_signal(source_digest, "tag", f"tag{index}", float(index))
+    assert len(store._seen) == 3
+    assert len(store._seen_expiry) == 3
+    assert store._accept_signal(source_digest, "tag", "tag0", 4.0)
+    assert not store._accept_signal(source_digest, "tag", "tag3", 4.0)
+
+
 def test_windows_expire(store):
     # 6 minutes later every 5m-window fixture post has aged out.
     later = NOW + 6 * 60
