@@ -3,7 +3,7 @@
 import json
 import logging
 from collections import Counter
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -165,7 +165,10 @@ def test_checked_in_provider_sweep_matches_host_policy():
     # older than 90 days fails CI until someone re-runs it and re-dates the
     # fixture — the clock, not good intentions, forces re-verification.
     verified_on = date.fromisoformat(sweep["verified_on"])
-    assert verified_on <= date.today(), "host provider sweep is dated in the future"
+    # One day of forward tolerance: a sweep dated "today" in UTC+10 is
+    # "tomorrow" on a UTC CI runner for up to half a day. Anything further
+    # ahead is still a genuinely future-dated fixture and fails.
+    assert verified_on <= date.today() + timedelta(days=1), "host provider sweep is dated in the future"
     assert (date.today() - verified_on).days <= 90, (
         "host provider sweep is older than 90 days: re-run the DNS sweep, update "
         "observed_answers, and re-date verified_on (see the fixture's method field)"
