@@ -93,10 +93,13 @@ def _raw_time_us(raw: str | bytes) -> int | None:
 
 
 def _cursor_is_usable(time_us: object, now: float) -> bool:
+    # bit_length before the division: int/float on a huge int raises
+    # OverflowError, and callers sit outside any try that would catch it.
     return (
         isinstance(time_us, int)
         and not isinstance(time_us, bool)
         and time_us >= 0
+        and time_us.bit_length() < 64
         and time_us / 1_000_000 <= now + MAX_FUTURE_SKEW_SECONDS
     )
 

@@ -124,21 +124,23 @@ Aggregate-only: the extractor reduces each post to normalized counter inputs
 (tags, links/domains, primary language, emoji, a lexicon sentiment score) and
 aggregate exclusion reasons. Post text and record keys are never stored.
 
-For public tags, URLs, and domains, one source contributes a given canonical
-value at most once per rolling five minutes. The raw DID crosses one local call
-boundary, is immediately folded into a process-keyed tuple digest, and is never
-stored or logged. The random key and opaque five-minute ledger are excluded from
-buckets, checkpoints, cache values, and history, and rotate on restart. The
-ledger holds at most 1,024 tuples per source and 100,000 globally. Per-source
-pressure evicts only that source's oldest tuple; global pressure from many sources
-can evict the globally oldest tuple. Every early eviction increments
+For public tags, URLs, domains, and emoji, one source contributes a given
+canonical value at most once per rolling five minutes. The raw DID crosses one
+local call boundary, is immediately folded into a process-keyed tuple digest,
+and is never stored or logged. The random key and opaque five-minute ledger are
+excluded from buckets, checkpoints, cache values, and history, and rotate on
+restart. The ledger holds at most 1,024 tuples per source and 100,000 globally.
+A source at its own ceiling has further contributions refused (reported as
+`rate_limited_source_*`) — never evicted, so a source cannot flush its own
+tuples to replay a signal; global pressure from many distinct sources can evict
+the globally oldest tuple, and every such eviction increments
 `source_ledger_evictions` on `/health`. Full canonicalization, safety,
 filter-list, tracking-parameter, and transparency
 semantics: [public signal policy](../docs/signal-policy.md).
 
 After a reconnect, a backlog delivered faster than real time shares the current
-process-time source bound and can under-count trend signals; volume,
-language, and emoji aggregates remain exact. Event timestamps never expire the
+process-time source bound and can under-count trend signals; volume and
+language aggregates remain exact. Event timestamps never expire the
 privacy ledger because they are untrusted.
 
 ## Tests

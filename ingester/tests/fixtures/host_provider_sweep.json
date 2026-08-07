@@ -1,42 +1,40 @@
 {
-  "known_live_provider_roots": [
-    "1u.ms",
-    "backname.io",
-    "devlocal.dev",
-    "ip.es.io",
-    "l0pb.dev",
-    "l0pb.me",
-    "lacolhost.com",
-    "lcl.host",
-    "lndo.site",
-    "local.gd",
-    "localho.st",
-    "localhost.direct",
-    "localhst.co.uk",
-    "localtest.dev",
-    "localtest.me",
-    "lvh.me",
-    "nip.io",
-    "rebind.network",
-    "sslip.io",
-    "traefik.me",
-    "yoogle.com"
-  ],
   "local_suffix_probes": [
-    "router.home.arpa",
     "intranet.corp",
-    "host.intranet",
-    "box.private",
+    "nas.home",
+    "router.home.arpa",
+    "vault.internal",
     "srv.intra",
-    "srv.localdomain"
+    "host.intranet",
+    "printer.lan",
+    "mbp.local",
+    "srv.localdomain",
+    "gateway.localhost",
+    "box.private",
+    "grafana.test"
   ],
-  "method": "manual public-provider documentation and DNS sweep; checked in so policy roots and probes change together",
+  "local_suffix_roots": [
+    "corp",
+    "home",
+    "home.arpa",
+    "internal",
+    "intra",
+    "intranet",
+    "lan",
+    "local",
+    "localdomain",
+    "localhost",
+    "private",
+    "test"
+  ],
+  "method": "manual public-provider documentation and DNS sweep (dig @8.8.8.8 / @1.1.1.1); checked in so policy roots and probes change together. The test bounds this sweep's age at 90 days: re-run the sweep, update observed_answers, and re-date verified_on. providers[].probe is the probe list; local_suffix_roots mirrors _LOCAL_SUFFIXES and every suffix has a probe.",
   "providers": [
     {
+      "note": "rebinding utility; apex now serves a public site (206.81.28.151) but rebind labels answer loopback",
       "observed_answers": [
         "127.0.0.1"
       ],
-      "probe": "1u.ms",
+      "probe": "make-127-0-0-1-rr.1u.ms",
       "root": "1u.ms",
       "status": "live"
     },
@@ -49,12 +47,38 @@
       "status": "live"
     },
     {
+      "note": "DDEV's official local-dev domain; wildcard subdomains answer loopback, apex has no address",
       "observed_answers": [
-        "127.0.0.1",
-        "::1"
+        "127.0.0.1"
+      ],
+      "probe": "foo.ddev.site",
+      "root": "ddev.site",
+      "status": "live"
+    },
+    {
+      "observed_answers": [
+        "127.0.0.1"
       ],
       "probe": "router.devlocal.dev",
       "root": "devlocal.dev",
+      "status": "live"
+    },
+    {
+      "note": "apex-public / subdomain-private shape (same class as lcl.host); wildcard answers RFC1918",
+      "observed_answers": [
+        "192.168.64.100"
+      ],
+      "probe": "foo.docksal.site",
+      "root": "docksal.site",
+      "status": "live"
+    },
+    {
+      "note": "apex and wildcard both answer loopback; reads as a plausible real link, not dev junk",
+      "observed_answers": [
+        "127.0.0.1"
+      ],
+      "probe": "login.fbi.com",
+      "root": "fbi.com",
       "status": "live"
     },
     {
@@ -67,6 +91,7 @@
     },
     {
       "observed_answers": [
+        "127.0.0.1",
         "::1"
       ],
       "probe": "test.l0pb.dev",
@@ -75,6 +100,7 @@
     },
     {
       "observed_answers": [
+        "127.0.0.1",
         "::1"
       ],
       "probe": "a.l0pb.me",
@@ -115,8 +141,27 @@
       "status": "live"
     },
     {
+      "note": "loopback subtree of an otherwise-public apex; root is the local. subtree, not sisteminha.com",
       "observed_answers": [
         "127.0.0.1"
+      ],
+      "probe": "foo.local.sisteminha.com",
+      "root": "local.sisteminha.com",
+      "status": "live"
+    },
+    {
+      "observed_answers": [
+        "127.0.0.1",
+        "::1"
+      ],
+      "probe": "localfabriek.nl",
+      "root": "localfabriek.nl",
+      "status": "live"
+    },
+    {
+      "observed_answers": [
+        "127.0.0.1",
+        "::1"
       ],
       "probe": "api.localho.st",
       "root": "localho.st",
@@ -133,11 +178,18 @@
     },
     {
       "observed_answers": [
-        "127.0.0.1",
-        "::1"
+        "127.0.0.1"
       ],
       "probe": "a.localhost.direct",
       "root": "localhost.direct",
+      "status": "live"
+    },
+    {
+      "observed_answers": [
+        "127.0.0.1"
+      ],
+      "probe": "foo.localhost.team",
+      "root": "localhost.team",
       "status": "live"
     },
     {
@@ -159,7 +211,8 @@
     },
     {
       "observed_answers": [
-        "127.0.0.1"
+        "127.0.0.1",
+        "::1"
       ],
       "probe": "localtest.me",
       "root": "localtest.me",
@@ -182,13 +235,23 @@
       "status": "live"
     },
     {
+      "note": "purpose-built rebinder: hex-encoded IP-pair labels flip between the two addresses; arbitrary labels SERVFAIL",
+      "observed_answers": [
+        "127.0.0.1"
+      ],
+      "probe": "7f000001.08080808.rbndr.us",
+      "root": "rbndr.us",
+      "status": "live"
+    },
+    {
+      "note": "answers observed 2026-08-07; no answer on the 2026-08-08 re-sweep from 8.8.8.8 or 1.1.1.1 — purpose-built rebinding domain, conservatively denied",
       "observed_answers": [
         "0.0.0.0",
         "::"
       ],
       "probe": "a.rebind.network",
       "root": "rebind.network",
-      "status": "live"
+      "status": "intermittent"
     },
     {
       "observed_answers": [
@@ -215,14 +278,14 @@
       "status": "parked-conservative"
     },
     {
+      "note": "answered 0.0.0.0/:: on 2026-08-07, 127.0.0.1 on 2026-08-08 — wildcard loopback either way",
       "observed_answers": [
-        "0.0.0.0",
-        "::"
+        "127.0.0.1"
       ],
       "probe": "skyline-probe.yoogle.com",
       "root": "yoogle.com",
       "status": "live"
     }
   ],
-  "verified_on": "2026-08-07"
+  "verified_on": "2026-08-08"
 }

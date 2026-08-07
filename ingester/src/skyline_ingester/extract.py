@@ -18,6 +18,7 @@ MAX_TEXT_LENGTH = 4_096
 MAX_FACET_FEATURES = 64
 MAX_TAG_CANDIDATES = 32
 MAX_LINK_CANDIDATES = 16
+MAX_EMOJI_CANDIDATES = 16
 MAX_EMOJI_LENGTH = 64
 _PRIMARY_LANGUAGE_RE = re.compile(r"[a-z]{2,8}")
 
@@ -234,6 +235,24 @@ def extract_post(event: dict) -> PostFeatures | None:
             seen_domains.add(link.domain)
             domains.append(link.domain)
 
+    # Emoji are one signal per distinct emoji per post, mirroring tag/link
+    # dedup and caps: rotating distinct ZWJ chains must not mint hundreds of
+    # counter keys from one legal post. Over-length matches stay silently
+    # dropped (they are regex artifacts, not user signals). Sentiment below
+    # still sees every occurrence.
+    emoji: list[str] = []
+    seen_emoji: set[str] = set()
+    for match in EMOJI_RE.findall(text):
+        if len(match) > MAX_EMOJI_LENGTH:
+            continue
+        if match in seen_emoji:
+            exclusions["duplicate_in_event_emoji"] += 1
+        elif len(emoji) >= MAX_EMOJI_CANDIDATES:
+            exclusions["candidate_limit_emoji"] += 1
+        else:
+            seen_emoji.add(match)
+            emoji.append(match)
+
     langs = record.get("langs") or []
     if not isinstance(langs, list):
         langs = []
@@ -244,7 +263,7 @@ def extract_post(event: dict) -> PostFeatures | None:
         lang=lang,
         hashtags=hashtags,
         links=links,
-        emoji=[match for match in EMOJI_RE.findall(text) if len(match) <= MAX_EMOJI_LENGTH],
+        emoji=emoji,
         sentiment=score_sentiment(text),
         domains=domains,
         hashtag_labels=hashtag_labels,

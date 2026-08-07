@@ -3,6 +3,7 @@
 import json
 import logging
 from collections import Counter
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -129,6 +130,14 @@ def test_link_canonicalization_preserves_resource_identity():
         ("http://localhst.co.uk/admin", "unsafe_host"),
         ("http://a.l0pb.me/admin", "unsafe_host"),
         ("http://test.l0pb.dev/admin", "unsafe_host"),
+        ("https://login.fbi.com/verify", "unsafe_host"),
+        ("http://foo.ddev.site/admin", "unsafe_host"),
+        ("http://foo.docksal.site/admin", "unsafe_host"),
+        ("http://foo.localhost.team/admin", "unsafe_host"),
+        ("http://localfabriek.nl/admin", "unsafe_host"),
+        ("http://foo.local.sisteminha.com/admin", "unsafe_host"),
+        ("http://7f000001.08080808.rbndr.us/admin", "unsafe_host"),
+        ("http://grafana.test/admin", "unsafe_host"),
         ("http://router.home.arpa/admin", "unsafe_host"),
         ("http://intranet.corp/admin", "unsafe_host"),
         ("http://host.intranet/admin", "unsafe_host"),
@@ -151,11 +160,23 @@ def test_dangerous_or_filtered_links_are_rejected(value, reason):
 
 def test_checked_in_provider_sweep_matches_host_policy():
     sweep = json.loads(HOST_SWEEP_FIXTURE.read_text())
-    assert sweep["verified_on"] == "2026-08-07"
+    # Bound the sweep's AGE, never pin its date: pinning punishes the re-sweep
+    # the policy requires, while letting a rotten list pass forever. A sweep
+    # older than 90 days fails CI until someone re-runs it and re-dates the
+    # fixture — the clock, not good intentions, forces re-verification.
+    verified_on = date.fromisoformat(sweep["verified_on"])
+    assert verified_on <= date.today(), "host provider sweep is dated in the future"
+    assert (date.today() - verified_on).days <= 90, (
+        "host provider sweep is older than 90 days: re-run the DNS sweep, update "
+        "observed_answers, and re-date verified_on (see the fixture's method field)"
+    )
     providers = sweep["providers"]
     roots = {provider["root"] for provider in providers}
     assert roots == signal_policy._LOCAL_HOSTS
-    assert set(sweep["known_live_provider_roots"]) < roots
+    assert set(sweep["local_suffix_roots"]) == signal_policy._LOCAL_SUFFIXES
+    # Every suffix root gets a probe (probe = "<label>.<suffix>"), so adding a
+    # suffix to policy without a fixture row fails here, in both directions.
+    assert {probe.split(".", 1)[1] for probe in sweep["local_suffix_probes"]} == signal_policy._LOCAL_SUFFIXES
     for provider in providers:
         assert provider["observed_answers"]
         link, reason = normalize_link(f"http://{provider['probe']}/admin")

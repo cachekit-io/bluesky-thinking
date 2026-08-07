@@ -40,8 +40,12 @@ Genuine tag/link declarations examined beyond their family cap are reported as
 `candidate_limit_tag` or `candidate_limit_url`. If supplied tag facets produce
 no usable tag, the same bounded text fallback is still applied. Repeated rejected
 spellings within one post count once per normalized token, whether they came from
-facets or text. Live and restored emoji keys are limited to 64 code points;
-overlong ZWJ chains are omitted rather than becoming oversized public keys.
+facets or text. Emoji are one signal per distinct emoji per post: repeats are
+reported as `duplicate_in_event_emoji`, at most 16 distinct emoji per post enter
+the denominator (`candidate_limit_emoji` beyond that), and emoji contributions
+pass through the same rolling source bound as every other signal family.
+Live and restored emoji keys are limited to 64 code points; overlong ZWJ chains
+are omitted rather than becoming oversized public keys.
 
 The following canonical tags are explicitly excluded:
 `adult`, `follow4follow`, `followforfollow`, `nsfw`, `porn`, `porno`,
@@ -90,10 +94,15 @@ each process. Only these opaque tuple digests and expiry timestamps live in the
 five-minute ledger.
 
 The ledger holds at most 1,024 live tuples per source and 100,000 globally. A
-source that fills its own ceiling evicts only its own oldest-expiring tuple; it
-cannot erase another source's bound. Global pressure from many sources can still
-evict the globally oldest tuple. Each early eviction increments the aggregate
-`source_ledger_evictions` health counter so this degradation is visible. The key,
+source that fills its own ceiling has further contributions REFUSED (reported
+per family as `rate_limited_source_*`) rather than evicting any tuple: an
+eviction — even of the source's own oldest entry — would let a source flush its
+earlier tuples with junk and replay an already-credited signal. Refusal makes
+self-flushing cost the attacker the contribution instead of buying one, and
+bounds each source at 1,024 accepted contributions per rolling five minutes.
+Global pressure from many distinct sources can still evict the globally oldest
+tuple; each such eviction increments the aggregate `source_ledger_evictions`
+health counter so that degradation is visible. The key,
 digests, and raw DIDs are never put in minute buckets, checkpoints, CacheKit values,
 logs, history, or health output. `/health` also exposes the aggregate
 `events_missing_source` counter so a Jetstream schema change cannot silently empty
@@ -101,14 +110,14 @@ all public trend rankings. The ledger is not restored:
 after a process restart the key rotates and the five-minute bound starts fresh.
 That small, explicit continuity gap is preferable to creating a durable
 pseudonymous author index. A post without a usable source can still count toward
-volume, language, emoji, and sentiment aggregates, but its hashtag/link/domain
+volume, language, and sentiment aggregates, but its hashtag/link/domain/emoji
 contributions are excluded so missing identity cannot bypass the public trend
 bound.
 
 Jetstream reconnects resume from the greatest validated cursor seen, so an
 out-of-order or hostile old timestamp cannot rewind the subscription. If a backlog
 longer than five minutes is delivered faster than real time, its trend signals share the current
-process-time bound and can be under-counted; event-volume and language/emoji
+process-time bound and can be under-counted; event-volume and language
 aggregates remain exact. Event timestamps are deliberately not used to expire
 the ledger because they are untrusted and previously allowed a source to erase
 the bound.
@@ -136,20 +145,26 @@ Skyline rejects:
   private-target names;
 - an exact host or subdomain of the enumerated local-network suffix roots `corp`,
   `home`, `home.arpa`, `internal`, `intra`, `intranet`, `lan`, `local`,
-  `localdomain`, `localhost`, or `private`;
+  `localdomain`, `localhost`, `private`, or `test`;
 - an exact host or subdomain of the enumerated wildcard-DNS/rebinding/loopback
-  provider roots `1u.ms`, `backname.io`, `devlocal.dev`, `ip.es.io`, `l0pb.dev`, `l0pb.me`,
-  `lacolhost.com`, `lcl.host`, `lndo.site`, `local.gd`, `localho.st`,
-  `localhost.direct`, `localhst.co.uk`, `localtest.dev`, `localtest.me`, `lvh.me`,
-  `nip.io`, `rebind.network`, `sslip.io`, `traefik.me`, `vcap.me`, or `yoogle.com`;
+  provider roots `1u.ms`, `backname.io`, `ddev.site`, `devlocal.dev`, `docksal.site`,
+  `fbi.com`, `ip.es.io`, `l0pb.dev`, `l0pb.me`, `lacolhost.com`, `lcl.host`,
+  `lndo.site`, `local.gd`, `local.sisteminha.com`, `localfabriek.nl`, `localho.st`,
+  `localhost.direct`, `localhost.team`, `localhst.co.uk`, `localtest.dev`,
+  `localtest.me`, `lvh.me`, `nip.io`, `rbndr.us`, `rebind.network`, `sslip.io`,
+  `traefik.me`, `vcap.me`, or `yoogle.com`;
 - an exact host or subdomain of `pornhub.com`, `redtube.com`, `xhamster.com`,
   `xnxx.com`, or `xvideos.com`.
 
-The enumerated provider and suffix roots are backed by the dated resolution/probe
-fixture `ingester/tests/fixtures/host_provider_sweep.json`, last re-verified on
-2026-08-07; parked former providers remain conservatively denied. The fixture and
-policy set must change together, and still require periodic re-verification. This
-is not a crawler, page classifier, or permanent blocklist of people.
+The enumerated provider and suffix roots are both asserted, in each direction,
+against the dated resolution/probe fixture
+`ingester/tests/fixtures/host_provider_sweep.json`, last re-verified on
+2026-08-08; parked former providers remain conservatively denied. The test
+bounds the sweep's age at 90 days, so re-verification is forced by the clock
+rather than by intention: an unrefreshed sweep fails CI until it is re-run and
+re-dated. The list is enumerated and periodically re-verified — it is not a
+guarantee of completeness, a crawler, a page classifier, or a permanent
+blocklist of people.
 
 ## Transparency fields
 
@@ -158,7 +173,7 @@ Every public aggregate includes:
 - `normalization_version`: the policy version above;
 - `total_events_considered`: structurally valid post-create events in the
   selected window (also retained as `total_posts` for compatibility);
-- `total_signal_candidates`: accepted or excluded tag, URL, domain, and
+- `total_signal_candidates`: accepted or excluded tag, URL, domain, emoji, and
   restored-checkpoint decisions in the selected window — the denominator for
   the exclusion counts; unrelated facet feature types never enter it;
 - `excluded_count_by_reason`: aggregate counts of candidate signal

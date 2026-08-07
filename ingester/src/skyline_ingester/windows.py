@@ -128,33 +128,38 @@ class WindowStore:
             bucket.n += 1
             bucket.excluded.update(feats.exclusions)
             bucket.signal_candidates += (
-                sum(feats.exclusions.values()) + len(feats.hashtags) + len(feats.links) + len(feats.domains)
+                sum(feats.exclusions.values()) + len(feats.hashtags) + len(feats.links) + len(feats.domains) + len(feats.emoji)
             )
             source_digest = self._source_digest(source_id)
             ledger_now = time.monotonic()
             self._expire_seen(ledger_now)
             for tag in feats.hashtags:
-                if self._accept_signal(source_digest, "tag", tag, ledger_now):
+                rejection = self._accept_signal(source_digest, "tag", tag, ledger_now)
+                if rejection is None:
                     bucket.tags[tag] += 1
                     label = feats.hashtag_labels.get(tag, tag)
                     bucket.tag_labels[(tag, label)] += 1
                 else:
-                    reason = "missing_source_tag" if source_digest is None else "duplicate_source_tag"
-                    bucket.excluded[reason] += 1
+                    bucket.excluded[f"{rejection}_tag"] += 1
             for link in feats.links:
-                if self._accept_signal(source_digest, "url", link, ledger_now):
+                rejection = self._accept_signal(source_digest, "url", link, ledger_now)
+                if rejection is None:
                     bucket.links[link] += 1
                 else:
-                    reason = "missing_source_url" if source_digest is None else "duplicate_source_url"
-                    bucket.excluded[reason] += 1
+                    bucket.excluded[f"{rejection}_url"] += 1
             for domain in feats.domains:
-                if self._accept_signal(source_digest, "domain", domain, ledger_now):
+                rejection = self._accept_signal(source_digest, "domain", domain, ledger_now)
+                if rejection is None:
                     bucket.domains[domain] += 1
                 else:
-                    reason = "missing_source_domain" if source_digest is None else "duplicate_source_domain"
-                    bucket.excluded[reason] += 1
+                    bucket.excluded[f"{rejection}_domain"] += 1
+            for emoji in feats.emoji:
+                rejection = self._accept_signal(source_digest, "emoji", emoji, ledger_now)
+                if rejection is None:
+                    bucket.emoji[emoji] += 1
+                else:
+                    bucket.excluded[f"{rejection}_emoji"] += 1
             bucket.langs[feats.lang] += 1
-            bucket.emoji.update(feats.emoji)
             if feats.sentiment is not None:
                 acc = bucket.sent.setdefault(feats.lang, [0.0, 0])
                 acc[0] += feats.sentiment
@@ -214,40 +219,47 @@ class WindowStore:
             self._drop_seen(next(iter(self._seen)))
             self._record_ledger_eviction()
 
-    def _evict_oldest_for_source(self, source_digest: bytes) -> None:
-        """Evict one source's oldest tuple without weakening other sources."""
-        source_entries = self._seen_by_source.get(source_digest)
-        if source_entries:
-            self._drop_seen(next(iter(source_entries)))
-            self._record_ledger_eviction()
-
-    def _accept_signal(self, source_digest: bytes | None, family: str, value: str, now: float) -> bool:
+    def _accept_signal(self, source_digest: bytes | None, family: str, value: str, now: float) -> str | None:
         """Accept one source/signal contribution per rolling five minutes.
 
-        Caller holds self._lock. The digest is process-keyed, non-portable, and
-        discarded after the horizon. Restarts intentionally start with an empty
-        ledger rather than persisting a stable identity boundary.
+        Returns None on accept, else the exclusion-reason prefix (the caller
+        appends the signal family). Caller holds self._lock. The digest is
+        process-keyed, non-portable, and discarded after the horizon. Restarts
+        intentionally start with an empty ledger rather than persisting a
+        stable identity boundary.
         """
         if source_digest is None:
-            return False
+            return "missing_source"
         material = source_digest + b"\0" + family.encode("ascii") + b"\0" + value.encode("utf-8")
         digest = hashlib.blake2b(material, key=self._dedupe_key, digest_size=16).digest()
         seen_at = self._seen.get(digest)
         if seen_at is not None and seen_at + SOURCE_DEDUPE_SECONDS > now:
-            return False
+            return "duplicate_source"
+        source_entries = self._seen_by_source.get(source_digest)
+        if (
+            source_entries is not None
+            and len(source_entries) >= MAX_SOURCE_LEDGER_ENTRIES_PER_SOURCE
+            and digest not in source_entries
+        ):
+            # A full per-source ledger REFUSES the contribution instead of
+            # evicting its own oldest tuple: self-flushing must cost the
+            # attacker the credit, never buy one (an own-oldest eviction let a
+            # source free its earlier tuples with junk and replay them). The
+            # entries expire on the rolling horizon, so this is a rate bound
+            # of MAX_SOURCE_LEDGER_ENTRIES_PER_SOURCE accepted contributions
+            # per source per SOURCE_DEDUPE_SECONDS, surfaced per family as
+            # rate_limited_source_* in the public exclusion counts.
+            return "rate_limited_source"
         if seen_at is not None:
             # Reinsert at the end so dict order remains an oldest-first fallback.
             self._drop_seen(digest)
-        source_entries = self._seen_by_source.get(source_digest)
-        if source_entries is not None and len(source_entries) >= MAX_SOURCE_LEDGER_ENTRIES_PER_SOURCE:
-            self._evict_oldest_for_source(source_digest)
         if len(self._seen) >= MAX_SOURCE_LEDGER_ENTRIES:
             self._evict_oldest_seen()
         self._seen[digest] = now
         self._seen_source[digest] = source_digest
         self._seen_by_source.setdefault(source_digest, {})[digest] = now
         heapq.heappush(self._seen_expiry, (now + SOURCE_DEDUPE_SECONDS, digest))
-        return True
+        return None
 
     def _prune(self, newest_minute: int) -> None:
         # Caller holds self._lock. Anchor the retention floor to the minute being
@@ -340,14 +352,15 @@ class WindowStore:
             "normalization_version": NORMALIZATION_VERSION,
         }
         if operation == "trending_hashtags":
-            label_index = _tag_label_index(m.tag_labels)
+            top_tags = m.tags.most_common(top_n)
+            label_index = _tag_label_index(m.tag_labels, wanted={tag for tag, _count in top_tags})
             value["hashtags"] = [
                 {
                     "tag": tag,
                     "display": _display_label(label_index.get(tag), tag),
                     "count": count,
                 }
-                for tag, count in m.tags.most_common(top_n)
+                for tag, count in top_tags
             ]
         elif operation == "trending_links":
             value["links"] = [{"uri": u, "count": c} for u, c in m.links.most_common(top_n)]
@@ -530,10 +543,7 @@ def _coerced_counter(data, *, key_validator, reject_reason: str, rejected: Count
         raise ValueError(f"checkpoint map exceeds {_MAX_CHECKPOINT_MAP_ENTRIES} entries")
     for index, (raw_key, value) in enumerate(data.items()):
         if len(output) >= max_entries:
-            rejected[reject_reason] = min(
-                rejected[reject_reason] + len(data) - index,
-                _MAX_CHECKPOINT_COUNT,
-            )
+            rejected[reject_reason] += len(data) - index
             break
         if not isinstance(raw_key, str) or not key_validator(raw_key):
             rejected[reject_reason] += 1
@@ -552,14 +562,15 @@ def _coerced_tag_labels(data, rejected: Counter[str]) -> Counter[tuple[str, str]
     if not isinstance(data, dict):
         rejected["checkpoint_invalid_label"] += 1
         return output
-    if len(data) > _MAX_CHECKPOINT_MAP_ENTRIES:
-        raise ValueError(f"checkpoint map exceeds {_MAX_CHECKPOINT_MAP_ENTRIES} entries")
+    # Bound the WHOLE structure, not just the outer map: each nested display
+    # map would otherwise carry its own independent budget, letting a poisoned
+    # checkpoint schedule outer x inner NFKC validations at startup.
+    total_entries = len(data) + sum(len(labels) for labels in data.values() if isinstance(labels, dict))
+    if total_entries > _MAX_CHECKPOINT_MAP_ENTRIES:
+        raise ValueError(f"checkpoint tag_labels exceeds {_MAX_CHECKPOINT_MAP_ENTRIES} total entries")
     for index, (canonical, labels) in enumerate(data.items()):
         if accepted_tags >= _K_TAGS:
-            rejected["checkpoint_invalid_label"] = min(
-                rejected["checkpoint_invalid_label"] + len(data) - index,
-                _MAX_CHECKPOINT_COUNT,
-            )
+            rejected["checkpoint_invalid_label"] += len(data) - index
             break
         if not isinstance(canonical, str) or not _is_canonical_tag(canonical):
             rejected["checkpoint_invalid_label"] += 1
@@ -582,26 +593,32 @@ def _coerced_tag_labels(data, rejected: Counter[str]) -> Counter[tuple[str, str]
     return output
 
 
-def _tag_label_index(labels: Counter[tuple[str, str]]) -> dict[str, Counter[str]]:
+def _tag_label_index(labels: Counter[tuple[str, str]], *, wanted: set[str]) -> dict[str, Counter[str]]:
+    """Re-nest the flat (canonical, display) counter for the tags in `wanted` only.
+
+    Both hot callers (per-publish build_value, per-bucket checkpoint) need at
+    most their top-K tags; filtering here keeps the flattening's lock savings
+    from being spent re-nesting the long tail on every read.
+    """
     output: dict[str, Counter[str]] = {}
     for (canonical, display), count in labels.items():
-        output.setdefault(canonical, Counter())[display] += count
+        if canonical in wanted:
+            output.setdefault(canonical, Counter())[display] += count
     return output
 
 
 def _checkpoint_bucket(bucket: Bucket) -> dict:
-    label_index = _tag_label_index(bucket.tag_labels)
+    top_tags = bucket.tags.most_common(_K_TAGS)
+    label_index = _tag_label_index(bucket.tag_labels, wanted={tag for tag, _count in top_tags})
     return {
         "n": bucket.n,
         "signal_candidates": bucket.signal_candidates,
-        "tags": dict(bucket.tags.most_common(_K_TAGS)),
+        "tags": dict(top_tags),
         "links": dict(bucket.links.most_common(_K_LINKS)),
         "domains": dict(bucket.domains.most_common(_K_DOMAINS)),
         "langs": dict(bucket.langs.most_common(_K_LANGS)),
         "emoji": dict(bucket.emoji.most_common(_K_EMOJI)),
-        "tag_labels": {
-            tag: dict(label_index.get(tag, Counter()).most_common(3)) for tag, _count in bucket.tags.most_common(_K_TAGS)
-        },
+        "tag_labels": {tag: dict(label_index.get(tag, Counter()).most_common(3)) for tag, _count in top_tags},
         "excluded": dict(bucket.excluded),
     }
 

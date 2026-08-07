@@ -8,6 +8,7 @@ from skyline_ingester.extract import PostFeatures
 from skyline_ingester.windows import (
     MAX_SOURCE_LEDGER_ENTRIES,
     MAX_SOURCE_LEDGER_ENTRIES_PER_SOURCE,
+    SOURCE_DEDUPE_SECONDS,
     WindowStore,
 )
 
@@ -80,34 +81,77 @@ def test_tag_labels_use_one_flat_counter_per_bucket(store):
 def test_source_ledger_evicts_oldest_at_hard_cap(monkeypatch):
     monkeypatch.setattr("skyline_ingester.windows.MAX_SOURCE_LEDGER_ENTRIES", 3)
     store = WindowStore(dedupe_key=b"x" * 32)
-    source_digest = b"s" * 16
+    # Distinct sources: the global cap must evict, the per-source cap must not fire.
     for index in range(4):
-        assert store._accept_signal(source_digest, "tag", f"tag{index}", float(index))
+        assert store._accept_signal(bytes([index]) * 16, "tag", f"tag{index}", float(index)) is None
     assert len(store._seen) == 3
     assert len(store._seen_expiry) == 3
-    assert store._accept_signal(source_digest, "tag", "tag0", 4.0)
-    assert not store._accept_signal(source_digest, "tag", "tag3", 4.0)
+    assert store._accept_signal(bytes([0]) * 16, "tag", "tag0", 4.0) is None
+    assert store._accept_signal(bytes([3]) * 16, "tag", "tag3", 4.0) == "duplicate_source"
 
 
-def test_per_source_ledger_cap_cannot_evict_other_sources(monkeypatch):
+def test_per_source_ledger_cap_refuses_instead_of_evicting(monkeypatch):
     assert MAX_SOURCE_LEDGER_ENTRIES_PER_SOURCE == 1_024
     assert MAX_SOURCE_LEDGER_ENTRIES == 100_000
-    monkeypatch.setattr("skyline_ingester.windows.MAX_SOURCE_LEDGER_ENTRIES", 5)
     monkeypatch.setattr("skyline_ingester.windows.MAX_SOURCE_LEDGER_ENTRIES_PER_SOURCE", 2)
     evictions = []
     store = WindowStore(dedupe_key=b"x" * 32, on_ledger_eviction=lambda: evictions.append(1))
-    campaign_a = b"a" * 16
-    campaign_b = b"b" * 16
+    campaign = b"a" * 16
     attacker = b"x" * 16
-    assert store._accept_signal(campaign_a, "url", "https://campaign.test/a", 1.0)
-    assert store._accept_signal(campaign_b, "url", "https://campaign.test/b", 1.0)
-    for index in range(4):
-        assert store._accept_signal(attacker, "tag", f"junk{index}", 1.0)
-    assert len(store._seen) == 4
+    assert store._accept_signal(campaign, "url", "https://campaign.example/a", 1.0) is None
+    # The attacker's own cap refuses further inserts; nothing is evicted, so a
+    # source can never free its earlier tuples (its own or anyone else's) with junk.
+    assert store._accept_signal(attacker, "tag", "junk0", 1.0) is None
+    assert store._accept_signal(attacker, "tag", "junk1", 1.0) is None
+    assert store._accept_signal(attacker, "tag", "junk2", 1.0) == "rate_limited_source"
+    assert store._accept_signal(attacker, "tag", "junk0", 1.0) == "duplicate_source"
     assert len(store._seen_by_source[attacker]) == 2
-    assert not store._accept_signal(campaign_a, "url", "https://campaign.test/a", 1.0)
-    assert not store._accept_signal(campaign_b, "url", "https://campaign.test/b", 1.0)
-    assert len(evictions) == 2
+    assert store._accept_signal(campaign, "url", "https://campaign.example/a", 1.0) == "duplicate_source"
+    assert evictions == []
+    # Expiry frees per-source capacity: the bound is a rate, not a lifetime total.
+    later = 1.0 + SOURCE_DEDUPE_SECONDS
+    store._expire_seen(later)
+    assert store._accept_signal(attacker, "tag", "junk2", later) is None
+
+
+def test_source_cannot_flush_own_ledger_to_replay_a_signal(monkeypatch):
+    # Round-9 CRIT reproducer: with own-oldest eviction, 40 boost posts
+    # interleaved with junk each re-credited the same tag (count 40). With
+    # refuse-at-cap the boost tuple survives and the count stays 1.
+    monkeypatch.setattr("skyline_ingester.windows.MAX_SOURCE_LEDGER_ENTRIES_PER_SOURCE", 4)
+    store = WindowStore(dedupe_key=b"x" * 32)
+    junk_index = 0
+    for _round in range(40):
+        store.add(
+            PostFeatures(ts=NOW, lang="en", hashtags=["boostme"], links=[], emoji=[], sentiment=None),
+            source_id="did:plc:booster",
+        )
+        for _ in range(33):
+            store.add(
+                PostFeatures(ts=NOW, lang="en", hashtags=[f"junk{junk_index}"], links=[], emoji=[], sentiment=None),
+                source_id="did:plc:booster",
+            )
+            junk_index += 1
+    merged = store.merged("5m", NOW)
+    assert merged.tags["boostme"] == 1
+    assert merged.excluded["duplicate_source_tag"] == 39
+    assert merged.excluded["rate_limited_source_tag"] == 40 * 33 - 3
+
+
+def test_emoji_are_source_bounded_like_every_other_signal(store):
+    # Emoji were the one family bypassing the ledger; one source repeating an
+    # emoji inside the horizon must count once, and no source means no count.
+    before = store.merged("5m", NOW).emoji["🔥"]
+    for _ in range(5):
+        store.add(
+            PostFeatures(ts=NOW, lang="en", hashtags=[], links=[], emoji=["🔥"], sentiment=None),
+            source_id="did:plc:emojirepeat",
+        )
+    store.add(PostFeatures(ts=NOW, lang="en", hashtags=[], links=[], emoji=["🔥"], sentiment=None))
+    merged = store.merged("5m", NOW)
+    assert merged.emoji["🔥"] == before + 1
+    assert merged.excluded["duplicate_source_emoji"] == 4
+    assert merged.excluded["missing_source_emoji"] == 1
 
 
 def test_windows_expire(store):

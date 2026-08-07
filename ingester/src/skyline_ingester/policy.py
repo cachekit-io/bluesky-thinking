@@ -69,6 +69,7 @@ TRACKING_PARAMETERS = frozenset(
 
 EXCLUSION_REASONS = frozenset(
     {
+        "candidate_limit_emoji",
         "candidate_limit_tag",
         "candidate_limit_url",
         "checkpoint_invalid_count",
@@ -80,9 +81,11 @@ EXCLUSION_REASONS = frozenset(
         "checkpoint_invalid_tag",
         "checkpoint_invalid_url",
         "duplicate_in_event_domain",
+        "duplicate_in_event_emoji",
         "duplicate_in_event_tag",
         "duplicate_in_event_url",
         "duplicate_source_domain",
+        "duplicate_source_emoji",
         "duplicate_source_tag",
         "duplicate_source_url",
         "filtered_domain",
@@ -90,8 +93,13 @@ EXCLUSION_REASONS = frozenset(
         "malformed_tag",
         "malformed_url",
         "missing_source_domain",
+        "missing_source_emoji",
         "missing_source_tag",
         "missing_source_url",
+        "rate_limited_source_domain",
+        "rate_limited_source_emoji",
+        "rate_limited_source_tag",
+        "rate_limited_source_url",
         "unsafe_host",
         "unsafe_scheme",
     }
@@ -100,12 +108,17 @@ EXCLUSION_REASONS = frozenset(
 _BAD_PERCENT_ESCAPE_RE = re.compile(r"%(?![0-9a-fA-F]{2})")
 _DNS_LABEL_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 # Dated resolution/probe fixture: tests/fixtures/host_provider_sweep.json.
-# Last verified 2026-08-07; keep parked former providers conservatively denied.
+# Last verified 2026-08-08; keep parked former providers conservatively denied.
+# The fixture test bounds the sweep's age at 90 days, so the list MUST be
+# re-swept (and re-dated) on a clock — an unrefreshed sweep fails CI.
 _LOCAL_HOSTS = frozenset(
     {
         "1u.ms",
         "backname.io",
+        "ddev.site",
         "devlocal.dev",
+        "docksal.site",
+        "fbi.com",
         "ip.es.io",
         "l0pb.dev",
         "l0pb.me",
@@ -113,14 +126,18 @@ _LOCAL_HOSTS = frozenset(
         "lcl.host",
         "lndo.site",
         "local.gd",
+        "local.sisteminha.com",
+        "localfabriek.nl",
         "localho.st",
         "localhost",
         "localhost.direct",
+        "localhost.team",
         "localhst.co.uk",
         "localtest.dev",
         "localtest.me",
         "lvh.me",
         "nip.io",
+        "rbndr.us",
         "rebind.network",
         "sslip.io",
         "traefik.me",
@@ -141,6 +158,7 @@ _LOCAL_SUFFIXES = frozenset(
         "localdomain",
         "localhost",
         "private",
+        "test",
     }
 )
 _IPV4_EMBEDDED_NETWORKS = tuple(ipaddress.IPv6Network(prefix) for prefix in ("::/96", "64:ff9b::/96", "::ffff:0:0:0/96"))

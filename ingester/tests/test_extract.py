@@ -112,6 +112,24 @@ def test_emoji_extraction_counts_zwj_sequence_once(fixture_lines):
     assert features is not None and features.emoji == []
 
 
+def test_emoji_are_deduped_and_capped_per_post(fixture_lines):
+    event = json.loads(fixture_lines[0])
+    event["commit"]["record"]["text"] = "😂😂😂"
+    features = extract_post(event)
+    assert features is not None
+    assert features.emoji == ["😂"]
+    assert features.exclusions["duplicate_in_event_emoji"] == 2
+
+    # 18 distinct emoji: 16 kept, 2 charged — rotating distinct ZWJ chains
+    # cannot mint hundreds of counter keys from one legal post.
+    distinct = ["😀", "😁", "😂", "😃", "😄", "😅", "😆", "😇", "😈", "😉", "😊", "😋", "😌", "😍", "😎", "😏", "😐", "😑"]
+    event["commit"]["record"]["text"] = "".join(distinct)
+    features = extract_post(event)
+    assert features is not None
+    assert features.emoji == distinct[:16]
+    assert features.exclusions["candidate_limit_emoji"] == 2
+
+
 def test_text_nfkc_output_is_capped_before_feature_work(fixture_lines, monkeypatch):
     captured = []
     monkeypatch.setattr("skyline_ingester.extract.score_sentiment", lambda text: captured.append(text))
@@ -191,6 +209,16 @@ def test_resume_cursor_never_rewinds():
     assert _advanced_cursor(None, 100) == 100
     assert _advanced_cursor(100, 1) == 100
     assert _advanced_cursor(100, 101) == 101
+
+
+def test_ingest_raw_drops_astronomical_time_us_without_raising():
+    # int/float on a 300+-digit int raises OverflowError, and the
+    # _cursor_is_usable call sits outside every try: unguarded, one such frame
+    # escapes to consume()'s blanket handler and replays forever (the cursor
+    # never advances past it). It must be dropped like any other bad frame.
+    huge = 10**400
+    raw = json.dumps({"kind": "commit", "time_us": huge})
+    assert ingest_raw(raw, WindowStore(), now_fn=lambda: 1_000.0) is None
 
 
 def test_subscribe_url():

@@ -248,6 +248,14 @@ def test_restore_caps_untrusted_bucket_and_counter_cardinality():
     assert store.restore(_snapshot([[good, {"n": 6_000, "tags": {**oversized, **real}}]]), NOW) == 0
     assert store.merged("5m", NOW).n == 0
 
+    # The tag_labels budget bounds the WHOLE structure: an outer map inside the
+    # cap whose nested display maps multiply the entry count rejects the bucket,
+    # instead of scheduling outer x inner NFKC validations at startup.
+    nested_bomb = {f"tag{index}": {f"Display{index}-{j}": 1 for j in range(600)} for index in range(2)}
+    store = WindowStore()
+    assert store.restore(_snapshot([[good, {"n": 6_000, "tag_labels": nested_bomb}]]), NOW) == 0
+    assert store.merged("5m", NOW).n == 0
+
 
 def test_restore_rejects_overlong_emoji_keys():
     good = int(NOW // 60)
