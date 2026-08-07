@@ -7,8 +7,8 @@ publish = false
 # Stage-2 hot-path Worker (LAB-746). Build-chain pins are locked in
 # docs/architecture.md — worker-build@^0.1, wasm-bindgen-cli 0.2.126.
 # cachekit-rs comes from crates.io since 0.5.0 (LAB-742 resolved the
-# failed 0.4.0 publish; 0.5.0 keeps worker pinned at 0.4, so the chain
-# pins are unchanged).
+# failed 0.4.0 publish); 0.7.0 (LAB-1079 wasm fix) keeps worker pinned
+# at 0.4, so the chain pins are unchanged.
 
 [lib]
 # rlib so `cargo test` can link the compute module natively; cdylib for wasm32.
@@ -17,10 +17,11 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 # Interop key derivation + strict interop/v1 (de)serialization. No features:
 # the interop module is unconditional, and native builds don't need backends.
-cachekit-rs = { version = "0.5.0", default-features = false }
+cachekit-rs = { version = "0.7.0", default-features = false }
 # xxHash3-64 integrity primitive — same function that backs StorageEnvelope
-# checksums, so wire values are identical.
-cachekit-core = { version = "0.3", default-features = false, features = ["checksum"] }
+# checksums, so wire values are identical. 0.4 matches cachekit-rs 0.7.0's
+# pin so only one copy lands in the wasm binary.
+cachekit-core = { version = "0.4", default-features = false, features = ["checksum"] }
 serde = { version = "1", features = ["derive"] }
 hex = "0.4"
 
@@ -28,13 +29,9 @@ hex = "0.4"
 worker = "0.4"
 serde_json = "1"
 base64 = "0.22"
-# Same key encoding WorkersCachekitIO uses; already in the tree via cachekit-rs.
-# Direct dep for the LAB-1079 workaround fetch in lib.rs.
-urlencoding = "2"
 # Pin the bindgen ABI to the pre-installed CLI (docs/architecture.md build pins).
 wasm-bindgen = "=0.2.126"
-# `workers, cachekitio` are staged for the LAB-1079 swap-back to
-# WorkersCachekitIO — nothing uses them today (the workaround fetches via the
-# `worker` crate directly; only cachekit::interop is consumed, and that module
-# is unconditional). `encryption`/`macros` were never used: dropped.
-cachekit-rs = { version = "0.5.0", default-features = false, features = ["workers", "cachekitio"] }
+# `workers, cachekitio` give the cache route WorkersCachekitIO (LAB-1492
+# swap-back; the wasm32 SystemTime panic was fixed in 0.7.0, LAB-1079).
+# `encryption`/`macros` were never used: dropped.
+cachekit-rs = { version = "0.7.0", default-features = false, features = ["workers", "cachekitio"] }

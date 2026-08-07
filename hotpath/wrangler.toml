@@ -8,11 +8,10 @@ compatibility_date = "2026-07-01"
 command = "worker-build --release"
 
 [vars]
-# The dev.cachekit instance (docs/architecture.md#credentials). The LAB-1079
-# raw-fetch workaround in lib.rs bypasses the SDK's SSRF allowlist entirely —
-# this value is trusted operator config, a deploy-time decision. Restore
-# `.api_url(...).allow_custom_host(true)` when swapping back to
-# WorkersCachekitIO.
+# The dev.cachekit instance (docs/architecture.md#credentials). Outside the
+# SDK's SSRF host allowlist, so lib.rs builds WorkersCachekitIO with
+# `.allow_custom_host(true)` — this value is trusted operator config, a
+# deploy-time decision.
 CACHEKIT_API_URL = "https://api.dev.cachekit.io"
 
 # Secrets (set via `wrangler secret put`, never in this file):

@@ -9,14 +9,17 @@
 //! - `GET  /v1/key/:operation/:window` — interop/v1 key derivation
 //! - `POST /v1/verify[?expected=<16-hex>]` — xxHash3-64 + interop validity of the raw body
 //! - `POST /v1/merge` — merge count-map window slices (JSON: `{slices: [base64…], top}`)
-//! - `GET  /v1/cache/:operation/:window` — derive key, fetch via CachekitIO,
-//!   verify + decode (503 until the Stage-3 `CACHEKIT_API_KEY` secret exists)
+//! - `GET  /v1/cache/:operation/:window` — derive key, fetch via
+//!   `WorkersCachekitIO`, verify + decode (503 until the Stage-3
+//!   `CACHEKIT_API_KEY` secret exists)
 
 pub mod compute;
 
 #[cfg(target_arch = "wasm32")]
 mod edge {
     use base64::Engine as _;
+    use cachekit::backend::workers::WorkersCachekitIO;
+    use cachekit::backend::Backend as _;
     use serde::Deserialize;
     use serde_json::json;
     use worker::*;
@@ -43,7 +46,7 @@ mod edge {
         Response::from_json(&json!({
             "component": "skyline-hotpath",
             "version": env!("CARGO_PKG_VERSION"),
-            "sdk": "cachekit-rs 0.5.0 (crates.io, wasm32-unknown-unknown)",
+            "sdk": "cachekit-rs 0.7.0 (crates.io, wasm32-unknown-unknown)",
             "namespace": compute::NAMESPACE,
             "operations": compute::OPERATIONS,
             "windows": { "5m": 60, "1h": 300, "24h": 900 },
@@ -138,44 +141,6 @@ mod edge {
         }
     }
 
-    /// Raw CachekitIO GET over `worker::Fetch`.
-    ///
-    /// LAB-1079 workaround: `WorkersCachekitIO` (cachekit-rs ≤ 0.8.0) panics on
-    /// every request — its `session_headers()` calls `SystemTime::now()`, which
-    /// is unimplemented on wasm32-unknown-unknown. Until the SDK fix ships,
-    /// the hot path does the one HTTP verb it needs directly; key derivation,
-    /// strict interop/v1 decode and the xxHash3 checksum stay on cachekit-rs /
-    /// cachekit-core. Swap back to `WorkersCachekitIO::builder()` (with
-    /// `.api_url(...).allow_custom_host(true)` for the dev instance) once
-    /// LAB-1079 is fixed and published.
-    async fn backend_get(api_url: &str, api_key: &str, key: &str) -> std::result::Result<Option<Vec<u8>>, String> {
-        let url = format!("{}/v1/cache/{}", api_url.trim_end_matches('/'), urlencoding::encode(key));
-        let mut headers = Headers::new();
-        headers
-            .set("Authorization", &format!("Bearer {api_key}"))
-            .map_err(|e| format!("failed to set auth header: {e}"))?;
-        // SDK-class keys require an L1 status on every /v1/cache request.
-        headers
-            .set("X-CacheKit-L1-Status", "disabled")
-            .map_err(|e| format!("failed to set header: {e}"))?;
-
-        let mut init = RequestInit::new();
-        init.with_method(Method::Get).with_headers(headers);
-        let request = Request::new_with_init(&url, &init).map_err(|e| format!("failed to build request: {e}"))?;
-        let mut resp = Fetch::Request(request)
-            .send()
-            .await
-            .map_err(|e| format!("fetch failed: {e}"))?;
-
-        match resp.status_code() {
-            200 => Ok(Some(resp.bytes().await.map_err(|e| format!("failed to read body: {e}"))?)),
-            404 => Ok(None),
-            // Never echo the response body: it is not ours and error bodies
-            // can carry request context. Status code only.
-            status => Err(format!("backend returned HTTP {status}")),
-        }
-    }
-
     async fn cache_handler(ctx: &RouteContext<()>) -> Result<Response> {
         let (operation, window) = path_params(ctx)?;
         let key = match compute::derive_key(operation, window) {
@@ -192,13 +157,37 @@ mod edge {
             .var("CACHEKIT_API_URL")
             .map(|v| v.to_string())
             .unwrap_or_else(|_| "https://api.cachekit.io".to_string());
-        let bytes = match backend_get(&api_url, &api_key.to_string(), &key).await {
+        // allow_custom_host: CACHEKIT_API_URL is trusted operator config (the
+        // dev instance is outside the SDK's SSRF allowlist); HTTPS + private-IP
+        // checks still apply.
+        let backend = match WorkersCachekitIO::builder()
+            .api_key(api_key.to_string())
+            .api_url(api_url)
+            .allow_custom_host(true)
+            .build()
+        {
+            Ok(backend) => backend,
+            // Full error to Worker logs; the client gets a fixed message — a
+            // config failure is an operator problem, and the SDK's wording
+            // (which could name the endpoint) is not part of our contract.
+            Err(e) => {
+                console_error!("WorkersCachekitIO build failed: {e}");
+                return json_error(500, "backend configuration error");
+            }
+        };
+        let bytes = match backend.get(&key).await {
             Ok(Some(bytes)) => bytes,
             Ok(None) => {
                 return Response::from_json(&json!({ "key": key, "found": false }))
                     .map(|r| r.with_status(404));
             }
-            Err(e) => return json_error(502, &format!("CachekitIO error: {e}")),
+            // Full error to Worker logs; the client gets the error class only —
+            // the SDK message can embed backend response body content, which is
+            // not ours to relay.
+            Err(e) => {
+                console_error!("CachekitIO get failed: {e}");
+                return json_error(502, &format!("CachekitIO {} error", e.kind));
+            }
         };
         let report = compute::verify_payload(&bytes, None);
         let value = cachekit::interop::deserialize::<serde_json::Value>(&bytes).ok();

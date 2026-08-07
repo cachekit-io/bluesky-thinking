@@ -9,7 +9,7 @@ Anything not locked here is a Stage-2 implementation choice.
 | :--- | :--- | :--- | :--- |
 | Ingester + window aggregator | Python / `cachekit` | `0.15.0` (PyPI) | Render free web service |
 | Edge API | TypeScript / `@cachekit-io/cachekit` | `0.1.3` (npm) | Cloudflare Workers (free plan) |
-| Edge hot path | Rust / `cachekit-rs` | `0.5.0` (crates.io) | Cloudflare Workers, `wasm32-unknown-unknown` |
+| Edge hot path | Rust / `cachekit-rs` | `0.7.0` (crates.io) | Cloudflare Workers, `wasm32-unknown-unknown` |
 | Dashboard | static HTML/JS | — | Cloudflare Workers Assets |
 | Cache backend | CachekitIO | `api.dev.cachekit.io` | ours (dogfood) |
 | Data source | Bluesky Jetstream | public WebSocket | e.g. `wss://jetstream2.us-east.bsky.network/subscribe` |
@@ -31,7 +31,7 @@ answer for cross-SDK sharing is **interop/v1** (`protocol/spec/interop-mode.md`)
   encoding of the flat bound argument array.
 - Values are one plain MessagePack document (no ByteStorage envelope, no LZ4).
 - All three SDKs ship it: `cachekit-py` 0.15.0 (`@cache(interop=…)`), `@cachekit-io/cachekit`
-  0.1.3 (`generateInteropKey` / `interop` wrap option), `cachekit-rs` 0.5.0
+  0.1.3 (`generateInteropKey` / `interop` wrap option), `cachekit-rs` 0.5.0+
   (`interop_key()` / `#[cachekit(interop = …)]`).
 - Note: the spec header in `protocol/spec/interop-mode.md` still says "NOT yet implemented in any
   SDK" — stale; all three implementations exist and are vector-verified. Flagged upstream.
@@ -117,9 +117,9 @@ config-level custom-host override alongside the credentials:
 
 - Python: env `CACHEKIT_API_URL=https://api.dev.cachekit.io` + `CACHEKIT_ALLOW_CUSTOM_HOST=true`
 - TS: `cachekitio({ apiUrl, allowCustomHost: true })`
-- Rust: `WorkersCachekitIO::builder().api_url(...).allow_custom_host(true)` — **currently
-  bypassed**: `WorkersCachekitIO` panics on every wasm32 request (LAB-1079), so the hot path does a
-  direct `worker::Fetch` GET until the SDK fix ships (`hotpath/README.md`)
+- Rust: `WorkersCachekitIO::builder().api_url(...).allow_custom_host(true)` (live since
+  cachekit-rs 0.7.0 fixed the wasm32 `SystemTime` panic, LAB-1079; the interim direct
+  `worker::Fetch` workaround was removed in LAB-1492)
 
 Round-trip verified end-to-end: `spike/roundtrip/roundtrip.py` (exists, runs against
 `api.dev.cachekit.io`; passed against the dev instance on 2026-07-29; also exercises `@cache.io`).
@@ -143,9 +143,9 @@ Round-trip verified end-to-end: `spike/roundtrip/roundtrip.py` (exists, runs aga
   worker-build exactly for that reason, so the two must be bumped together; CI's exact incantation
   is in `.github/workflows/hotpath-qa.yml`.
 - On wasm32 the CachekitIO backend is `cachekit::backend::workers::WorkersCachekitIO` (CF Fetch
-  API); the reqwest-based `CachekitIO` does not implement `Backend` on that target. **LAB-1079**:
-  `WorkersCachekitIO` panics on every live wasm32 request (`SystemTime::now()` in its session
-  headers) — the hot path substitutes a direct `worker::Fetch` GET until the SDK fix is published.
+  API); the reqwest-based `CachekitIO` does not implement `Backend` on that target. **LAB-1079**
+  (`SystemTime::now()` panic in its session headers, affected 0.2.0–0.6.0) was fixed in
+  cachekit-rs 0.7.0 — the hot path's interim direct `worker::Fetch` GET was removed in LAB-1492.
 - Workers builds: `--no-default-features --features workers,cachekitio`
   (`l1`/moka and `redis`/fred are native-only; `encryption`/`macros` were dropped in `dcb6da0` —
   the hot path never used them, see `hotpath/Cargo.toml`).
@@ -156,7 +156,7 @@ Round-trip verified end-to-end: `spike/roundtrip/roundtrip.py` (exists, runs aga
    `op://cachekit/ck-dev-bluesky-default`; `spike/roundtrip/roundtrip.py` round-trip verified
    against `api.dev.cachekit.io` (2026-07-29), closing AC-1.
 2. ~~**Oracle account**~~ — resolved: Render account exists (ray, 2026-07-24); Oracle dropped.
-3. ~~**cachekit-rs crates.io publish**~~ — resolved by LAB-742: crates.io now carries up to
-   `0.8.0`; hotpath builds against `0.5.0`.
+3. ~~**cachekit-rs crates.io publish**~~ — resolved by LAB-742: cachekit-rs publishes to
+   crates.io (latest `0.7.0`); hotpath builds against `0.7.0`.
 4. **protocol/spec/interop-mode.md status header** — says "NOT yet implemented in any SDK"; all
    three SDKs ship it. One-line doc fix for the protocol repo owners.
