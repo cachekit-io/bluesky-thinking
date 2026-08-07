@@ -161,7 +161,13 @@ describe('GET /api/stats', () => {
     const res = await handleApi(api('/api/stats'), backend);
 
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ hits: 1, misses: 2, errors: 1, hit_rate: 1 / 3 });
+    expect(await res.json()).toEqual({
+      hits: 1,
+      misses: 2,
+      errors: 1,
+      hit_rate: 1 / 3,
+      scope: expect.stringContaining('per-isolate'),
+    });
   });
 
   it('reports hit_rate null before any reads', async () => {
@@ -169,7 +175,27 @@ describe('GET /api/stats', () => {
       api('/api/stats'),
       mockBackend(async () => null),
     );
-    expect(await res.json()).toEqual({ hits: 0, misses: 0, errors: 0, hit_rate: null });
+    expect(await res.json()).toEqual({
+      hits: 0,
+      misses: 0,
+      errors: 0,
+      hit_rate: null,
+      scope: expect.stringContaining('per-isolate'),
+    });
+  });
+
+  // LAB-1618: the payload must say what its own numbers mean — per-isolate
+  // counters that reset on recycle, and a hit_rate that is aggregate-key
+  // availability, NOT an SDK L1 rate or the end-user (POP-cached) rate.
+  it('scope names the reset semantics and disclaims SDK-L1 / end-user readings', async () => {
+    const res = await handleApi(
+      api('/api/stats'),
+      mockBackend(async () => null),
+    );
+    const body = (await res.json()) as { scope: string };
+    expect(body.scope).toContain('reset when Cloudflare recycles the isolate');
+    expect(body.scope).toContain('aggregate-key availability');
+    expect(body.scope).toContain('not an SDK L1 hit rate');
   });
 });
 

@@ -157,6 +157,14 @@ export async function handleApi(
       misses: stats.misses,
       errors: stats.errors,
       hit_rate: reads === 0 ? null : stats.hits / reads,
+      // Honest scope, in the payload itself (LAB-1618): these are per-isolate
+      // counters, and hit_rate is aggregate-KEY availability at this isolate —
+      // not an SDK L1 rate (the edge reads the backend directly, no L1), and
+      // not what end users see (Cloudflare POP cache hits never reach here).
+      scope:
+        'per-isolate counters; reset when Cloudflare recycles the isolate. ' +
+        'hit_rate = aggregate-key availability observed by this isolate, not an SDK L1 hit rate ' +
+        'and not the end-user rate (POP cache hits are served before this worker runs).',
     });
   }
 
