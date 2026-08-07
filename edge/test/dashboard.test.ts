@@ -120,6 +120,16 @@ describe('Skyline dashboard payload renderers', () => {
         '5m',
       ),
     ).toContain('unverified');
+    expect(
+      renderCardMarkup('Links', { cache: 'MISS', operation: 'trending_links' }, '5m'),
+    ).not.toContain('unverified');
+    expect(
+      renderCardMarkup(
+        'Links',
+        { cache: 'ERR', operation: 'trending_links', error: 'backend_error' },
+        '5m',
+      ),
+    ).not.toContain('unverified');
   });
 
   it('reads only the supported window from the URL', () => {

@@ -13,6 +13,10 @@ export const OPERATIONS = [
 export const FRESHNESS_SECONDS = { '5m': 60, '1h': 300, '24h': 900 };
 export const WINDOWS = new Set(['5m', '1h', '24h']);
 
+/** @typedef {Record<string, unknown>} AggregatePayload */
+/** @typedef {'HIT' | 'MISS' | 'ERR'} CacheStatus */
+/** @typedef {{ cache: CacheStatus, operation: string, data?: AggregatePayload, hotpath?: string | null, error?: string }} CardState */
+
 /** @param {unknown} value */
 function esc(value) {
   return String(value).replace(
@@ -35,25 +39,35 @@ function isNumber(value) {
   return typeof value === 'number' && Number.isFinite(value);
 }
 
+/** @param {unknown} value @returns {value is AggregatePayload} */
+function isAggregatePayload(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
 /** @param {number} seconds */
 function freshnessLabel(seconds) {
   const minutes = seconds / 60;
   return `${minutes} minute${minutes === 1 ? '' : 's'}`;
 }
 
-/** @param {any[]} items @param {string} nameKey @param {string} valueKey @param {{ percent?: boolean, links?: boolean }} [options] */
+/** @param {AggregatePayload[]} items @param {string} nameKey @param {string} valueKey @param {{ percent?: boolean, links?: boolean }} [options] */
 function rankedRows(items, nameKey, valueKey, { percent = false, links = false } = {}) {
   const rows = items
-    .filter((item) => item && typeof item[nameKey] === 'string' && isNumber(item[valueKey]))
-    .sort((a, b) => b[valueKey] - a[valueKey])
+    .flatMap((item) => {
+      const name = item[nameKey];
+      const value = item[valueKey];
+      return typeof name === 'string' && isNumber(value) ? [{ name, value }] : [];
+    })
+    .sort((a, b) => b.value - a.value)
     .slice(0, 10);
-  if (!rows.length) return null;
+  const firstRow = rows[0];
+  if (!firstRow) return null;
 
-  const max = Math.max(rows[0][valueKey], 1);
+  const max = Math.max(firstRow.value, 1);
   return `<ol class="rows">${rows
     .map((item) => {
-      const name = item[nameKey];
-      const value = Math.max(item[valueKey], 0);
+      const { name } = item;
+      const value = Math.max(item.value, 0);
       const label = percent ? `${(value * 100).toFixed(1)}%` : fmt(value);
       const display = links
         ? externalLink(name)
@@ -67,7 +81,7 @@ function rankedRows(items, nameKey, valueKey, { percent = false, links = false }
     .join('')}</ol>`;
 }
 
-/** @param {any} langs */
+/** @param {AggregatePayload} langs */
 function languageRows(langs) {
   return rankedRows(
     Object.entries(langs).map(([lang, share]) => ({
@@ -93,9 +107,9 @@ function externalLink(uri) {
 }
 
 /** Render only the documented live payload shapes; never inspect metadata as data. */
-/** @param {string} operation @param {any} data */
+/** @param {string} operation @param {unknown} data */
 export function renderOperation(operation, data) {
-  if (!data || typeof data !== 'object' || Array.isArray(data)) return renderMalformed();
+  if (!isAggregatePayload(data)) return renderMalformed();
 
   switch (operation) {
     case 'posts_per_minute':
@@ -114,8 +128,7 @@ export function renderOperation(operation, data) {
         'No external links in this window yet.',
       );
     case 'lang_mix':
-      if (!data.langs || typeof data.langs !== 'object' || Array.isArray(data.langs))
-        return renderMalformed();
+      if (!isAggregatePayload(data.langs)) return renderMalformed();
       return rankingOrEmpty(
         languageRows(data.langs),
         'No language mix is available for this window yet.',
@@ -131,7 +144,7 @@ export function renderOperation(operation, data) {
   }
 }
 
-/** @param {any} data */
+/** @param {AggregatePayload} data */
 function sampleSize(data) {
   return isNumber(data.total_posts)
     ? `<p class="meta">${fmt(data.total_posts)} posts sampled</p>`
@@ -187,7 +200,7 @@ function errorMessage(error) {
   }
 }
 
-/** @param {string} title @param {any} state @param {string} selectedWindow */
+/** @param {string} title @param {CardState} state @param {string} selectedWindow */
 export function renderCardMarkup(title, state, selectedWindow) {
   /** @type {Record<string, string>} */
   const badgeClasses = { HIT: 'hit', MISS: 'miss', ERR: 'err' };
@@ -201,7 +214,7 @@ export function renderCardMarkup(title, state, selectedWindow) {
       '<p class="empty">No cached aggregate for this window yet — the ingester is still collecting posts.</p>';
   else content = renderOperation(state.operation, state.data);
   const hotpath =
-    state.hotpath !== 'verified'
+    !state.error && state.cache === 'HIT' && state.hotpath !== 'verified'
       ? '<p class="warning">Integrity verification is temporarily unavailable; this is live cache data, but it is unverified.</p>'
       : '';
   return `<h2>${esc(title)} <span class="badge ${badge}">${esc(state.cache)}</span></h2><p class="meta">${meta}</p>${hotpath}${content}`;
@@ -248,14 +261,21 @@ function initDashboard() {
       const response = await fetch(
         `/api/${operation}?window=${encodeURIComponent(selectedWindow)}`,
       );
-      const body = await response.json();
+      const body = /** @type {{ data?: unknown, error?: unknown, detail?: unknown }} */ (
+        await response.json()
+      );
       if (version !== refreshVersion) return;
       if (response.ok) {
         const cache = response.headers.get('x-cache');
         element.innerHTML = renderCardMarkup(
           title,
-          cache
-            ? { cache, operation, data: body.data, hotpath: response.headers.get('x-hotpath') }
+          cache === 'HIT'
+            ? {
+                cache: 'HIT',
+                operation,
+                data: isAggregatePayload(body.data) ? body.data : undefined,
+                hotpath: response.headers.get('x-hotpath'),
+              }
             : { cache: 'ERR', operation, error: 'cache_status_unknown' },
           selectedWindow,
         );
@@ -267,7 +287,16 @@ function initDashboard() {
       }
       element.innerHTML = renderCardMarkup(
         title,
-        { cache: 'ERR', operation, error: body.detail || body.error || 'internal' },
+        {
+          cache: 'ERR',
+          operation,
+          error:
+            typeof body.error === 'string'
+              ? body.error
+              : typeof body.detail === 'string'
+                ? body.detail
+                : 'internal',
+        },
         selectedWindow,
       );
     } catch {
