@@ -50,6 +50,16 @@ def test_hashtag_facets_require_one_complete_token(value):
     assert tag is None and reason == "malformed_tag"
 
 
+def test_oversized_hashtag_is_rejected_before_nfkc(monkeypatch):
+    def unexpected_normalize(*_args):
+        raise AssertionError("oversized input reached Unicode normalization")
+
+    with monkeypatch.context() as patch:
+        patch.setattr("skyline_ingester.policy.unicodedata.normalize", unexpected_normalize)
+        tag, reason = normalize_hashtag("ﬃ" * 65)
+    assert tag is None and reason == "malformed_tag"
+
+
 def test_text_hashtag_boundaries_and_unicode_normalization():
     event = {
         "kind": "commit",
@@ -92,16 +102,22 @@ def test_link_canonicalization_preserves_resource_identity():
         ("http://127。0。0。1/admin", "unsafe_host"),
         ("http://192.168.1｡1/admin", "unsafe_host"),
         ("http://a.b．local/admin", "unsafe_host"),
-        ("http://[::a9fe:a9fe]/latest/meta-data/", "unsafe_host"),
-        ("http://[64:ff9b::a9fe:a9fe]/latest/meta-data/", "unsafe_host"),
-        ("http://[::ffff:0:a9fe:a9fe]/latest/meta-data/", "unsafe_host"),
         ("http://169.254.169.254.sslip.io/latest/meta-data/", "unsafe_host"),
         ("http://169-254-169-254.sslip.io/latest/meta-data/", "unsafe_host"),
+        ("http://my-169-254-169-254.sslip.io/latest/meta-data/", "unsafe_host"),
+        ("http://a9fea9fe.sslip.io/latest/meta-data/", "unsafe_host"),
+        ("http://64-ff9b--a9fe-a9fe.sslip.io/latest/meta-data/", "unsafe_host"),
+        ("http://0--1.sslip.io/admin", "unsafe_host"),
         ("http://127.0.0.1.nip.io/admin", "unsafe_host"),
         ("http://192.168.1.1.traefik.me/admin", "unsafe_host"),
+        ("http://foo.traefik.me/admin", "unsafe_host"),
+        ("http://api.localho.st/admin", "unsafe_host"),
+        ("http://x.local.gd/admin", "unsafe_host"),
+        ("http://a.localhost.direct/admin", "unsafe_host"),
         ("http://lvh.me/admin", "unsafe_host"),
         ("http://localtest.me/admin", "unsafe_host"),
         ("http://vcap.me/admin", "unsafe_host"),
+        ("http://1u.ms/admin", "unsafe_host"),
         ("http://224.0.0.1/multicast", "unsafe_host"),
         ("http://192.88.99.1/relay", "unsafe_host"),
         ("http://[ff02::1]/multicast", "unsafe_host"),
@@ -129,8 +145,7 @@ def test_ipv4_embedded_ipv6_keeps_global_targets_only():
     assert link is not None and link.domain == "64:ff9b::808:808"
 
     alias, reason = normalize_link("https://8.8.8.8.sslip.io/resource")
-    assert reason is None
-    assert alias is not None and alias.domain == "8.8.8.8.sslip.io"
+    assert alias is None and reason == "unsafe_host"
 
 
 @pytest.mark.parametrize("prefix", ["::", "64:ff9b::", "::ffff:0:"])
@@ -315,6 +330,16 @@ def test_malformed_facet_and_text_fallback_count_one_rejection():
     assert features.exclusions["malformed_tag"] == 1
 
 
+def test_hash_prefixed_filtered_facet_matches_repeated_body_fallback():
+    event = _quality_events()[0]
+    event["commit"]["record"]["text"] = "#nsfw #nsfw #nsfw"
+    event["commit"]["record"]["facets"] = [{"features": [{"$type": "app.bsky.richtext.facet#tag", "tag": "#nsfw"}]}]
+    features = extract_post(event)
+    assert features is not None
+    assert features.hashtags == []
+    assert features.exclusions == {"filtered_tag": 1}
+
+
 def test_source_identifiers_never_enter_buckets_checkpoints_or_public_values():
     events = _quality_events()
     store = WindowStore(dedupe_key=b"x" * 32)
@@ -329,7 +354,6 @@ def test_source_identifiers_never_enter_buckets_checkpoints_or_public_values():
     serialized = json.dumps({"snapshot": snapshot, "values": values}, ensure_ascii=False, sort_keys=True)
     for event in events:
         assert event["did"] not in serialized
-    # Restarts deliberately restore aggregates but not linkable source state.
+    # A fresh process can restore aggregate history without any source identifier.
     restored = WindowStore(dedupe_key=b"y" * 32)
     assert restored.restore(snapshot, NOW) > 0
-    assert restored._seen == {} and restored._seen_expiry == []

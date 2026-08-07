@@ -106,8 +106,9 @@ validates every entry, dropping unsafe counter keys and values individually inst
 rest of their minute or crashing startup,
 and ignores any legacy `sent` field entirely — restoring it would let a poisoned checkpoint choose
 the plaintext that the next secure publish encrypts. Restore work is capped to the same per-counter
-top-K sizes written by `snapshot()` and at most one 24-hour window of minute buckets, so an
-oversized operator-poisoned map cannot turn startup into a memory or CPU boot loop.
+top-K sizes of accepted entries written by `snapshot()` and at most one 24-hour window
+of minute buckets, so an oversized operator-poisoned map cannot turn startup into a memory
+or CPU boot loop.
 
 Checkpoint schema v2 is tied to `skyline-normalization-v1`. A checkpoint from
 an older normalization version is rejected instead of mixing incompatible

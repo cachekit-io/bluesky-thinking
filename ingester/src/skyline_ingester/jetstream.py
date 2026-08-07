@@ -27,6 +27,80 @@ MAX_FUTURE_SKEW_SECONDS = 300.0
 MISSING_SOURCE_LOG_INTERVAL = 1_000
 
 
+def _raw_time_us(raw: str | bytes) -> int | None:
+    """Extract a top-level integer cursor without recursively parsing JSON."""
+    if isinstance(raw, bytes):
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+    else:
+        text = raw
+    index = 0
+    while index < len(text) and text[index].isspace():
+        index += 1
+    if index >= len(text) or text[index] != "{":
+        return None
+    depth = 0
+    while index < len(text):
+        char = text[index]
+        if char == '"':
+            start = index + 1
+            index = start
+            escaped = False
+            while index < len(text):
+                current = text[index]
+                if current == '"' and not escaped:
+                    break
+                escaped = current == "\\" and not escaped
+                index += 1
+            if index >= len(text):
+                return None
+            if depth == 1 and text[start:index] == "time_us":
+                cursor = index + 1
+                while cursor < len(text) and text[cursor].isspace():
+                    cursor += 1
+                if cursor >= len(text) or text[cursor] != ":":
+                    index += 1
+                    continue
+                cursor += 1
+                while cursor < len(text) and text[cursor].isspace():
+                    cursor += 1
+                end = cursor
+                while end < len(text) and text[end].isdecimal():
+                    end += 1
+                if end == cursor or end - cursor > 20:
+                    return None
+                boundary = end
+                while boundary < len(text) and text[boundary].isspace():
+                    boundary += 1
+                if boundary >= len(text) or text[boundary] not in ",}":
+                    return None
+                try:
+                    return int(text[cursor:end])
+                except ValueError:
+                    return None
+            index += 1
+            continue
+        if char in "{[":
+            depth += 1
+        elif char in "}]":
+            depth -= 1
+            if depth < 0:
+                return None
+        index += 1
+    return None
+
+
+def _cursor_is_usable(time_us: object, now: float) -> bool:
+    return (
+        isinstance(time_us, int)
+        and not isinstance(time_us, bool)
+        and time_us >= 0
+        and time_us / 1_000_000 <= now + MAX_FUTURE_SKEW_SECONDS
+    )
+
+
 def ingest_raw(
     raw: str | bytes,
     store: WindowStore,
@@ -39,21 +113,33 @@ def ingest_raw(
     Future-dated events (beyond MAX_FUTURE_SKEW_SECONDS of wall-clock) are dropped
     entirely — neither aggregated nor used to advance the cursor.
     """
+    now = now_fn()
     try:
         event = json.loads(raw)
+    except RecursionError:
+        time_us = _raw_time_us(raw)
+        if _cursor_is_usable(time_us, now):
+            logger.warning("dropping recursive Jetstream frame; advancing cursor (time_us=%d)", time_us)
+            return time_us
+        logger.warning("recursive Jetstream frame without usable cursor (%d bytes)", len(raw))
+        return None
     except (ValueError, UnicodeDecodeError):
         logger.warning("unparseable Jetstream frame (%d bytes)", len(raw))
         return None
     time_us = event.get("time_us") if isinstance(event, dict) else None
-    if not isinstance(time_us, int):
+    if not isinstance(time_us, int) or isinstance(time_us, bool):
         # Same visibility as the sibling drops: a Jetstream schema change here
         # would otherwise be 100% silent data loss under a healthy-looking loop.
         logger.warning("dropping Jetstream frame without int time_us")
         return None
-    if time_us / 1_000_000 > now_fn() + MAX_FUTURE_SKEW_SECONDS:
+    if not _cursor_is_usable(time_us, now):
         logger.warning("dropping future-dated Jetstream event (time_us=%d)", time_us)
         return None
-    feats = extract_post(event)
+    try:
+        feats = extract_post(event)
+    except (ValueError, TypeError, UnicodeError, OverflowError, RecursionError) as exc:
+        logger.warning("dropping malformed Jetstream event (%s); advancing cursor", type(exc).__name__)
+        return time_us
     if feats is not None:
         source_id = event.get("did")
         if (not isinstance(source_id, str) or not source_id) and health is not None:

@@ -71,13 +71,24 @@ def test_facet_and_feature_overflow_is_visible(fixture_lines):
     features = extract_post(event)
     assert features is not None
     assert len(features.hashtags) == 32
-    assert features.exclusions["candidate_limit_tag"] == 32
-    assert features.exclusions["candidate_limit_feature"] == 136
+    assert features.exclusions["candidate_limit_tag"] == 168
 
-    record["facets"] = [{"features": [{"$type": "app.bsky.richtext.facet#tag", "tag": f"tag{index}"}]} for index in range(70)]
+    record["facets"] = [
+        {"features": [{"$type": "app.bsky.richtext.facet#tag", "tag": f"tag{facet}_{index}"} for index in range(20)]}
+        for facet in range(200)
+    ]
     features = extract_post(event)
     assert features is not None
-    assert features.exclusions["candidate_limit_facet"] == 6
+    assert len(features.hashtags) + features.exclusions["candidate_limit_tag"] == 4_000
+
+    record["facets"] = [{"features": [{"$type": "app.bsky.richtext.facet#mention", "did": "did:plc:x"}]} for _ in range(100)]
+    features = extract_post(event)
+    assert features is not None and features.exclusions == {}
+
+    record["facets"] = [{"features": [{"$type": "app.bsky.richtext.facet#tag", "tag": None} for _ in range(10)]}]
+    features = extract_post(event)
+    assert features is not None
+    assert features.exclusions == {"malformed_tag": 10}
 
 
 def test_emoji_extraction_counts_zwj_sequence_once(fixture_lines):
@@ -98,6 +109,21 @@ def test_ingest_raw_returns_cursor_and_skips_garbage():
     store = WindowStore()
     assert ingest_raw("not json{", store) is None
     assert ingest_raw('{"kind": "commit", "time_us": 123}', store) == 123
+
+
+def test_ingest_raw_advances_cursor_past_recursive_or_downstream_poison(monkeypatch):
+    cursor = 123_000_000
+    nested = "[" * 20_000 + "0" + "]" * 20_000
+    raw = f'{{"time_us": {cursor}, "nested": {nested}}}'
+    assert ingest_raw(raw, WindowStore(), now_fn=lambda: 1_000.0) == cursor
+    assert ingest_raw(f'{{"time_us": {cursor},', WindowStore(), now_fn=lambda: 1_000.0) is None
+
+    def recurse(_event):
+        raise RecursionError("poison")
+
+    monkeypatch.setattr("skyline_ingester.jetstream.extract_post", recurse)
+    ordinary = json.dumps({"kind": "commit", "time_us": cursor})
+    assert ingest_raw(ordinary, WindowStore(), now_fn=lambda: 1_000.0) == cursor
 
 
 def test_ingest_raw_drops_future_dated_events(fixture_lines):

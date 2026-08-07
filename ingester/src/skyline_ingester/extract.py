@@ -14,7 +14,6 @@ from skyline_ingester.policy import hashtag_candidate_fingerprint, hashtags_from
 
 POST_COLLECTION = "app.bsky.feed.post"
 MAX_TEXT_LENGTH = 4_096
-MAX_FACET_FEATURES = 64
 MAX_TAG_CANDIDATES = 32
 MAX_LINK_CANDIDATES = 16
 _PRIMARY_LANGUAGE_RE = re.compile(r"[a-z]{2,8}")
@@ -132,32 +131,24 @@ def extract_post(event: dict) -> PostFeatures | None:
     facets = record.get("facets") or []
     if not isinstance(facets, list):
         facets = []
-    features_examined = 0
-    bounded_facets = facets[:MAX_FACET_FEATURES]
-    if len(facets) > len(bounded_facets):
-        exclusions["candidate_limit_facet"] += len(facets) - len(bounded_facets)
-    for facet in bounded_facets:
+    for facet in facets:
         if not isinstance(facet, dict):
             continue
         features = facet.get("features") or []
         if not isinstance(features, list):
             continue
-        for feature_index, feature in enumerate(features):
-            if features_examined >= MAX_FACET_FEATURES:
-                exclusions["candidate_limit_feature"] += len(features) - feature_index
-                break
-            features_examined += 1
+        for feature in features:
             if not isinstance(feature, dict):
                 continue
             ftype = feature.get("$type")
-            if ftype == "app.bsky.richtext.facet#tag" and feature.get("tag") is not None:
+            if ftype == "app.bsky.richtext.facet#tag":
                 if len(tag_candidates) < MAX_TAG_CANDIDATES:
-                    tag_candidates.append(feature["tag"])
+                    tag_candidates.append(feature.get("tag"))
                 else:
                     exclusions["candidate_limit_tag"] += 1
-            elif ftype == "app.bsky.richtext.facet#link" and feature.get("uri") is not None:
+            elif ftype == "app.bsky.richtext.facet#link":
                 if len(link_candidates) < MAX_LINK_CANDIDATES:
-                    link_candidates.append(feature["uri"])
+                    link_candidates.append(feature.get("uri"))
                 else:
                     exclusions["candidate_limit_url"] += 1
     embed = record.get("embed") or {}
@@ -172,17 +163,24 @@ def extract_post(event: dict) -> PostFeatures | None:
 
     hashtags: list[str] = []
     hashtag_labels: dict[str, str] = {}
-    rejected_facet_tags: set[tuple[str, str]] = set()
+    rejected_tag_reasons: dict[tuple[str, str], str] = {}
 
-    def add_hashtag(candidate: object, *, from_fallback: bool = False) -> None:
+    def add_hashtag(candidate: object) -> None:
         tag, reason = normalize_hashtag(candidate)
         if tag is None:
+            rejection = reason or "malformed_tag"
             candidate_key = hashtag_candidate_fingerprint(candidate)
-            if from_fallback and candidate_key in rejected_facet_tags:
-                return
-            exclusions[reason or "malformed_tag"] += 1
-            if not from_fallback and candidate_key is not None:
-                rejected_facet_tags.add(candidate_key)
+            previous = rejected_tag_reasons.get(candidate_key) if candidate_key is not None else None
+            if previous is None:
+                exclusions[rejection] += 1
+                if candidate_key is not None:
+                    rejected_tag_reasons[candidate_key] = rejection
+            elif previous == "malformed_tag" and rejection == "filtered_tag":
+                exclusions[previous] -= 1
+                if not exclusions[previous]:
+                    del exclusions[previous]
+                exclusions[rejection] += 1
+                rejected_tag_reasons[candidate_key] = rejection
         elif tag.canonical in hashtag_labels:
             exclusions["duplicate_in_event_tag"] += 1
         else:
@@ -200,7 +198,7 @@ def extract_post(event: dict) -> PostFeatures | None:
         if len(text_candidates) > MAX_TAG_CANDIDATES:
             exclusions["candidate_limit_tag"] += len(text_candidates) - MAX_TAG_CANDIDATES
         for candidate in text_candidates[:MAX_TAG_CANDIDATES]:
-            add_hashtag(candidate, from_fallback=True)
+            add_hashtag(candidate)
 
     links: list[str] = []
     domains: list[str] = []

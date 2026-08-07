@@ -318,10 +318,9 @@ class WindowStore:
     def snapshot(self, now: float) -> dict:
         """Truncated, msgpack-friendly dump of the buckets for checkpointing.
 
-        Per-bucket counters are cut to their top-K entries, so long-tail counts
-        are approximate after a restore; post and signal-candidate totals stay
-        exact. Long-tail language
-        counts, like the trend counters, are approximate after restore.
+        Per-bucket counters are cut to their top-K entries, so long-tail trend
+        and language counts are approximate after a restore; post and
+        signal-candidate totals stay exact.
 
         Per-language sentiment (`sent`) is deliberately NOT persisted: it is the
         cleartext source of the @cache.secure sentiment cache, and this checkpoint
@@ -481,9 +480,10 @@ def _coerced_counter(data, *, key_validator, reject_reason: str, rejected: Count
     if not isinstance(data, dict):
         rejected[reject_reason] += 1
         return output
-    if len(data) > max_entries:
-        rejected[reject_reason] += len(data) - max_entries
-    for raw_key, value in islice(data.items(), max_entries):
+    for index, (raw_key, value) in enumerate(data.items()):
+        if len(output) >= max_entries:
+            rejected[reject_reason] += len(data) - index
+            break
         if not isinstance(raw_key, str) or not key_validator(raw_key):
             rejected[reject_reason] += 1
             continue
@@ -502,9 +502,10 @@ def _coerced_tag_labels(data, rejected: Counter[str]) -> dict[str, Counter]:
     if not isinstance(data, dict):
         rejected["checkpoint_invalid_label"] += 1
         return output
-    if len(data) > _K_TAGS:
-        rejected["checkpoint_invalid_label"] += len(data) - _K_TAGS
-    for canonical, labels in islice(data.items(), _K_TAGS):
+    for index, (canonical, labels) in enumerate(data.items()):
+        if len(output) >= _K_TAGS:
+            rejected["checkpoint_invalid_label"] += len(data) - index
+            break
         if not isinstance(canonical, str) or not _is_canonical_tag(canonical):
             rejected["checkpoint_invalid_label"] += 1
             continue
@@ -520,7 +521,8 @@ def _coerced_tag_labels(data, rejected: Counter[str]) -> dict[str, Counter]:
             rejected=rejected,
             max_entries=3,
         )
-        output[canonical] = counter
+        if counter:
+            output[canonical] = counter
     return output
 
 

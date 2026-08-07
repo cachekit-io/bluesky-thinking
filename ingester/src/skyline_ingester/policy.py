@@ -71,8 +71,6 @@ EXCLUSION_REASONS = frozenset(
     {
         "candidate_limit_tag",
         "candidate_limit_url",
-        "candidate_limit_facet",
-        "candidate_limit_feature",
         "checkpoint_invalid_count",
         "checkpoint_invalid_domain",
         "checkpoint_invalid_emoji",
@@ -101,7 +99,21 @@ EXCLUSION_REASONS = frozenset(
 
 _BAD_PERCENT_ESCAPE_RE = re.compile(r"%(?![0-9a-fA-F]{2})")
 _DNS_LABEL_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
-_LOCAL_HOSTS = frozenset({"localhost", "localtest.me", "lvh.me", "vcap.me"})
+_LOCAL_HOSTS = frozenset(
+    {
+        "1u.ms",
+        "local.gd",
+        "localho.st",
+        "localhost",
+        "localhost.direct",
+        "localtest.me",
+        "lvh.me",
+        "nip.io",
+        "sslip.io",
+        "traefik.me",
+        "vcap.me",
+    }
+)
 _LOCAL_SUFFIXES = (".home", ".internal", ".lan", ".local", ".localhost")
 _IPV4_EMBEDDED_NETWORKS = tuple(ipaddress.IPv6Network(prefix) for prefix in ("::/96", "64:ff9b::/96", "::ffff:0:0:0/96"))
 _DISALLOWED_IP_NETWORKS = tuple(ipaddress.ip_network(prefix) for prefix in ("192.88.99.0/24", "5f00::/16", "64:ff9b:1::/48"))
@@ -137,7 +149,10 @@ def hashtag_candidate_fingerprint(value: object) -> tuple[str, str] | None:
     """Return an event-local key for deduplicating rejected facet/body tags."""
     if not isinstance(value, str):
         return None
-    display = unicodedata.normalize("NFKC", value).strip()
+    candidate = value.removeprefix("#")
+    display = _nfkc_display(candidate)
+    if display is None:
+        return "malformed", candidate[: MAX_TAG_LENGTH + 1]
     tag = _normalized_hashtag_display(display)
     if tag is not None:
         return "canonical", tag.canonical
@@ -145,10 +160,15 @@ def hashtag_candidate_fingerprint(value: object) -> tuple[str, str] | None:
 
 
 def _normalized_hashtag(value: object) -> NormalizedHashtag | None:
-    if not isinstance(value, str):
+    display = _nfkc_display(value)
+    return None if display is None else _normalized_hashtag_display(display)
+
+
+def _nfkc_display(value: object) -> str | None:
+    """Bound tag work before Unicode normalization."""
+    if not isinstance(value, str) or len(value) > MAX_TAG_LENGTH:
         return None
-    display = unicodedata.normalize("NFKC", value).strip()
-    return _normalized_hashtag_display(display)
+    return unicodedata.normalize("NFKC", value).strip()
 
 
 def _normalized_hashtag_display(display: str) -> NormalizedHashtag | None:
@@ -282,12 +302,11 @@ def _normalize_host(raw_host: str) -> str | None:
 
     # Reject browser-dependent numeric host spellings (e.g. 2130706433 or
     # 0x7f000001) instead of risking an alternate spelling of a local address.
-    numeric_labels = host.split(".")
-    if all(label.isdecimal() or label.startswith("0x") for label in numeric_labels):
+    labels = host.split(".")
+    if all(label.isdecimal() or label.startswith("0x") for label in labels):
         return None
     if _domain_matches(host, _LOCAL_HOSTS) or host.endswith(_LOCAL_SUFFIXES) or "." not in host:
         return None
-    labels = host.split(".")
     if any(_DNS_LABEL_RE.fullmatch(label) is None for label in labels):
         return None
     if _contains_non_global_ipv4_alias(labels):
