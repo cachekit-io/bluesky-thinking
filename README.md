@@ -8,6 +8,9 @@ by a Python ingester, served from a TypeScript edge API, with a Rust-WASM hot pa
 writing the **same** [CacheKit](https://cachekit.io) cache entries. The demo *is* a live cross-SDK
 interop test, and a working proof of CacheKit's differentiators:
 
+Public trend signals are Unicode-normalized, tracking-aware, source-bounded, and
+safety-filtered under the transparent [Skyline public signal policy](docs/signal-policy.md).
+
 - **Metered-misses pricing made literal** — a cache miss is a real window recompute; the hit rate
   is the product story.
 - **Distributed locking** — concurrent misses on one window trigger exactly one recompute

@@ -62,12 +62,14 @@ invalidate can still leave the key briefly deleted until the next tick — cache
 set/replace, so that gap is inherent to the decorator API.
 
 Values are interop/v1 plain MessagePack, top-level maps with string keys. All carry
-`window` (str), `generated_at` (unix seconds, int), `total_posts` (int), plus:
+`window` (str), `generated_at` (unix seconds, int), `total_posts` (int),
+`total_events_considered` (int), `excluded_count_by_reason` (map), and
+`normalization_version` (str), plus:
 
 | Operation | Payload field |
 | :--- | :--- |
-| `trending_hashtags` | `hashtags`: `[{tag, count}]`, top 50 |
-| `trending_links` | `links`: `[{uri, count}]`, top 50 (link facets + external embeds) |
+| `trending_hashtags` | `hashtags`: `[{tag, canonical, count}]`, top 50; `tag` preserves the most frequent display spelling |
+| `trending_links` | `links`: `[{uri, count}]` and `domains`: `[{domain, count}]`, top 50 |
 | `lang_mix` | `langs`: `{lang: share}` (floats summing to ~1; top 25 + `other`) |
 | `posts_per_minute` | `ppm`: float |
 | `top_emoji` | `emoji`: `[{emoji, count}]`, top 25 (ZWJ sequences count once) |
@@ -100,11 +102,25 @@ validates and coerces every entry, skipping corrupt ones with a warning instead 
 and ignores any legacy `sent` field entirely — restoring it would let a poisoned checkpoint choose
 the plaintext that the next secure publish encrypts.
 
+Checkpoint schema v2 is tied to `skyline-normalization-v1`. A checkpoint from
+an older normalization version is rejected instead of mixing incompatible
+ranking keys under a new version label. Canonical domains, display-label counts,
+and aggregate exclusion counts are restart-safe; the transient source ledger is
+not.
+
 ## Privacy
 
-Aggregate-only: the extractor reduces each post to counter inputs (tags, links, primary language,
-emoji, a lexicon sentiment score). Post text, author DIDs, and rkeys are never stored — not in the
-windows, not in the checkpoint, not in any cache value.
+Aggregate-only: the extractor reduces each post to normalized counter inputs
+(tags, links/domains, primary language, emoji, a lexicon sentiment score) and
+aggregate exclusion reasons. Post text and record keys are never stored.
+
+For public tags, URLs, and domains, one source contributes a given canonical
+value at most once per rolling five minutes. The raw DID crosses one local call
+boundary, is immediately folded into a process-keyed tuple digest, and is never
+stored or logged. The random key and opaque five-minute ledger are excluded from
+buckets, checkpoints, cache values, and history, and rotate on restart. Full
+canonicalization, safety, filter-list, tracking-parameter, and transparency
+semantics: [public signal policy](../docs/signal-policy.md).
 
 ## Tests
 
@@ -116,4 +132,5 @@ uv run ruff check src tests && uv run ruff format --check src tests
 The suite drives the real SDK against an in-process bytes backend (interop mode enforces the
 cross-SDK value contract, so `backend=None`/L1-only is rejected by cachekit itself) and asserts the
 byte-locked key vectors from the architecture spec, aggregate correctness from a recorded fixture
-stream, window expiry, checkpoint restore, and ciphertext-only secure storage.
+stream, window expiry, checkpoint restore, ciphertext-only secure storage, and
+the recorded signal-quality before/after evaluation.

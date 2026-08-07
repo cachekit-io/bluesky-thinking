@@ -79,7 +79,10 @@ def test_memo_is_not_resurrected_by_a_concurrent_add(store):
 
     def add_mid_merge(lo, hi):
         copies = orig(lo, hi)
-        store.add(PostFeatures(ts=NOW, lang="en", hashtags=[], links=[], emoji=[], sentiment=None))
+        store.add(
+            PostFeatures(ts=NOW, lang="en", hashtags=[], links=[], emoji=[], sentiment=None),
+            source_id="did:plc:midmerge",
+        )
         return copies
 
     store._copy_range = add_mid_merge
@@ -102,8 +105,14 @@ def test_memo_does_not_leak_across_now(store):
 def test_prune_drops_buckets_beyond_24h():
     s = WindowStore()
     base = 20_000_000 * 60.0
-    s.add(PostFeatures(ts=base, lang="en", hashtags=["old"], links=[], emoji=[], sentiment=None))
-    s.add(PostFeatures(ts=base + 1441 * 60, lang="en", hashtags=["new"], links=[], emoji=[], sentiment=None))
+    s.add(
+        PostFeatures(ts=base, lang="en", hashtags=["old"], links=[], emoji=[], sentiment=None),
+        source_id="did:plc:old",
+    )
+    s.add(
+        PostFeatures(ts=base + 1441 * 60, lang="en", hashtags=["new"], links=[], emoji=[], sentiment=None),
+        source_id="did:plc:new",
+    )
     assert len(s._buckets) == 1  # the 1441-min-old bucket was pruned on insert
     assert "new" in s.merged("24h", base + 1441 * 60).tags
 
@@ -115,9 +124,22 @@ def test_prune_recovers_after_a_future_timestamp():
     # added lets the window recover; the stray future bucket is excluded by merged().
     s = WindowStore()
     base_min = 20_000_000
-    s.add(PostFeatures(ts=(base_min + 10_000_000) * 60.0, lang="en", hashtags=["bogus"], links=[], emoji=[], sentiment=None))
-    for _ in range(3):  # real events arriving after the bogus one must still register
-        s.add(PostFeatures(ts=base_min * 60.0, lang="en", hashtags=["real"], links=[], emoji=[], sentiment=None))
+    s.add(
+        PostFeatures(
+            ts=(base_min + 10_000_000) * 60.0,
+            lang="en",
+            hashtags=["bogus"],
+            links=[],
+            emoji=[],
+            sentiment=None,
+        ),
+        source_id="did:plc:bogus",
+    )
+    for source in range(3):  # distinct real sources must all register
+        s.add(
+            PostFeatures(ts=base_min * 60.0, lang="en", hashtags=["real"], links=[], emoji=[], sentiment=None),
+            source_id=f"did:plc:real{source}",
+        )
     m = s.merged("5m", base_min * 60.0)
     assert m.n == 3
     assert m.tags["real"] == 3

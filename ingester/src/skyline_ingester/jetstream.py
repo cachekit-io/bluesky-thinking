@@ -48,7 +48,10 @@ def ingest_raw(raw: str | bytes, store: WindowStore, *, now_fn: Callable[[], flo
         return None
     feats = extract_post(event)
     if feats is not None:
-        store.add(feats)
+        # The raw DID crosses only this call boundary. WindowStore immediately
+        # folds it into a process-keyed contribution digest and never stores or
+        # logs the identifier itself.
+        store.add(feats, source_id=event.get("did"))
     return time_us
 
 
