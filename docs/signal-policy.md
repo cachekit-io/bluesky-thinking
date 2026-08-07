@@ -27,10 +27,9 @@ supposed to carry one bare tag, so a facet containing whitespace, surrounding
 `#`, or other punctuation is rejected rather than truncated.
 
 The existing public `tag` field remains the case-folded ranking key. The
-additive `canonical` field repeats that key explicitly, while `display` is the
-most frequent NFKC-normalized spelling seen in the selected window, with a
-lexical tie-break. Display case is therefore preserved without changing the
-meaning of `tag` or splitting the count.
+additive `display` field is the most frequent NFKC-normalized spelling seen in
+the selected window, with a lexical tie-break. Display case is therefore
+preserved without changing the meaning of `tag` or splitting the count.
 
 Work per post is bounded before normalization: at most 4,096 text characters,
 64 facet features, 32 hashtag candidates, and 16 link candidates are examined.
@@ -47,7 +46,8 @@ Only syntactically valid `http` and `https` URLs are candidates. Canonical URLs:
 
 - lowercase and IDNA-encode the host before every host-safety check;
 - canonicalize global IP literals and reject non-global addresses, including
-  Unicode-dot spellings that become IP literals after IDNA;
+  Unicode-dot spellings that become IP literals after IDNA and private IPv4
+  targets embedded in IPv6 transition formats;
 - remove a trailing host dot and the default port (80 for HTTP, 443 for HTTPS);
 - preserve the path and meaningful query components byte-for-byte;
 - remove the fragment;
@@ -73,8 +73,8 @@ resources.
 One source can contribute a given canonical hashtag, URL, or domain at most once
 per rolling five minutes of process time. Untrusted event timestamps determine
 the event's minute bucket but never expire this ledger. The limit is per signal
-family: two distinct URLs on one domain can both enter the URL ranking, while that source contributes only
-once to the domain ranking during the horizon.
+family: two distinct URLs on one domain can both enter the URL ranking, while
+that source contributes only once to the domain ranking during the horizon.
 
 The Jetstream DID exists only as a local argument at the ingestion boundary.
 `WindowStore` immediately folds it into a 128-bit keyed BLAKE2 digest for the
@@ -93,6 +93,13 @@ volume, language, emoji, and sentiment aggregates, but its hashtag/link/domain
 contributions are excluded so missing identity cannot bypass the public trend
 bound.
 
+Jetstream reconnects resume from the last cursor. If a backlog longer than five
+minutes is delivered faster than real time, its trend signals share the current
+process-time bound and can be under-counted; event-volume and language/emoji
+aggregates remain exact. Event timestamps are deliberately not used to expire
+the ledger because they are untrusted and previously allowed a source to erase
+the bound.
+
 ## Public-safety exclusions
 
 URL checks are local and syntactic. The ingestion hot path never resolves DNS,
@@ -105,8 +112,8 @@ Skyline rejects:
 - control characters, whitespace, backslashes, bad percent escapes, invalid
   hosts/ports, browser-dependent numeric hosts, and overlong URLs;
 - localhost, single-label/local-network names, and non-global IP literals;
-- an exact host or subdomain of `pornhub.com`, `redtube.com`,
-  `spam.example.com`, `xhamster.com`, `xnxx.com`, or `xvideos.com`.
+- an exact host or subdomain of `pornhub.com`, `redtube.com`, `xhamster.com`,
+  `xnxx.com`, or `xvideos.com`.
 
 This intentionally small explicit filter is reviewable. It is not a crawler,
 page classifier, or permanent blocklist of people.

@@ -38,7 +38,6 @@ FILTERED_DOMAINS = frozenset(
     {
         "pornhub.com",
         "redtube.com",
-        "spam.example.com",
         "xhamster.com",
         "xnxx.com",
         "xvideos.com",
@@ -101,6 +100,7 @@ EXCLUSION_REASONS = frozenset(
 _BAD_PERCENT_ESCAPE_RE = re.compile(r"%(?![0-9a-fA-F]{2})")
 _DNS_LABEL_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 _LOCAL_SUFFIXES = (".home", ".internal", ".lan", ".local", ".localhost")
+_IPV4_EMBEDDED_NETWORKS = tuple(ipaddress.IPv6Network(prefix) for prefix in ("::/96", "64:ff9b::/96", "::ffff:0:0:0/96"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,8 +121,23 @@ def normalize_hashtag(value: object) -> tuple[NormalizedHashtag | None, str | No
     Facet values must be one complete token. Text extraction applies the same
     token grammar at ``#`` boundaries before calling this function.
     """
-    if not isinstance(value, str):
+    tag = _normalized_hashtag(value)
+    if tag is None:
         return None, "malformed_tag"
+    if tag.canonical in FILTERED_TAGS:
+        return None, "filtered_tag"
+    return tag, None
+
+
+def canonical_hashtag_candidate(value: object) -> str | None:
+    """Return a valid candidate's canonical key before public filtering."""
+    tag = _normalized_hashtag(value)
+    return None if tag is None else tag.canonical
+
+
+def _normalized_hashtag(value: object) -> NormalizedHashtag | None:
+    if not isinstance(value, str):
+        return None
     display = unicodedata.normalize("NFKC", value).strip()
     parts = display.split("-")
     if (
@@ -130,18 +145,16 @@ def normalize_hashtag(value: object) -> tuple[NormalizedHashtag | None, str | No
         or len(display) > MAX_TAG_LENGTH
         or any(not part or any(not _is_tag_word_character(ch) for ch in part) for part in parts)
     ):
-        return None, "malformed_tag"
+        return None
     if not any(ch.isalnum() for ch in display):
-        return None, "malformed_tag"
+        return None
     # casefold() can create a sequence that is no longer normalized (for
     # example, sharp-s next to a combining mark). Normalize again so a
     # canonical tag is idempotent when it crosses the checkpoint boundary.
     canonical = unicodedata.normalize("NFKC", display.casefold())
     if len(canonical) > MAX_TAG_LENGTH:
-        return None, "malformed_tag"
-    if canonical in FILTERED_TAGS:
-        return None, "filtered_tag"
-    return NormalizedHashtag(canonical=canonical, display=display), None
+        return None
+    return NormalizedHashtag(canonical=canonical, display=display)
 
 
 def hashtags_from_text(text: str) -> list[str]:
@@ -246,12 +259,16 @@ def _normalize_host(raw_host: str) -> str | None:
     except ValueError:
         address = None
     if address is not None:
-        return address.compressed if address.is_global else None
+        if not address.is_global:
+            return None
+        if isinstance(address, ipaddress.IPv6Address) and any(not embedded.is_global for embedded in _embedded_ipv4(address)):
+            return None
+        return address.compressed
 
     # Reject browser-dependent numeric host spellings (e.g. 2130706433 or
     # 0x7f000001) instead of risking an alternate spelling of a local address.
     numeric_labels = host.split(".")
-    if host.isdecimal() or host.startswith("0x") or all(label.isdecimal() or label.startswith("0x") for label in numeric_labels):
+    if all(label.isdecimal() or label.startswith("0x") for label in numeric_labels):
         return None
     if host == "localhost" or host.endswith(_LOCAL_SUFFIXES) or "." not in host:
         return None
@@ -259,6 +276,20 @@ def _normalize_host(raw_host: str) -> str | None:
     if any(_DNS_LABEL_RE.fullmatch(label) is None for label in labels):
         return None
     return host
+
+
+def _embedded_ipv4(address: ipaddress.IPv6Address) -> set[ipaddress.IPv4Address]:
+    """Return IPv4 endpoints carried by standard IPv6 transition formats."""
+    embedded: set[ipaddress.IPv4Address] = set()
+    if address.ipv4_mapped is not None:
+        embedded.add(address.ipv4_mapped)
+    if address.sixtofour is not None:
+        embedded.add(address.sixtofour)
+    if address.teredo is not None:
+        embedded.update(address.teredo)
+    if any(address in network for network in _IPV4_EMBEDDED_NETWORKS):
+        embedded.add(ipaddress.IPv4Address(int(address) & 0xFFFFFFFF))
+    return embedded
 
 
 def _is_tag_word_character(value: str) -> bool:

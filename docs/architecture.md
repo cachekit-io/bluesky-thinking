@@ -54,7 +54,7 @@ Aggregate values use the additive
 [`skyline-normalization-v1` public signal contract](signal-policy.md). Every
 operation carries `normalization_version`, `total_events_considered`,
 `total_signal_candidates`, and `excluded_count_by_reason`. Hashtag rows retain
-canonical `tag` and add `canonical`, majority-spelling `display`, and `count`;
+canonical `tag` and add majority-spelling `display` plus `count`;
 `trending_links` includes both canonical `links` and normalized
 `domains`. Operation names, arguments, keys, TTLs, and interop encoding are
 unchanged.

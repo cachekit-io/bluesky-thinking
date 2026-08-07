@@ -24,6 +24,7 @@ MAX_BACKOFF = 60.0
 # and (b) as a resume cursor, skip every real event on the next reconnect.
 # Anything beyond this skew over wall-clock is dropped whole.
 MAX_FUTURE_SKEW_SECONDS = 300.0
+MISSING_SOURCE_LOG_INTERVAL = 1_000
 
 
 def ingest_raw(
@@ -56,9 +57,9 @@ def ingest_raw(
     if feats is not None:
         source_id = event.get("did")
         if not isinstance(source_id, str) or not source_id:
-            logger.warning("Jetstream post missing source DID; trend signals excluded")
-            if health is not None:
-                health.missing_source()
+            missing_count = health.missing_source() if health is not None else 1
+            if missing_count == 1 or missing_count % MISSING_SOURCE_LOG_INTERVAL == 0:
+                logger.warning("Jetstream posts missing source DID; trend signals excluded (count=%d)", missing_count)
         # The raw DID crosses only this call boundary. WindowStore immediately
         # folds it into a process-keyed contribution digest and never stores or
         # logs the identifier itself.

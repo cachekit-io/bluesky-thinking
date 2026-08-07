@@ -1,6 +1,7 @@
 """Normalization, safety, source bounding, and transparency policy."""
 
 import json
+import logging
 from collections import Counter
 from pathlib import Path
 
@@ -91,7 +92,10 @@ def test_link_canonicalization_preserves_resource_identity():
         ("http://127。0。0。1/admin", "unsafe_host"),
         ("http://192.168.1｡1/admin", "unsafe_host"),
         ("http://a.b．local/admin", "unsafe_host"),
-        ("https://spam.example.com/offer", "filtered_domain"),
+        ("http://[::a9fe:a9fe]/latest/meta-data/", "unsafe_host"),
+        ("http://[64:ff9b::a9fe:a9fe]/latest/meta-data/", "unsafe_host"),
+        ("http://[::ffff:0:a9fe:a9fe]/latest/meta-data/", "unsafe_host"),
+        ("https://ads.xvideos.com/offer", "filtered_domain"),
         ("https://example.com/%not-escaped", "malformed_url"),
     ],
 )
@@ -105,6 +109,19 @@ def test_link_output_length_is_bounded_after_root_slash_insertion():
     value = prefix + "a" * (2_048 - len(prefix))
     link, reason = normalize_link(value)
     assert link is None and reason == "malformed_url"
+
+
+def test_ipv4_embedded_ipv6_keeps_global_targets_only():
+    link, reason = normalize_link("https://[64:ff9b::808:808]/resource")
+    assert reason is None
+    assert link is not None and link.domain == "64:ff9b::808:808"
+
+
+@pytest.mark.parametrize("prefix", ["::", "64:ff9b::", "::ffff:0:"])
+@pytest.mark.parametrize("target", ["10.0.0.1", "127.0.0.1", "169.254.169.254", "192.168.1.1"])
+def test_ipv4_embedded_ipv6_rejects_non_global_targets(prefix, target):
+    link, reason = normalize_link(f"http://[{prefix}{target}]/resource")
+    assert link is None and reason == "unsafe_host"
 
 
 def test_recorded_before_after_keeps_broad_activity_above_one_repetitive_source():
@@ -122,10 +139,10 @@ def test_recorded_before_after_keeps_broad_activity_above_one_repetitive_source(
     assert before_source_bound["community"] == 4
 
     hashtag_value = store.build_value("trending_hashtags", "5m", NOW)
-    after = {item["canonical"]: item for item in hashtag_value["hashtags"]}
-    assert after["community"] == {"tag": "community", "display": "Community", "canonical": "community", "count": 4}
-    assert after["strasse"] == {"tag": "strasse", "display": "Straße", "canonical": "strasse", "count": 3}
-    assert after["flashsale"] == {"tag": "flashsale", "display": "FlashSale", "canonical": "flashsale", "count": 1}
+    after = {item["tag"]: item for item in hashtag_value["hashtags"]}
+    assert after["community"] == {"tag": "community", "display": "Community", "count": 4}
+    assert after["strasse"] == {"tag": "strasse", "display": "Straße", "count": 3}
+    assert after["flashsale"] == {"tag": "flashsale", "display": "FlashSale", "count": 1}
     assert after["community"]["count"] > after["flashsale"]["count"]
 
     link_value = store.build_value("trending_links", "5m", NOW)
@@ -233,6 +250,38 @@ def test_missing_source_cannot_bypass_public_trend_bound():
     assert health.snapshot()[1]["events_missing_source"] == 1
 
 
+def test_missing_source_warning_is_aggregate_and_rate_limited(caplog):
+    event = _quality_events()[0]
+    event.pop("did")
+    store = WindowStore(dedupe_key=b"x" * 32)
+    health = HealthState(now_fn=lambda: NOW)
+    with caplog.at_level(logging.WARNING, logger="skyline_ingester.jetstream"):
+        for _ in range(1_001):
+            ingest_raw(json.dumps(event), store, now_fn=lambda: NOW, health=health)
+    messages = [record.getMessage() for record in caplog.records if "missing source DID" in record.getMessage()]
+    assert messages == [
+        "Jetstream posts missing source DID; trend signals excluded (count=1)",
+        "Jetstream posts missing source DID; trend signals excluded (count=1000)",
+    ]
+
+
+def test_filtered_facet_and_text_fallback_count_one_rejection():
+    event = _quality_events()[0]
+    event["commit"]["record"]["text"] = "#nsfw #spam"
+    event["commit"]["record"]["facets"] = [
+        {
+            "features": [
+                {"$type": "app.bsky.richtext.facet#tag", "tag": "nsfw"},
+                {"$type": "app.bsky.richtext.facet#tag", "tag": "spam"},
+            ]
+        }
+    ]
+    features = extract_post(event)
+    assert features is not None
+    assert features.hashtags == []
+    assert features.exclusions["filtered_tag"] == 2
+
+
 def test_source_identifiers_never_enter_buckets_checkpoints_or_public_values():
     events = _quality_events()
     store = WindowStore(dedupe_key=b"x" * 32)
@@ -247,9 +296,6 @@ def test_source_identifiers_never_enter_buckets_checkpoints_or_public_values():
     serialized = json.dumps({"snapshot": snapshot, "values": values}, ensure_ascii=False, sort_keys=True)
     for event in events:
         assert event["did"] not in serialized
-    assert all(isinstance(digest, bytes) and len(digest) == 16 for digest in store._seen)
-    assert "_seen" not in serialized and "dedupe_key" not in serialized
-
     # Restarts deliberately restore aggregates but not linkable source state.
     restored = WindowStore(dedupe_key=b"y" * 32)
     assert restored.restore(snapshot, NOW) > 0

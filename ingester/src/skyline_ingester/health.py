@@ -58,8 +58,9 @@ class HealthState:
     def published(self) -> None:
         self.last_publish_at = self._now()
 
-    def missing_source(self) -> None:
+    def missing_source(self) -> int:
         self.events_missing_source += 1
+        return self.events_missing_source
 
     def snapshot(self) -> tuple[int, dict]:
         """(HTTP status, body) for /health — 503 whenever Jetstream is down."""

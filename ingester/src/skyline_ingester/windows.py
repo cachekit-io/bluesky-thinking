@@ -41,6 +41,7 @@ OPERATIONS = ("trending_hashtags", "trending_links", "lang_mix", "posts_per_minu
 
 SNAPSHOT_VERSION = 2
 SOURCE_DEDUPE_SECONDS = 5 * 60
+_EXPIRY_SWEEP_LIMIT = 4_096
 # Checkpoint truncation: keep the per-minute head of each counter so the
 # serialized snapshot stays small enough for one cache entry.
 _K_TAGS, _K_LINKS, _K_DOMAINS, _K_EMOJI, _K_LANGS = 20, 20, 20, 10, 15
@@ -116,8 +117,10 @@ class WindowStore:
                 sum(feats.exclusions.values()) + len(feats.hashtags) + len(feats.links) + len(feats.domains)
             )
             source_digest = self._source_digest(source_id)
+            ledger_now = time.monotonic()
+            self._expire_seen(ledger_now)
             for tag in feats.hashtags:
-                if self._accept_signal(source_digest, "tag", tag):
+                if self._accept_signal(source_digest, "tag", tag, ledger_now):
                     bucket.tags[tag] += 1
                     label = feats.hashtag_labels.get(tag, tag)
                     bucket.tag_labels.setdefault(tag, Counter())[label] += 1
@@ -125,13 +128,13 @@ class WindowStore:
                     reason = "missing_source_tag" if source_digest is None else "duplicate_source_tag"
                     bucket.excluded[reason] += 1
             for link in feats.links:
-                if self._accept_signal(source_digest, "url", link):
+                if self._accept_signal(source_digest, "url", link, ledger_now):
                     bucket.links[link] += 1
                 else:
                     reason = "missing_source_url" if source_digest is None else "duplicate_source_url"
                     bucket.excluded[reason] += 1
             for domain in feats.domains:
-                if self._accept_signal(source_digest, "domain", domain):
+                if self._accept_signal(source_digest, "domain", domain, ledger_now):
                     bucket.domains[domain] += 1
                 else:
                     reason = "missing_source_domain" if source_digest is None else "duplicate_source_domain"
@@ -154,7 +157,17 @@ class WindowStore:
             return None
         return hashlib.blake2b(encoded, key=self._dedupe_key, digest_size=16).digest()
 
-    def _accept_signal(self, source_digest: bytes | None, family: str, value: str) -> bool:
+    def _expire_seen(self, now: float) -> None:
+        """Bound expiry work so reconnect recovery cannot stall ingestion."""
+        swept = 0
+        while self._seen_expiry and self._seen_expiry[0][0] <= now and swept < _EXPIRY_SWEEP_LIMIT:
+            expiry, digest = heapq.heappop(self._seen_expiry)
+            seen_at = self._seen.get(digest)
+            if seen_at is not None and seen_at + SOURCE_DEDUPE_SECONDS == expiry:
+                del self._seen[digest]
+            swept += 1
+
+    def _accept_signal(self, source_digest: bytes | None, family: str, value: str, now: float) -> bool:
         """Accept one source/signal contribution per rolling five minutes.
 
         Caller holds self._lock. The digest is process-keyed, non-portable, and
@@ -163,16 +176,10 @@ class WindowStore:
         """
         if source_digest is None:
             return False
-        now = time.monotonic()
-        while self._seen_expiry and self._seen_expiry[0][0] <= now:
-            expiry, digest = heapq.heappop(self._seen_expiry)
-            seen_at = self._seen.get(digest)
-            if seen_at is not None and seen_at + SOURCE_DEDUPE_SECONDS == expiry:
-                del self._seen[digest]
         material = source_digest + b"\0" + family.encode("ascii") + b"\0" + value.encode("utf-8")
         digest = hashlib.blake2b(material, key=self._dedupe_key, digest_size=16).digest()
         seen_at = self._seen.get(digest)
-        if seen_at is not None:
+        if seen_at is not None and seen_at + SOURCE_DEDUPE_SECONDS > now:
             return False
         self._seen[digest] = now
         heapq.heappush(self._seen_expiry, (now + SOURCE_DEDUPE_SECONDS, digest))
@@ -274,7 +281,6 @@ class WindowStore:
                 {
                     "tag": tag,
                     "display": _display_label(m.tag_labels.get(tag), tag),
-                    "canonical": tag,
                     "count": count,
                 }
                 for tag, count in m.tags.most_common(top_n)

@@ -180,3 +180,30 @@ def test_restore_filters_poisoned_language_and_emoji_without_losing_totals():
     assert merged.excluded["checkpoint_invalid_lang"] == 1
     assert merged.excluded["checkpoint_invalid_emoji"] == 1
     assert merged.signal_candidates == 2
+
+
+def test_restore_filters_ipv4_embedded_ipv6_without_losing_minute():
+    good = int(NOW // 60)
+    unsafe_uri = "http://[64:ff9b::a9fe:a9fe]/latest/meta-data/"
+    unsafe_domain = "64:ff9b::a9fe:a9fe"
+    snap = _snapshot(
+        [
+            [
+                good,
+                {
+                    "n": 500,
+                    "langs": {"en": 500},
+                    "emoji": {"🔥": 2},
+                    "links": {unsafe_uri: 99},
+                    "domains": {unsafe_domain: 99},
+                },
+            ]
+        ]
+    )
+    store = WindowStore()
+    assert store.restore(snap, NOW) == 1
+    merged = store.merged("5m", NOW)
+    assert merged.n == 500 and merged.langs == {"en": 500} and merged.emoji == {"🔥": 2}
+    assert merged.links == {} and merged.domains == {}
+    assert merged.excluded["checkpoint_invalid_url"] == 1
+    assert merged.excluded["checkpoint_invalid_domain"] == 1

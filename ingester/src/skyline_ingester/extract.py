@@ -10,7 +10,7 @@ import re
 from collections import Counter
 from dataclasses import dataclass, field
 
-from skyline_ingester.policy import hashtags_from_text, normalize_hashtag, normalize_link
+from skyline_ingester.policy import canonical_hashtag_candidate, hashtags_from_text, normalize_hashtag, normalize_link
 
 POST_COLLECTION = "app.bsky.feed.post"
 MAX_TEXT_LENGTH = 4_096
@@ -168,15 +168,25 @@ def extract_post(event: dict) -> PostFeatures | None:
 
     hashtags: list[str] = []
     hashtag_labels: dict[str, str] = {}
-    for candidate in tag_candidates:
+    rejected_facet_tags: set[str] = set()
+
+    def add_hashtag(candidate: object, *, from_fallback: bool = False) -> None:
+        candidate_key = canonical_hashtag_candidate(candidate)
+        if from_fallback and candidate_key in rejected_facet_tags:
+            return
         tag, reason = normalize_hashtag(candidate)
         if tag is None:
             exclusions[reason or "malformed_tag"] += 1
+            if not from_fallback and candidate_key is not None:
+                rejected_facet_tags.add(candidate_key)
         elif tag.canonical in hashtag_labels:
             exclusions["duplicate_in_event_tag"] += 1
         else:
             hashtags.append(tag.canonical)
             hashtag_labels[tag.canonical] = tag.display
+
+    for candidate in tag_candidates:
+        add_hashtag(candidate)
 
     # A malformed facet must not suppress usable hashtags in the post body.
     # Fall back when no facet candidate survived normalization, just as clients
@@ -186,14 +196,7 @@ def extract_post(event: dict) -> PostFeatures | None:
         if len(text_candidates) > MAX_TAG_CANDIDATES:
             exclusions["candidate_limit_tag"] += len(text_candidates) - MAX_TAG_CANDIDATES
         for candidate in text_candidates[:MAX_TAG_CANDIDATES]:
-            tag, reason = normalize_hashtag(candidate)
-            if tag is None:
-                exclusions[reason or "malformed_tag"] += 1
-            elif tag.canonical in hashtag_labels:
-                exclusions["duplicate_in_event_tag"] += 1
-            else:
-                hashtags.append(tag.canonical)
-                hashtag_labels[tag.canonical] = tag.display
+            add_hashtag(candidate, from_fallback=True)
 
     links: list[str] = []
     domains: list[str] = []

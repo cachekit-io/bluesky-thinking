@@ -69,7 +69,7 @@ Values are interop/v1 plain MessagePack, top-level maps with string keys. All ca
 
 | Operation | Payload field |
 | :--- | :--- |
-| `trending_hashtags` | `hashtags`: `[{tag, canonical, display, count}]`, top 50; `tag` remains canonical and `display` preserves the most frequent spelling |
+| `trending_hashtags` | `hashtags`: `[{tag, display, count}]`, top 50; `tag` remains canonical and `display` preserves the most frequent spelling |
 | `trending_links` | `links`: `[{uri, count}]` and `domains`: `[{domain, count}]`, top 50 |
 | `lang_mix` | `langs`: `{lang: share}` (floats summing to ~1; top 25 + `other`) |
 | `posts_per_minute` | `ppm`: float |
@@ -123,6 +123,11 @@ stored or logged. The random key and opaque five-minute ledger are excluded from
 buckets, checkpoints, cache values, and history, and rotate on restart. Full
 canonicalization, safety, filter-list, tracking-parameter, and transparency
 semantics: [public signal policy](../docs/signal-policy.md).
+
+After a reconnect, a backlog delivered faster than real time shares the current
+process-time source bound and can under-count trend signals; volume,
+language, and emoji aggregates remain exact. Event timestamps never expire the
+privacy ledger because they are untrusted.
 
 ## Tests
 
