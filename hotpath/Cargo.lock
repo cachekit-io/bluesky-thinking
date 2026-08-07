@@ -125,9 +125,9 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "cachekit-core"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ee6235f73aefb0dc66b9cd0d333b9da928c8192e4234357a739fe756c2f8f23"
+checksum = "6aba1513135a7b92a124ad6983f7e80e5f5c78c4f9c74384079efa3fbf491eab"
 dependencies = [
  "byteorder",
  "bytes",
@@ -142,9 +142,9 @@ dependencies = [
 
 [[package]]
 name = "cachekit-rs"
-version = "0.5.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "602e017ad7eb735ba12665f217ef7c887b697fb6a6d392486c8e84e2c4865524"
+checksum = "7cf3f868e64c4120e4239b7855ae90c822ea39310e82f7fc54c2e8dbdd169436"
 dependencies = [
  "async-trait",
  "blake2",
@@ -158,6 +158,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.19",
+ "tokio",
  "url",
  "urlencoding",
  "uuid",
@@ -1173,7 +1174,6 @@ dependencies = [
  "hex",
  "serde",
  "serde_json",
- "urlencoding",
  "wasm-bindgen",
  "worker",
 ]
