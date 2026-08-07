@@ -8,13 +8,18 @@ main = "src/worker.ts"
 compatibility_date = "2026-07-01"
 # nodejs_compat: @cachekit-io/cachekit 0.1.3 transitively requires node
 # builtins (string_decoder via redis-parser) that esbuild can't resolve
-# for Workers without it.
+# for Workers without it. 0.1.5's workerd export pulls in no node builtins,
+# so drop this flag together with the [alias] below when Renovate PR #7 lands.
 compatibility_flags = ["nodejs_compat"]
 
 # @cachekit-io/cachekit 0.1.3 statically imports its NAPI core (.node
 # binaries — unbundleable and unrunnable on Workers). The edge never executes
-# that path (interop reads only); alias it to a throwing stub. 0.1.4 fixes
-# this properly with a WASM core but is uninstallable today (LAB-780).
+# that path (interop reads only); alias it to a throwing stub. FAILURE MODE:
+# add any code path that needs the native core (ByteStorage envelopes,
+# encryption) and the edge throws at RUNTIME, not build time. 0.1.5 fixes
+# this properly with a WASM core (LAB-831); the bump is Renovate PR #7 —
+# drop this alias and the stub when it lands. 0.1.4 is abandoned and
+# uninstallable; never target it.
 [alias]
 "@cachekit-io/cachekit-core-ts" = "./src/core-ts-stub.ts"
 

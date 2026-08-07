@@ -146,8 +146,9 @@ Round-trip verified end-to-end: `spike/roundtrip/roundtrip.py` (exists, runs aga
   API); the reqwest-based `CachekitIO` does not implement `Backend` on that target. **LAB-1079**:
   `WorkersCachekitIO` panics on every live wasm32 request (`SystemTime::now()` in its session
   headers) — the hot path substitutes a direct `worker::Fetch` GET until the SDK fix is published.
-- Workers builds: `--no-default-features --features workers,cachekitio,encryption,macros`
-  (`l1`/moka and `redis`/fred are native-only).
+- Workers builds: `--no-default-features --features workers,cachekitio`
+  (`l1`/moka and `redis`/fred are native-only; `encryption`/`macros` were dropped in `dcb6da0` —
+  the hot path never used them, see `hotpath/Cargo.toml`).
 
 ## Open items (flagged, not blocking the spec)
 
