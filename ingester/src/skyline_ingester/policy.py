@@ -71,6 +71,8 @@ EXCLUSION_REASONS = frozenset(
     {
         "candidate_limit_tag",
         "candidate_limit_url",
+        "candidate_limit_facet",
+        "candidate_limit_feature",
         "checkpoint_invalid_count",
         "checkpoint_invalid_domain",
         "checkpoint_invalid_emoji",
@@ -99,8 +101,10 @@ EXCLUSION_REASONS = frozenset(
 
 _BAD_PERCENT_ESCAPE_RE = re.compile(r"%(?![0-9a-fA-F]{2})")
 _DNS_LABEL_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+_LOCAL_HOSTS = frozenset({"localhost", "localtest.me", "lvh.me", "vcap.me"})
 _LOCAL_SUFFIXES = (".home", ".internal", ".lan", ".local", ".localhost")
 _IPV4_EMBEDDED_NETWORKS = tuple(ipaddress.IPv6Network(prefix) for prefix in ("::/96", "64:ff9b::/96", "::ffff:0:0:0/96"))
+_DISALLOWED_IP_NETWORKS = tuple(ipaddress.ip_network(prefix) for prefix in ("192.88.99.0/24", "5f00::/16", "64:ff9b:1::/48"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,16 +133,25 @@ def normalize_hashtag(value: object) -> tuple[NormalizedHashtag | None, str | No
     return tag, None
 
 
-def canonical_hashtag_candidate(value: object) -> str | None:
-    """Return a valid candidate's canonical key before public filtering."""
-    tag = _normalized_hashtag(value)
-    return None if tag is None else tag.canonical
+def hashtag_candidate_fingerprint(value: object) -> tuple[str, str] | None:
+    """Return an event-local key for deduplicating rejected facet/body tags."""
+    if not isinstance(value, str):
+        return None
+    display = unicodedata.normalize("NFKC", value).strip()
+    tag = _normalized_hashtag_display(display)
+    if tag is not None:
+        return "canonical", tag.canonical
+    return "malformed", display.casefold()
 
 
 def _normalized_hashtag(value: object) -> NormalizedHashtag | None:
     if not isinstance(value, str):
         return None
     display = unicodedata.normalize("NFKC", value).strip()
+    return _normalized_hashtag_display(display)
+
+
+def _normalized_hashtag_display(display: str) -> NormalizedHashtag | None:
     parts = display.split("-")
     if (
         not display
@@ -259,9 +272,11 @@ def _normalize_host(raw_host: str) -> str | None:
     except ValueError:
         address = None
     if address is not None:
-        if not address.is_global:
+        if not _is_public_address(address):
             return None
-        if isinstance(address, ipaddress.IPv6Address) and any(not embedded.is_global for embedded in _embedded_ipv4(address)):
+        if isinstance(address, ipaddress.IPv6Address) and any(
+            not _is_public_address(embedded) for embedded in _embedded_ipv4(address)
+        ):
             return None
         return address.compressed
 
@@ -270,12 +285,38 @@ def _normalize_host(raw_host: str) -> str | None:
     numeric_labels = host.split(".")
     if all(label.isdecimal() or label.startswith("0x") for label in numeric_labels):
         return None
-    if host == "localhost" or host.endswith(_LOCAL_SUFFIXES) or "." not in host:
+    if _domain_matches(host, _LOCAL_HOSTS) or host.endswith(_LOCAL_SUFFIXES) or "." not in host:
         return None
     labels = host.split(".")
     if any(_DNS_LABEL_RE.fullmatch(label) is None for label in labels):
         return None
+    if _contains_non_global_ipv4_alias(labels):
+        return None
     return host
+
+
+def _is_public_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Apply stable public-address rules across supported Python versions."""
+    return (
+        address.is_global
+        and not address.is_multicast
+        and not any(address.version == network.version and address in network for network in _DISALLOWED_IP_NETWORKS)
+    )
+
+
+def _contains_non_global_ipv4_alias(labels: list[str]) -> bool:
+    """Catch common wildcard-DNS spellings without resolving untrusted hosts."""
+    candidates = [labels[index : index + 4] for index in range(max(0, len(labels) - 3))]
+    candidates.extend(label.split("-") for label in labels)
+    for parts in candidates:
+        if len(parts) != 4 or any(not part.isdecimal() for part in parts):
+            continue
+        octets = [int(part, 10) for part in parts]
+        if any(octet > 255 for octet in octets):
+            continue
+        if not _is_public_address(ipaddress.IPv4Address(bytes(octets))):
+            return True
+    return False
 
 
 def _embedded_ipv4(address: ipaddress.IPv6Address) -> set[ipaddress.IPv4Address]:

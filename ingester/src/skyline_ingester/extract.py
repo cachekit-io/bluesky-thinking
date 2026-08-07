@@ -10,7 +10,7 @@ import re
 from collections import Counter
 from dataclasses import dataclass, field
 
-from skyline_ingester.policy import canonical_hashtag_candidate, hashtags_from_text, normalize_hashtag, normalize_link
+from skyline_ingester.policy import hashtag_candidate_fingerprint, hashtags_from_text, normalize_hashtag, normalize_link
 
 POST_COLLECTION = "app.bsky.feed.post"
 MAX_TEXT_LENGTH = 4_096
@@ -133,14 +133,18 @@ def extract_post(event: dict) -> PostFeatures | None:
     if not isinstance(facets, list):
         facets = []
     features_examined = 0
-    for facet in facets[:MAX_FACET_FEATURES]:
+    bounded_facets = facets[:MAX_FACET_FEATURES]
+    if len(facets) > len(bounded_facets):
+        exclusions["candidate_limit_facet"] += len(facets) - len(bounded_facets)
+    for facet in bounded_facets:
         if not isinstance(facet, dict):
             continue
         features = facet.get("features") or []
         if not isinstance(features, list):
             continue
-        for feature in features:
+        for feature_index, feature in enumerate(features):
             if features_examined >= MAX_FACET_FEATURES:
+                exclusions["candidate_limit_feature"] += len(features) - feature_index
                 break
             features_examined += 1
             if not isinstance(feature, dict):
@@ -168,14 +172,14 @@ def extract_post(event: dict) -> PostFeatures | None:
 
     hashtags: list[str] = []
     hashtag_labels: dict[str, str] = {}
-    rejected_facet_tags: set[str] = set()
+    rejected_facet_tags: set[tuple[str, str]] = set()
 
     def add_hashtag(candidate: object, *, from_fallback: bool = False) -> None:
-        candidate_key = canonical_hashtag_candidate(candidate)
-        if from_fallback and candidate_key in rejected_facet_tags:
-            return
         tag, reason = normalize_hashtag(candidate)
         if tag is None:
+            candidate_key = hashtag_candidate_fingerprint(candidate)
+            if from_fallback and candidate_key in rejected_facet_tags:
+                return
             exclusions[reason or "malformed_tag"] += 1
             if not from_fallback and candidate_key is not None:
                 rejected_facet_tags.add(candidate_key)

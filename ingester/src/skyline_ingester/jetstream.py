@@ -56,8 +56,8 @@ def ingest_raw(
     feats = extract_post(event)
     if feats is not None:
         source_id = event.get("did")
-        if not isinstance(source_id, str) or not source_id:
-            missing_count = health.missing_source() if health is not None else 1
+        if (not isinstance(source_id, str) or not source_id) and health is not None:
+            missing_count = health.missing_source()
             if missing_count == 1 or missing_count % MISSING_SOURCE_LOG_INTERVAL == 0:
                 logger.warning("Jetstream posts missing source DID; trend signals excluded (count=%d)", missing_count)
         # The raw DID crosses only this call boundary. WindowStore immediately

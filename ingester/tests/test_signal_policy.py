@@ -95,6 +95,18 @@ def test_link_canonicalization_preserves_resource_identity():
         ("http://[::a9fe:a9fe]/latest/meta-data/", "unsafe_host"),
         ("http://[64:ff9b::a9fe:a9fe]/latest/meta-data/", "unsafe_host"),
         ("http://[::ffff:0:a9fe:a9fe]/latest/meta-data/", "unsafe_host"),
+        ("http://169.254.169.254.sslip.io/latest/meta-data/", "unsafe_host"),
+        ("http://169-254-169-254.sslip.io/latest/meta-data/", "unsafe_host"),
+        ("http://127.0.0.1.nip.io/admin", "unsafe_host"),
+        ("http://192.168.1.1.traefik.me/admin", "unsafe_host"),
+        ("http://lvh.me/admin", "unsafe_host"),
+        ("http://localtest.me/admin", "unsafe_host"),
+        ("http://vcap.me/admin", "unsafe_host"),
+        ("http://224.0.0.1/multicast", "unsafe_host"),
+        ("http://192.88.99.1/relay", "unsafe_host"),
+        ("http://[ff02::1]/multicast", "unsafe_host"),
+        ("http://[5f00::1]/segment", "unsafe_host"),
+        ("http://[64:ff9b:1::808:808]/resource", "unsafe_host"),
         ("https://ads.xvideos.com/offer", "filtered_domain"),
         ("https://example.com/%not-escaped", "malformed_url"),
     ],
@@ -115,6 +127,10 @@ def test_ipv4_embedded_ipv6_keeps_global_targets_only():
     link, reason = normalize_link("https://[64:ff9b::808:808]/resource")
     assert reason is None
     assert link is not None and link.domain == "64:ff9b::808:808"
+
+    alias, reason = normalize_link("https://8.8.8.8.sslip.io/resource")
+    assert reason is None
+    assert alias is not None and alias.domain == "8.8.8.8.sslip.io"
 
 
 @pytest.mark.parametrize("prefix", ["::", "64:ff9b::", "::ffff:0:"])
@@ -143,8 +159,6 @@ def test_recorded_before_after_keeps_broad_activity_above_one_repetitive_source(
     assert after["community"] == {"tag": "community", "display": "Community", "count": 4}
     assert after["strasse"] == {"tag": "strasse", "display": "Straße", "count": 3}
     assert after["flashsale"] == {"tag": "flashsale", "display": "FlashSale", "count": 1}
-    assert after["community"]["count"] > after["flashsale"]["count"]
-
     link_value = store.build_value("trending_links", "5m", NOW)
     assert {"uri": "https://news.example.com/story?id=42", "count": 1} in link_value["links"]
     assert {"domain": "news.example.com", "count": 1} in link_value["domains"]
@@ -265,6 +279,15 @@ def test_missing_source_warning_is_aggregate_and_rate_limited(caplog):
     ]
 
 
+def test_missing_source_without_health_does_not_rearm_warning(caplog):
+    event = _quality_events()[0]
+    event.pop("did")
+    with caplog.at_level(logging.WARNING, logger="skyline_ingester.jetstream"):
+        for _ in range(10):
+            ingest_raw(json.dumps(event), WindowStore(), now_fn=lambda: NOW)
+    assert not [record for record in caplog.records if "missing source DID" in record.getMessage()]
+
+
 def test_filtered_facet_and_text_fallback_count_one_rejection():
     event = _quality_events()[0]
     event["commit"]["record"]["text"] = "#nsfw #spam"
@@ -280,6 +303,16 @@ def test_filtered_facet_and_text_fallback_count_one_rejection():
     assert features is not None
     assert features.hashtags == []
     assert features.exclusions["filtered_tag"] == 2
+
+
+def test_malformed_facet_and_text_fallback_count_one_rejection():
+    event = _quality_events()[0]
+    event["commit"]["record"]["text"] = "#___"
+    event["commit"]["record"]["facets"] = [{"features": [{"$type": "app.bsky.richtext.facet#tag", "tag": "___"}]}]
+    features = extract_post(event)
+    assert features is not None
+    assert features.hashtags == []
+    assert features.exclusions["malformed_tag"] == 1
 
 
 def test_source_identifiers_never_enter_buckets_checkpoints_or_public_values():

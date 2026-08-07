@@ -22,6 +22,7 @@ import threading
 import time
 from collections import Counter
 from dataclasses import dataclass, field
+from itertools import islice
 
 from skyline_ingester.extract import EMOJI_RE, PostFeatures, is_primary_language
 from skyline_ingester.policy import (
@@ -310,9 +311,6 @@ class WindowStore:
         return {
             "window": window,
             "generated_at": int(now),
-            "total_events_considered": m.n,
-            "total_signal_candidates": m.signal_candidates,
-            "excluded_count_by_reason": dict(sorted(m.excluded.items())),
             "normalization_version": NORMALIZATION_VERSION,
             "langs": {lang: {"avg": round(s / c, 4), "n": c} for lang, (s, c) in sorted(m.sent.items()) if c},
         }
@@ -392,8 +390,11 @@ class WindowStore:
         floor = now_min - self._max
         ceiling = now_min + 1  # a checkpoint can't legitimately hold future minutes
         restored = 0
+        bucket_limit = self._max + 1
+        if len(buckets) > bucket_limit:
+            logger.warning("checkpoint has %d buckets; considering only %d", len(buckets), bucket_limit)
         with self._lock:
-            for item in buckets:
+            for item in islice(buckets, bucket_limit):
                 try:
                     minute, d = item
                     if not isinstance(minute, int) or minute <= floor or minute > ceiling:
@@ -406,6 +407,7 @@ class WindowStore:
                         key_validator=EXCLUSION_REASONS.__contains__,
                         reject_reason="checkpoint_invalid_exclusion",
                         rejected=rejected,
+                        max_entries=len(EXCLUSION_REASONS),
                     )
                     b = Bucket(
                         n=_coerced_count(d.get("n", 0), rejected),
@@ -415,30 +417,35 @@ class WindowStore:
                             key_validator=_is_canonical_tag,
                             reject_reason="checkpoint_invalid_tag",
                             rejected=rejected,
+                            max_entries=_K_TAGS,
                         ),
                         links=_coerced_counter(
                             d.get("links"),
                             key_validator=_is_canonical_link,
                             reject_reason="checkpoint_invalid_url",
                             rejected=rejected,
+                            max_entries=_K_LINKS,
                         ),
                         domains=_coerced_counter(
                             d.get("domains"),
                             key_validator=_is_canonical_domain,
                             reject_reason="checkpoint_invalid_domain",
                             rejected=rejected,
+                            max_entries=_K_DOMAINS,
                         ),
                         langs=_coerced_counter(
                             d.get("langs"),
                             key_validator=is_primary_language,
                             reject_reason="checkpoint_invalid_lang",
                             rejected=rejected,
+                            max_entries=_K_LANGS,
                         ),
                         emoji=_coerced_counter(
                             d.get("emoji"),
                             key_validator=lambda value: EMOJI_RE.fullmatch(value) is not None,
                             reject_reason="checkpoint_invalid_emoji",
                             rejected=rejected,
+                            max_entries=_K_EMOJI,
                         ),
                         tag_labels=_coerced_tag_labels(d.get("tag_labels"), rejected),
                         excluded=excluded,
@@ -466,7 +473,7 @@ def _coerced_count(value, rejected: Counter[str]) -> int:
     return value
 
 
-def _coerced_counter(data, *, key_validator, reject_reason: str, rejected: Counter[str]) -> Counter:
+def _coerced_counter(data, *, key_validator, reject_reason: str, rejected: Counter[str], max_entries: int) -> Counter:
     """Restore safe entries and account for each rejected entry independently."""
     output = Counter()
     if data is None:
@@ -474,7 +481,9 @@ def _coerced_counter(data, *, key_validator, reject_reason: str, rejected: Count
     if not isinstance(data, dict):
         rejected[reject_reason] += 1
         return output
-    for raw_key, value in data.items():
+    if len(data) > max_entries:
+        rejected[reject_reason] += len(data) - max_entries
+    for raw_key, value in islice(data.items(), max_entries):
         if not isinstance(raw_key, str) or not key_validator(raw_key):
             rejected[reject_reason] += 1
             continue
@@ -493,7 +502,9 @@ def _coerced_tag_labels(data, rejected: Counter[str]) -> dict[str, Counter]:
     if not isinstance(data, dict):
         rejected["checkpoint_invalid_label"] += 1
         return output
-    for canonical, labels in data.items():
+    if len(data) > _K_TAGS:
+        rejected["checkpoint_invalid_label"] += len(data) - _K_TAGS
+    for canonical, labels in islice(data.items(), _K_TAGS):
         if not isinstance(canonical, str) or not _is_canonical_tag(canonical):
             rejected["checkpoint_invalid_label"] += 1
             continue
@@ -507,6 +518,7 @@ def _coerced_tag_labels(data, rejected: Counter[str]) -> dict[str, Counter]:
             key_validator=valid_display,
             reject_reason="checkpoint_invalid_label",
             rejected=rejected,
+            max_entries=3,
         )
         output[canonical] = counter
     return output

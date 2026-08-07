@@ -70,6 +70,11 @@ def test_restore_ignores_legacy_sent():
     assert store.sentiment_value("1h", NOW)["langs"] == {}
 
 
+def test_secure_sentiment_value_omits_public_checkpoint_derived_fields(store):
+    value = store.sentiment_value("1h", NOW)
+    assert set(value) == {"window", "generated_at", "normalization_version", "langs"}
+
+
 def test_restore_checkpoint_never_crashes_startup(publisher, backend, monkeypatch):
     # The boot-loop guard end-to-end: nothing a poisoned checkpoint triggers inside
     # restore() may propagate through asyncio.run and crash startup — the bad
@@ -182,10 +187,12 @@ def test_restore_filters_poisoned_language_and_emoji_without_losing_totals():
     assert merged.signal_candidates == 2
 
 
-def test_restore_filters_ipv4_embedded_ipv6_without_losing_minute():
+def test_restore_filters_unsafe_aliases_without_losing_minute():
     good = int(NOW // 60)
     unsafe_uri = "http://[64:ff9b::a9fe:a9fe]/latest/meta-data/"
     unsafe_domain = "64:ff9b::a9fe:a9fe"
+    unsafe_alias_uri = "http://169.254.169.254.sslip.io/latest/meta-data/"
+    unsafe_alias_domain = "169.254.169.254.sslip.io"
     snap = _snapshot(
         [
             [
@@ -194,8 +201,8 @@ def test_restore_filters_ipv4_embedded_ipv6_without_losing_minute():
                     "n": 500,
                     "langs": {"en": 500},
                     "emoji": {"🔥": 2},
-                    "links": {unsafe_uri: 99},
-                    "domains": {unsafe_domain: 99},
+                    "links": {unsafe_uri: 99, unsafe_alias_uri: 98},
+                    "domains": {unsafe_domain: 99, unsafe_alias_domain: 98},
                 },
             ]
         ]
@@ -205,5 +212,16 @@ def test_restore_filters_ipv4_embedded_ipv6_without_losing_minute():
     merged = store.merged("5m", NOW)
     assert merged.n == 500 and merged.langs == {"en": 500} and merged.emoji == {"🔥": 2}
     assert merged.links == {} and merged.domains == {}
-    assert merged.excluded["checkpoint_invalid_url"] == 1
-    assert merged.excluded["checkpoint_invalid_domain"] == 1
+    assert merged.excluded["checkpoint_invalid_url"] == 2
+    assert merged.excluded["checkpoint_invalid_domain"] == 2
+
+
+def test_restore_caps_untrusted_bucket_and_counter_cardinality():
+    good = int(NOW // 60)
+    tags = {f"tag{index}": index + 1 for index in range(100)}
+    store = WindowStore(max_minutes=2)
+    snap = _snapshot([[good, {"n": 1, "tags": tags}]] * 10)
+    assert store.restore(snap, NOW) == 3
+    merged = store.merged("5m", NOW)
+    assert len(merged.tags) == 20
+    assert merged.excluded["checkpoint_invalid_tag"] == 80

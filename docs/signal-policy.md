@@ -32,9 +32,11 @@ the selected window, with a lexical tie-break. Display case is therefore
 preserved without changing the meaning of `tag` or splitting the count.
 
 Work per post is bounded before normalization: at most 4,096 text characters,
-64 facet features, 32 hashtag candidates, and 16 link candidates are examined.
-If supplied tag facets produce no usable tag, the same bounded text fallback is
-still applied.
+64 facets, 64 total facet features, 32 hashtag candidates, and 16 link candidates
+are examined. Containers beyond those work limits are reported as
+`candidate_limit_facet` or `candidate_limit_feature` rather than disappearing
+silently. If supplied tag facets produce no usable tag, the same bounded text
+fallback is still applied.
 
 The following canonical tags are explicitly excluded:
 `adult`, `follow4follow`, `followforfollow`, `nsfw`, `porn`, `porno`,
@@ -46,8 +48,9 @@ Only syntactically valid `http` and `https` URLs are candidates. Canonical URLs:
 
 - lowercase and IDNA-encode the host before every host-safety check;
 - canonicalize global IP literals and reject non-global addresses, including
-  Unicode-dot spellings that become IP literals after IDNA and private IPv4
-  targets embedded in IPv6 transition formats;
+  Unicode-dot spellings that become IP literals after IDNA, multicast and
+  deprecated transition ranges, private IPv4 targets embedded in IPv6, and
+  dotted or dashed wildcard-DNS labels that spell a non-global IPv4 target;
 - remove a trailing host dot and the default port (80 for HTTP, 443 for HTTPS);
 - preserve the path and meaningful query components byte-for-byte;
 - remove the fragment;
@@ -103,7 +106,13 @@ the bound.
 ## Public-safety exclusions
 
 URL checks are local and syntactic. The ingestion hot path never resolves DNS,
-opens a socket, follows a redirect, or fetches submitted content.
+opens a socket, follows a redirect, or fetches submitted content. Known loopback
+aliases and hostnames containing dotted or dashed non-global IPv4 spellings are
+rejected. An arbitrary hostname controlled by an attacker can still resolve to a
+private address: proving otherwise would require the DNS lookup this boundary
+deliberately forbids. Published links therefore remain untrusted destinations for
+viewer-side safe-link handling; this policy prevents the ingester itself from
+performing SSRF, but cannot promise that every clickable hostname resolves public.
 
 Skyline rejects:
 
@@ -111,7 +120,8 @@ Skyline rejects:
 - credentials in an authority;
 - control characters, whitespace, backslashes, bad percent escapes, invalid
   hosts/ports, browser-dependent numeric hosts, and overlong URLs;
-- localhost, single-label/local-network names, and non-global IP literals;
+- localhost, reviewed loopback aliases, single-label/local-network names,
+  non-global IP literals, and syntactic private-target wildcard-DNS names;
 - an exact host or subdomain of `pornhub.com`, `redtube.com`, `xhamster.com`,
   `xnxx.com`, or `xvideos.com`.
 
@@ -126,8 +136,8 @@ Every public aggregate includes:
 - `total_events_considered`: structurally valid post-create events in the
   selected window (also retained as `total_posts` for compatibility);
 - `total_signal_candidates`: accepted or excluded tag, URL, domain, and
-  restored-checkpoint decisions in the selected window — the denominator for
-  the exclusion counts;
+  restored-checkpoint decisions in the selected window, plus raw facets/features
+  omitted at an explicit work cap — the denominator for the exclusion counts;
 - `excluded_count_by_reason`: aggregate counts of candidate signal
   contributions omitted for normalization, safety, in-event duplication,
   missing source, or the rolling source bound.

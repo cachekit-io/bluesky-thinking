@@ -63,6 +63,23 @@ def test_invalid_facet_falls_back_to_text_and_candidate_work_is_bounded(fixture_
     assert features.exclusions["candidate_limit_tag"] > 0
 
 
+def test_facet_and_feature_overflow_is_visible(fixture_lines):
+    event = json.loads(fixture_lines[0])
+    record = event["commit"]["record"]
+    record["text"] = ""
+    record["facets"] = [{"features": [{"$type": "app.bsky.richtext.facet#tag", "tag": f"tag{index}"} for index in range(200)]}]
+    features = extract_post(event)
+    assert features is not None
+    assert len(features.hashtags) == 32
+    assert features.exclusions["candidate_limit_tag"] == 32
+    assert features.exclusions["candidate_limit_feature"] == 136
+
+    record["facets"] = [{"features": [{"$type": "app.bsky.richtext.facet#tag", "tag": f"tag{index}"}]} for index in range(70)]
+    features = extract_post(event)
+    assert features is not None
+    assert features.exclusions["candidate_limit_facet"] == 6
+
+
 def test_emoji_extraction_counts_zwj_sequence_once(fixture_lines):
     family = next(p for p in _posts(fixture_lines) if "👨‍👩‍👧" in p.emoji)
     assert family.emoji == ["👨‍👩‍👧", "❤️"]

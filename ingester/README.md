@@ -82,7 +82,10 @@ via `@cache.secure(master_key=…)` auto mode, `namespace="bluesky-thinking"`. I
 Python-only 7-segment auto key (`ns:bluesky-thinking:func:…`), and the backend stores ciphertext
 only (asserted in tests). Zero-knowledge holds end-to-end: the sentiment value is encrypted here and
 its plaintext source is never written to any other key (the checkpoint omits it — see below), so the
-backend never sees it in the clear. Ciphertext-only verification against the live SaaS is Stage 3.
+backend never sees it in the clear. Its secure value contains only the window, generation time,
+normalization version, and live per-language sentiment; public transparency counters derived from
+the operator-writable checkpoint are deliberately excluded. Ciphertext-only verification against
+the live SaaS is Stage 3.
 
 ### Checkpointing
 
@@ -102,7 +105,9 @@ The checkpoint is equally **untrusted on read-back** (a backend operator can poi
 validates every entry, dropping unsafe counter keys and values individually instead of erasing the
 rest of their minute or crashing startup,
 and ignores any legacy `sent` field entirely — restoring it would let a poisoned checkpoint choose
-the plaintext that the next secure publish encrypts.
+the plaintext that the next secure publish encrypts. Restore work is capped to the same per-counter
+top-K sizes written by `snapshot()` and at most one 24-hour window of minute buckets, so an
+oversized operator-poisoned map cannot turn startup into a memory or CPU boot loop.
 
 Checkpoint schema v2 is tied to `skyline-normalization-v1`. A checkpoint from
 an older normalization version is rejected instead of mixing incompatible
