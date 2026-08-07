@@ -155,7 +155,7 @@ Round-trip verified end-to-end: `spike/roundtrip/roundtrip.py` (exists, runs aga
    `op://cachekit/ck-dev-bluesky-default`; `spike/roundtrip/roundtrip.py` round-trip verified
    against `api.dev.cachekit.io` (2026-07-29), closing AC-1.
 2. ~~**Oracle account**~~ — resolved: Render account exists (ray, 2026-07-24); Oracle dropped.
-3. ~~**cachekit-rs crates.io publish**~~ — resolved by LAB-742: crates.io now carries up to
-   `0.8.0`; hotpath builds against `0.5.0`.
+3. ~~**cachekit-rs crates.io publish**~~ — resolved by LAB-742: cachekit-rs publishes to
+   crates.io (latest `0.7.0`); hotpath builds against `0.7.0`.
 4. **protocol/spec/interop-mode.md status header** — says "NOT yet implemented in any SDK"; all
    three SDKs ship it. One-line doc fix for the protocol repo owners.

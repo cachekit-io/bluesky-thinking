@@ -175,9 +175,13 @@ mod edge {
                 return Response::from_json(&json!({ "key": key, "found": false }))
                     .map(|r| r.with_status(404));
             }
-            // Echo the error class only — the SDK message can embed backend
-            // response body content, which is not ours to relay.
-            Err(e) => return json_error(502, &format!("CachekitIO error: {} backend error", e.kind)),
+            // Full error to Worker logs; the client gets the error class only —
+            // the SDK message can embed backend response body content, which is
+            // not ours to relay.
+            Err(e) => {
+                console_error!("CachekitIO get failed: {e}");
+                return json_error(502, &format!("CachekitIO {} error", e.kind));
+            }
         };
         let report = compute::verify_payload(&bytes, None);
         let value = cachekit::interop::deserialize::<serde_json::Value>(&bytes).ok();
