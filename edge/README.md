@@ -7,6 +7,23 @@ The edge is **read-only**: aggregates are computed and written by the Python
 ingester; a cache miss here is surfaced (404 + `X-Cache: MISS`), never recomputed
 or faked.
 
+## Dashboard
+
+The dashboard is a live Bluesky network pulse; CacheKit's cross-SDK namespace is
+the supporting implementation example, not the signal being measured. It renders
+the five documented ingester payloads explicitly, so metadata such as
+`generated_at` and `total_posts` is never mistaken for a ranking. Each card shows
+its selected 5m / 1h / 24h window, rank and proportional bar where applicable,
+and the posts/minute card also shows its sample size. The selection is retained in
+the `?window=` URL parameter.
+
+`generated_at` is Unix seconds and is rendered as both localized text and an
+accessible ISO timestamp. A payload older than **five minutes (300 seconds)** is
+called out as stale; this is the same freshness threshold used by
+[`stage4/verify.sh`](../stage4/verify.sh). Empty aggregates, cache misses,
+backend/decode failures, and temporarily unavailable hot-path verification have
+separate dashboard copy.
+
 ## API
 
 | Route                                  | Description                                                                                                                                                                                                          |
