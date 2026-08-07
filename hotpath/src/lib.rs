@@ -167,7 +167,13 @@ mod edge {
             .build()
         {
             Ok(backend) => backend,
-            Err(e) => return json_error(500, &format!("backend config error: {e}")),
+            // Full error to Worker logs; the client gets a fixed message — a
+            // config failure is an operator problem, and the SDK's wording
+            // (which could name the endpoint) is not part of our contract.
+            Err(e) => {
+                console_error!("WorkersCachekitIO build failed: {e}");
+                return json_error(500, "backend configuration error");
+            }
         };
         let bytes = match backend.get(&key).await {
             Ok(Some(bytes)) => bytes,
