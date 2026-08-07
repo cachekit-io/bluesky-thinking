@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 dependencies = [
-    "cachekit==0.15.0",
+    "cachekit==0.17.1",
     "websockets>=13",
     "pydantic-settings>=2.6",
 ]
