@@ -14,6 +14,7 @@ export default tseslint.config(
     files: ['public/**/*.js'],
     languageOptions: {
       globals: {
+        console: 'readonly',
         document: 'readonly',
         window: 'readonly',
         fetch: 'readonly',

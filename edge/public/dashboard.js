@@ -50,10 +50,11 @@ function freshnessLabel(seconds) {
   return `${minutes} minute${minutes === 1 ? '' : 's'}`;
 }
 
-/** @param {AggregatePayload[]} items @param {string} nameKey @param {string} valueKey @param {{ percent?: boolean, links?: boolean }} [options] */
+/** @param {unknown[]} items @param {string} nameKey @param {string} valueKey @param {{ percent?: boolean, links?: boolean }} [options] */
 function rankedRows(items, nameKey, valueKey, { percent = false, links = false } = {}) {
   const rows = items
     .flatMap((item) => {
+      if (!isAggregatePayload(item)) return [];
       const name = item[nameKey];
       const value = item[valueKey];
       return typeof name === 'string' && isNumber(value) ? [{ name, value }] : [];
@@ -299,7 +300,8 @@ function initDashboard() {
         },
         selectedWindow,
       );
-    } catch {
+    } catch (error) {
+      console.error(`skyline dashboard: ${operation} failed`, error);
       if (version !== refreshVersion) return;
       element.innerHTML = renderCardMarkup(
         title,
@@ -334,7 +336,8 @@ function initDashboard() {
             `<div class="tile"><div class="label">${label}</div><div class="value">${item}</div></div>`,
         )
         .join('');
-    } catch {
+    } catch (error) {
+      console.error('skyline dashboard: stats failed', error);
       if (version === refreshVersion)
         dashboardTiles.innerHTML =
           '<div class="tile"><div class="label">Stats unavailable</div><div class="value">—</div></div>';

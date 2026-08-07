@@ -66,6 +66,14 @@ describe('Skyline dashboard payload renderers', () => {
     expect(renderOperation('top_emoji', { emoji: '🔥' })).toContain('unexpected payload shape');
   });
 
+  it('skips null or non-object ranking elements instead of throwing into the network-error path', () => {
+    const markup = renderOperation('trending_hashtags', {
+      hashtags: [null, 'junk', 42, { tag: 'cachekit', count: 3 }],
+    });
+    expect(markup).toContain('cachekit');
+    expect(markup).not.toContain('junk');
+  });
+
   it('escapes labels and only makes http(s) links outbound links', () => {
     const markup = renderOperation('trending_links', {
       links: [
