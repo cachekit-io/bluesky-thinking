@@ -99,28 +99,33 @@ EXCLUSION_REASONS = frozenset(
 
 _BAD_PERCENT_ESCAPE_RE = re.compile(r"%(?![0-9a-fA-F]{2})")
 _DNS_LABEL_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
-# Provider/suffix sweep last verified against public docs and DNS on
-# 2026-08-07. Keep parked former providers conservatively denied.
+# Dated resolution/probe fixture: tests/fixtures/host_provider_sweep.json.
+# Last verified 2026-08-07; keep parked former providers conservatively denied.
 _LOCAL_HOSTS = frozenset(
     {
         "1u.ms",
         "backname.io",
+        "devlocal.dev",
         "ip.es.io",
         "l0pb.dev",
         "l0pb.me",
         "lacolhost.com",
+        "lcl.host",
         "lndo.site",
         "local.gd",
         "localho.st",
         "localhost",
         "localhost.direct",
         "localhst.co.uk",
+        "localtest.dev",
         "localtest.me",
         "lvh.me",
         "nip.io",
+        "rebind.network",
         "sslip.io",
         "traefik.me",
         "vcap.me",
+        "yoogle.com",
     }
 )
 _LOCAL_SUFFIXES = frozenset(
@@ -348,7 +353,7 @@ def _is_public_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -
 
 def _contains_non_global_ipv4_alias(labels: list[str]) -> bool:
     """Catch common wildcard-DNS spellings without resolving untrusted hosts."""
-    candidates = [labels[index : index + 4] for index in range(max(0, len(labels) - 3))]
+    candidates = [labels[index : index + 4] for index in range(len(labels) - 3)]
     candidates.extend(label.split("-") for label in labels)
     for parts in candidates:
         if len(parts) != 4 or any(not part.isdecimal() for part in parts):

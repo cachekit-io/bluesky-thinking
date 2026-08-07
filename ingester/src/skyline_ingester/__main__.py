@@ -77,9 +77,9 @@ async def checkpoint_loop(publisher: Publisher, interval_seconds: float) -> None
 
 
 async def run(settings: Settings) -> None:
-    store = WindowStore()
-    publisher = build_publisher(settings, store)
     health = HealthState()
+    store = WindowStore(on_ledger_eviction=health.ledger_eviction)
+    publisher = build_publisher(settings, store)
     await asyncio.to_thread(publisher.restore_checkpoint)
     await asyncio.gather(
         serve_health(health, settings.port),

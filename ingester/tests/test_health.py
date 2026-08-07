@@ -26,12 +26,14 @@ def test_snapshot_connected_reports_ages() -> None:
     state, clock = make_state(now=1000.0)
     state.jetstream_connected = True
     state.event()
+    state.ledger_eviction()
     state.last_publish_at = 1000.0
     clock[0] = 1012.5
     status, body = state.snapshot()
     assert status == 200
     assert body["status"] == "ok"
     assert body["events_seen"] == 1
+    assert body["source_ledger_evictions"] == 1
     assert body["last_event_age_seconds"] == 12.5
     assert body["last_publish_age_seconds"] == 12.5
     assert body["uptime_seconds"] == 12.5
@@ -49,6 +51,7 @@ def test_snapshot_never_leaks_payload_or_keys() -> None:
         "events_seen",
         "last_event_age_seconds",
         "last_publish_age_seconds",
+        "source_ledger_evictions",
         "uptime_seconds",
     }
 

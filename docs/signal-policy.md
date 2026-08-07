@@ -31,15 +31,17 @@ additive `display` field is the most frequent NFKC-normalized spelling seen in
 the selected window, with a lexical tie-break. Display case is therefore
 preserved without changing the meaning of `tag` or splitting the count.
 
-Work per post is bounded before normalization: at most 4,096 text characters
-and 64 declared facet features are examined, then at most 32 hashtag candidates
+Work per post is bounded before normalization: at most 4,096 raw text characters
+are NFKC-normalized and the normalized result is capped again at 4,096 characters;
+at most 64 declared facet features are examined, then at most 32 hashtag candidates
 and 16 link candidates are normalized. Other feature types and declarations
 beyond the 64-feature examination ceiling do not enter the signal denominator.
 Genuine tag/link declarations examined beyond their family cap are reported as
 `candidate_limit_tag` or `candidate_limit_url`. If supplied tag facets produce
 no usable tag, the same bounded text fallback is still applied. Repeated rejected
 spellings within one post count once per normalized token, whether they came from
-facets or text.
+facets or text. Live and restored emoji keys are limited to 64 code points;
+overlong ZWJ chains are omitted rather than becoming oversized public keys.
 
 The following canonical tags are explicitly excluded:
 `adult`, `follow4follow`, `followforfollow`, `nsfw`, `porn`, `porno`,
@@ -87,13 +89,15 @@ complete `(source, signal family, canonical value)` tuple. The key is random for
 each process. Only these opaque tuple digests and expiry timestamps live in the
 five-minute ledger.
 
-The ledger holds at most 100,000 live tuple digests. If a fast replay fills that
-ceiling inside five minutes, the oldest-expiring contribution is forgotten early;
-this can weaken the source bound temporarily, but keeps replay from exhausting
-memory. The key, digests, and raw DIDs are never put in minute buckets,
-checkpoints, CacheKit values, logs, history, or health output. `/health` exposes
-only an aggregate `events_missing_source` counter so a Jetstream schema change cannot
-silently empty all public trend rankings. The ledger is not restored:
+The ledger holds at most 1,024 live tuples per source and 100,000 globally. A
+source that fills its own ceiling evicts only its own oldest-expiring tuple; it
+cannot erase another source's bound. Global pressure from many sources can still
+evict the globally oldest tuple. Each early eviction increments the aggregate
+`source_ledger_evictions` health counter so this degradation is visible. The key,
+digests, and raw DIDs are never put in minute buckets, checkpoints, CacheKit values,
+logs, history, or health output. `/health` also exposes the aggregate
+`events_missing_source` counter so a Jetstream schema change cannot silently empty
+all public trend rankings. The ledger is not restored:
 after a process restart the key rotates and the five-minute bound starts fresh.
 That small, explicit continuity gap is preferable to creating a durable
 pseudonymous author index. A post without a usable source can still count toward
@@ -101,8 +105,9 @@ volume, language, emoji, and sentiment aggregates, but its hashtag/link/domain
 contributions are excluded so missing identity cannot bypass the public trend
 bound.
 
-Jetstream reconnects resume from the last cursor. If a backlog longer than five
-minutes is delivered faster than real time, its trend signals share the current
+Jetstream reconnects resume from the greatest validated cursor seen, so an
+out-of-order or hostile old timestamp cannot rewind the subscription. If a backlog
+longer than five minutes is delivered faster than real time, its trend signals share the current
 process-time bound and can be under-counted; event-volume and language/emoji
 aggregates remain exact. Event timestamps are deliberately not used to expire
 the ledger because they are untrusted and previously allowed a source to erase
@@ -112,8 +117,9 @@ the bound.
 
 URL checks are local and syntactic. The ingestion hot path never resolves DNS,
 opens a socket, follows a redirect, or fetches submitted content. Known
-wildcard-DNS and loopback providers are denied as a class, and hostnames containing
-dotted or dashed non-global IPv4 spellings are rejected as additional defence. An
+enumerated wildcard-DNS, rebinding, and loopback provider roots are denied, and
+hostnames containing dotted or dashed non-global IPv4 spellings are rejected as
+additional defence. An
 arbitrary hostname controlled by an attacker can still resolve to a
 private address: proving otherwise would require the DNS lookup this boundary
 deliberately forbids. Published links therefore remain untrusted destinations for
@@ -128,20 +134,22 @@ Skyline rejects:
   hosts/ports, browser-dependent numeric hosts, and overlong URLs;
 - localhost, single-label names, non-global IP literals, and syntactic
   private-target names;
-- an exact host or subdomain in the local-network suffix families `corp`, `home`,
-  `home.arpa`, `internal`, `intra`, `intranet`, `lan`, `local`, `localdomain`,
-  `localhost`, or `private`;
-- an exact host or subdomain of the reviewed wildcard-DNS/loopback providers
-  `1u.ms`, `backname.io`, `ip.es.io`, `l0pb.dev`, `l0pb.me`, `lacolhost.com`,
-  `lndo.site`, `local.gd`, `localho.st`, `localhost.direct`, `localhst.co.uk`,
-  `localtest.me`, `lvh.me`, `nip.io`, `sslip.io`, `traefik.me`, or `vcap.me`;
+- an exact host or subdomain of the enumerated local-network suffix roots `corp`,
+  `home`, `home.arpa`, `internal`, `intra`, `intranet`, `lan`, `local`,
+  `localdomain`, `localhost`, or `private`;
+- an exact host or subdomain of the enumerated wildcard-DNS/rebinding/loopback
+  provider roots `1u.ms`, `backname.io`, `devlocal.dev`, `ip.es.io`, `l0pb.dev`, `l0pb.me`,
+  `lacolhost.com`, `lcl.host`, `lndo.site`, `local.gd`, `localho.st`,
+  `localhost.direct`, `localhst.co.uk`, `localtest.dev`, `localtest.me`, `lvh.me`,
+  `nip.io`, `rebind.network`, `sslip.io`, `traefik.me`, `vcap.me`, or `yoogle.com`;
 - an exact host or subdomain of `pornhub.com`, `redtube.com`, `xhamster.com`,
   `xnxx.com`, or `xvideos.com`.
 
-The provider and suffix sets were re-swept against public provider documentation
-and DNS on 2026-08-07; parked former providers remain conservatively denied. This
-explicit filter is reviewable, but requires periodic re-verification. It is not a
-crawler, page classifier, or permanent blocklist of people.
+The enumerated provider and suffix roots are backed by the dated resolution/probe
+fixture `ingester/tests/fixtures/host_provider_sweep.json`, last re-verified on
+2026-08-07; parked former providers remain conservatively denied. The fixture and
+policy set must change together, and still require periodic re-verification. This
+is not a crawler, page classifier, or permanent blocklist of people.
 
 ## Transparency fields
 

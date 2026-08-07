@@ -7,6 +7,7 @@ only — never post text, an author DID, a record key, or a stable pseudonym.
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections import Counter
 from dataclasses import dataclass, field
 
@@ -17,6 +18,7 @@ MAX_TEXT_LENGTH = 4_096
 MAX_FACET_FEATURES = 64
 MAX_TAG_CANDIDATES = 32
 MAX_LINK_CANDIDATES = 16
+MAX_EMOJI_LENGTH = 64
 _PRIMARY_LANGUAGE_RE = re.compile(r"[a-z]{2,8}")
 
 # Common emoji blocks; a match is one emoji possibly extended by variation
@@ -124,7 +126,7 @@ def extract_post(event: dict) -> PostFeatures | None:
     text = record.get("text") or ""
     if not isinstance(text, str):
         text = ""
-    text = text[:MAX_TEXT_LENGTH]
+    text = unicodedata.normalize("NFKC", text[:MAX_TEXT_LENGTH])[:MAX_TEXT_LENGTH]
 
     tag_candidates: list[object] = []
     link_candidates: list[object] = []
@@ -133,6 +135,7 @@ def extract_post(event: dict) -> PostFeatures | None:
     if not isinstance(facets, list):
         facets = []
     features_examined = 0
+    malformed_nonstring_tag_seen = False
     for facet in facets:
         if features_examined >= MAX_FACET_FEATURES:
             break
@@ -149,8 +152,13 @@ def extract_post(event: dict) -> PostFeatures | None:
                 continue
             ftype = feature.get("$type")
             if ftype == "app.bsky.richtext.facet#tag":
-                if len(tag_candidates) < MAX_TAG_CANDIDATES:
-                    tag_candidates.append(feature.get("tag"))
+                tag_candidate = feature.get("tag")
+                if not isinstance(tag_candidate, str):
+                    if not malformed_nonstring_tag_seen:
+                        exclusions["malformed_tag"] += 1
+                        malformed_nonstring_tag_seen = True
+                elif len(tag_candidates) < MAX_TAG_CANDIDATES:
+                    tag_candidates.append(tag_candidate)
                 else:
                     exclusions["candidate_limit_tag"] += 1
             elif ftype == "app.bsky.richtext.facet#link":
@@ -236,7 +244,7 @@ def extract_post(event: dict) -> PostFeatures | None:
         lang=lang,
         hashtags=hashtags,
         links=links,
-        emoji=EMOJI_RE.findall(text),
+        emoji=[match for match in EMOJI_RE.findall(text) if len(match) <= MAX_EMOJI_LENGTH],
         sentiment=score_sentiment(text),
         domains=domains,
         hashtag_labels=hashtag_labels,

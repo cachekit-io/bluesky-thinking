@@ -45,7 +45,7 @@ key material:
 
 ```json
 {"status": "ok", "jetstream_connected": true, "events_seen": 12345,
- "events_missing_source": 0,
+ "events_missing_source": 0, "source_ledger_evictions": 0,
  "last_event_age_seconds": 0.4, "last_publish_age_seconds": 7.1, "uptime_seconds": 900.0}
 ```
 
@@ -106,10 +106,11 @@ validates every entry, dropping unsafe counter keys and values individually inst
 rest of their minute or crashing startup,
 and ignores any legacy `sent` field entirely — restoring it would let a poisoned checkpoint choose
 the plaintext that the next secure publish encrypts. Restore keeps the same per-counter top-K
-accepted entries written by `snapshot()`, examines at most 512 additional rejected raw entries
-per map, charges any unexamined remainder, and considers at most one 24-hour window of minute
-buckets. An oversized operator-poisoned map therefore cannot turn startup into a memory or CPU
-boot loop while a bounded invalid prefix still cannot displace valid history.
+accepted entries written by `snapshot()` and considers at most one 24-hour window of minute
+buckets. Each checkpoint map is scanned completely up to 1,024 entries; a larger map rejects its
+whole bucket instead of silently restoring a partial counter. An oversized operator-poisoned map
+therefore cannot displace valid history behind an invalid prefix or publish a healthy-looking
+partial minute.
 
 Checkpoint schema v2 is tied to `skyline-normalization-v1`. A checkpoint from
 an older normalization version is rejected instead of mixing incompatible
@@ -128,9 +129,11 @@ value at most once per rolling five minutes. The raw DID crosses one local call
 boundary, is immediately folded into a process-keyed tuple digest, and is never
 stored or logged. The random key and opaque five-minute ledger are excluded from
 buckets, checkpoints, cache values, and history, and rotate on restart. The
-ledger holds at most 100,000 tuples; a fast replay that fills it evicts the
-oldest-expiring tuple, weakening the bound temporarily instead of risking OOM.
-Full canonicalization, safety, filter-list, tracking-parameter, and transparency
+ledger holds at most 1,024 tuples per source and 100,000 globally. Per-source
+pressure evicts only that source's oldest tuple; global pressure from many sources
+can evict the globally oldest tuple. Every early eviction increments
+`source_ledger_evictions` on `/health`. Full canonicalization, safety,
+filter-list, tracking-parameter, and transparency
 semantics: [public signal policy](../docs/signal-policy.md).
 
 After a reconnect, a backlog delivered faster than real time shares the current

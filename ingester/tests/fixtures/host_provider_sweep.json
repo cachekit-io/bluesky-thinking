@@ -1,0 +1,228 @@
+{
+  "known_live_provider_roots": [
+    "1u.ms",
+    "backname.io",
+    "devlocal.dev",
+    "ip.es.io",
+    "l0pb.dev",
+    "l0pb.me",
+    "lacolhost.com",
+    "lcl.host",
+    "lndo.site",
+    "local.gd",
+    "localho.st",
+    "localhost.direct",
+    "localhst.co.uk",
+    "localtest.dev",
+    "localtest.me",
+    "lvh.me",
+    "nip.io",
+    "rebind.network",
+    "sslip.io",
+    "traefik.me",
+    "yoogle.com"
+  ],
+  "local_suffix_probes": [
+    "router.home.arpa",
+    "intranet.corp",
+    "host.intranet",
+    "box.private",
+    "srv.intra",
+    "srv.localdomain"
+  ],
+  "method": "manual public-provider documentation and DNS sweep; checked in so policy roots and probes change together",
+  "providers": [
+    {
+      "observed_answers": [
+        "127.0.0.1"
+      ],
+      "probe": "1u.ms",
+      "root": "1u.ms",
+      "status": "live"
+    },
+    {
+      "observed_answers": [
+        "::1"
+      ],
+      "probe": "0--1.backname.io",
+      "root": "backname.io",
+      "status": "live"
+    },
+    {
+      "observed_answers": [
+        "127.0.0.1",
+        "::1"
+      ],
+      "probe": "router.devlocal.dev",
+      "root": "devlocal.dev",
+      "status": "live"
+    },
+    {
+      "observed_answers": [
+        "169.254.169.254"
+      ],
+      "probe": "x-169-254-169-254.ip.es.io",
+      "root": "ip.es.io",
+      "status": "live"
+    },
+    {
+      "observed_answers": [
+        "::1"
+      ],
+      "probe": "test.l0pb.dev",
+      "root": "l0pb.dev",
+      "status": "live"
+    },
+    {
+      "observed_answers": [
+        "::1"
+      ],
+      "probe": "a.l0pb.me",
+      "root": "l0pb.me",
+      "status": "live"
+    },
+    {
+      "observed_answers": [
+        "127.0.0.1"
+      ],
+      "probe": "anything.deep.sub.lacolhost.com",
+      "root": "lacolhost.com",
+      "status": "live"
+    },
+    {
+      "observed_answers": [
+        "127.0.0.1",
+        "::1"
+      ],
+      "probe": "admin-panel.lcl.host",
+      "root": "lcl.host",
+      "status": "live"
+    },
+    {
+      "observed_answers": [
+        "127.0.0.1"
+      ],
+      "probe": "test.lndo.site",
+      "root": "lndo.site",
+      "status": "live"
+    },
+    {
+      "observed_answers": [
+        "127.0.0.1"
+      ],
+      "probe": "x.local.gd",
+      "root": "local.gd",
+      "status": "live"
+    },
+    {
+      "observed_answers": [
+        "127.0.0.1"
+      ],
+      "probe": "api.localho.st",
+      "root": "localho.st",
+      "status": "live"
+    },
+    {
+      "observed_answers": [
+        "127.0.0.1",
+        "::1"
+      ],
+      "probe": "localhost",
+      "root": "localhost",
+      "status": "special-use"
+    },
+    {
+      "observed_answers": [
+        "127.0.0.1",
+        "::1"
+      ],
+      "probe": "a.localhost.direct",
+      "root": "localhost.direct",
+      "status": "live"
+    },
+    {
+      "observed_answers": [
+        "127.0.0.1"
+      ],
+      "probe": "localhst.co.uk",
+      "root": "localhst.co.uk",
+      "status": "live"
+    },
+    {
+      "observed_answers": [
+        "127.0.0.1",
+        "::1"
+      ],
+      "probe": "a.localtest.dev",
+      "root": "localtest.dev",
+      "status": "live"
+    },
+    {
+      "observed_answers": [
+        "127.0.0.1"
+      ],
+      "probe": "localtest.me",
+      "root": "localtest.me",
+      "status": "live"
+    },
+    {
+      "observed_answers": [
+        "127.0.0.1"
+      ],
+      "probe": "lvh.me",
+      "root": "lvh.me",
+      "status": "live"
+    },
+    {
+      "observed_answers": [
+        "127.0.0.1"
+      ],
+      "probe": "127.0.0.1.nip.io",
+      "root": "nip.io",
+      "status": "live"
+    },
+    {
+      "observed_answers": [
+        "0.0.0.0",
+        "::"
+      ],
+      "probe": "a.rebind.network",
+      "root": "rebind.network",
+      "status": "live"
+    },
+    {
+      "observed_answers": [
+        "127.0.0.1"
+      ],
+      "probe": "127.0.0.1.sslip.io",
+      "root": "sslip.io",
+      "status": "live"
+    },
+    {
+      "observed_answers": [
+        "127.0.0.1"
+      ],
+      "probe": "127.0.0.1.traefik.me",
+      "root": "traefik.me",
+      "status": "live"
+    },
+    {
+      "observed_answers": [
+        "103.224.182.214"
+      ],
+      "probe": "vcap.me",
+      "root": "vcap.me",
+      "status": "parked-conservative"
+    },
+    {
+      "observed_answers": [
+        "0.0.0.0",
+        "::"
+      ],
+      "probe": "skyline-probe.yoogle.com",
+      "root": "yoogle.com",
+      "status": "live"
+    }
+  ],
+  "verified_on": "2026-08-07"
+}

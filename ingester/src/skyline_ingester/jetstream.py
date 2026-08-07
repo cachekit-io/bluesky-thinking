@@ -153,6 +153,11 @@ def ingest_raw(
     return time_us
 
 
+def _advanced_cursor(cursor: int | None, time_us: int) -> int:
+    """Advance monotonically even if an upstream frame rewinds its timestamp."""
+    return time_us if cursor is None else max(cursor, time_us)
+
+
 def subscribe_url(base: str, cursor: int | None = None) -> str:
     params = [("wantedCollections", POST_COLLECTION)]
     if cursor is not None:
@@ -181,7 +186,7 @@ async def consume(base_url: str, store: WindowStore, health: HealthState) -> Non
                         # Reset on real events, not on handshake: a server that
                         # accepts-then-closes must not defeat the backoff.
                         backoff = 1.0
-                        cursor = time_us
+                        cursor = _advanced_cursor(cursor, time_us)
                         health.event()
         except asyncio.CancelledError:
             raise

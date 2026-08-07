@@ -216,7 +216,7 @@ def test_restore_filters_unsafe_aliases_without_losing_minute():
     assert merged.excluded["checkpoint_invalid_domain"] == 2
 
 
-def test_restore_caps_untrusted_bucket_and_counter_cardinality(monkeypatch):
+def test_restore_caps_untrusted_bucket_and_counter_cardinality():
     good = int(NOW // 60)
     tags = {f"tag{index}": index + 1 for index in range(100)}
     store = WindowStore(max_minutes=2)
@@ -226,34 +226,34 @@ def test_restore_caps_untrusted_bucket_and_counter_cardinality(monkeypatch):
     assert len(merged.tags) == 20
     assert merged.excluded["checkpoint_invalid_tag"] == 80
 
-    invalid = {f"#invalid{index}": 1 for index in range(500)}
     real = {f"real{index}": index + 1 for index in range(20)}
-    store = WindowStore()
-    assert store.restore(_snapshot([[good, {"tags": {**invalid, **real}}]]), NOW) == 1
-    merged = store.merged("5m", NOW)
-    assert merged.tags == real
-    assert merged.excluded["checkpoint_invalid_tag"] == 500
+    for invalid_count in (500, 512, 513, 600, 1_004):
+        invalid = {f"#invalid{index}": 1 for index in range(invalid_count)}
+        store = WindowStore()
+        assert store.restore(_snapshot([[good, {"tags": {**invalid, **real}}]]), NOW) == 1
+        merged = store.merged("5m", NOW)
+        assert merged.tags == real
+        assert merged.excluded["checkpoint_invalid_tag"] == invalid_count
 
     invalid_labels = {f"invalid{index}": "not-a-map" for index in range(500)}
     real_labels = {f"real{index}": {f"Real{index}": index + 1} for index in range(20)}
     store = WindowStore()
     assert store.restore(_snapshot([[good, {"tag_labels": {**invalid_labels, **real_labels}}]]), NOW) == 1
     merged = store.merged("5m", NOW)
-    assert set(merged.tag_labels) == set(real_labels)
+    assert {canonical for canonical, _display in merged.tag_labels} == set(real_labels)
     assert merged.excluded["checkpoint_invalid_label"] == 500
 
-    calls = 0
+    oversized = {f"#invalid{index}": 1 for index in range(1_005)}
+    store = WindowStore()
+    assert store.restore(_snapshot([[good, {"n": 6_000, "tags": {**oversized, **real}}]]), NOW) == 0
+    assert store.merged("5m", NOW).n == 0
 
-    def reject_every_key(_value):
-        nonlocal calls
-        calls += 1
-        return False
 
-    with monkeypatch.context() as patch:
-        patch.setattr("skyline_ingester.windows._is_canonical_tag", reject_every_key)
-        store = WindowStore()
-        oversized = {f"invalid{index}": 1 for index in range(2_000)}
-        assert store.restore(_snapshot([[good, {"tags": oversized}]]), NOW) == 1
+def test_restore_rejects_overlong_emoji_keys():
+    good = int(NOW // 60)
+    overlong = "😀" + "‍😀" * 299
+    store = WindowStore()
+    assert store.restore(_snapshot([[good, {"emoji": {overlong: 30}}]]), NOW) == 1
     merged = store.merged("5m", NOW)
-    assert calls == 532
-    assert merged.excluded["checkpoint_invalid_tag"] == 2_000
+    assert merged.emoji == {}
+    assert merged.excluded["checkpoint_invalid_emoji"] == 1

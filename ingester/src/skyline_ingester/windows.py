@@ -21,10 +21,11 @@ import secrets
 import threading
 import time
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from itertools import islice
 
-from skyline_ingester.extract import EMOJI_RE, PostFeatures, is_primary_language
+from skyline_ingester.extract import EMOJI_RE, MAX_EMOJI_LENGTH, PostFeatures, is_primary_language
 from skyline_ingester.policy import (
     EXCLUSION_REASONS,
     NORMALIZATION_VERSION,
@@ -43,8 +44,9 @@ OPERATIONS = ("trending_hashtags", "trending_links", "lang_mix", "posts_per_minu
 SNAPSHOT_VERSION = 2
 SOURCE_DEDUPE_SECONDS = 5 * 60
 MAX_SOURCE_LEDGER_ENTRIES = 100_000
+MAX_SOURCE_LEDGER_ENTRIES_PER_SOURCE = 1_024
 _EXPIRY_SWEEP_LIMIT = 4_096
-_RESTORE_SCAN_SLACK = 512
+_MAX_CHECKPOINT_MAP_ENTRIES = 1_024
 # Checkpoint truncation: keep the per-minute head of each counter so the
 # serialized snapshot stays small enough for one cache entry.
 _K_TAGS, _K_LINKS, _K_DOMAINS, _K_EMOJI, _K_LANGS = 20, 20, 20, 10, 15
@@ -62,7 +64,7 @@ class Bucket:
     domains: Counter = field(default_factory=Counter)
     langs: Counter = field(default_factory=Counter)
     emoji: Counter = field(default_factory=Counter)
-    tag_labels: dict[str, Counter] = field(default_factory=dict)
+    tag_labels: Counter[tuple[str, str]] = field(default_factory=Counter)
     excluded: Counter = field(default_factory=Counter)
     sent: dict[str, list[float]] = field(default_factory=dict)  # lang -> [sum, count]
 
@@ -79,7 +81,7 @@ class Bucket:
             domains=self.domains.copy(),
             langs=self.langs.copy(),
             emoji=self.emoji.copy(),
-            tag_labels={tag: labels.copy() for tag, labels in self.tag_labels.items()},
+            tag_labels=self.tag_labels.copy(),
             excluded=self.excluded.copy(),
             sent={lang: acc.copy() for lang, acc in self.sent.items()},
         )
@@ -88,7 +90,13 @@ class Bucket:
 class WindowStore:
     """In-memory minute buckets covering at most the 24h window."""
 
-    def __init__(self, max_minutes: int = WINDOW_MINUTES["24h"], *, dedupe_key: bytes | None = None):
+    def __init__(
+        self,
+        max_minutes: int = WINDOW_MINUTES["24h"],
+        *,
+        dedupe_key: bytes | None = None,
+        on_ledger_eviction: Callable[[], None] | None = None,
+    ):
         self._max = max_minutes
         self._buckets: dict[int, Bucket] = {}
         self._memo: dict[tuple[str, int], Bucket] = {}
@@ -98,6 +106,9 @@ class WindowStore:
         self._dedupe_key = dedupe_key or secrets.token_bytes(32)
         self._seen: dict[bytes, float] = {}
         self._seen_expiry: list[tuple[float, bytes]] = []
+        self._seen_source: dict[bytes, bytes] = {}
+        self._seen_by_source: dict[bytes, dict[bytes, float]] = {}
+        self._on_ledger_eviction = on_ledger_eviction
         # Bumped by every add(); a merge only memoises its result if no add()
         # landed since it started, so a cleared memo can't be resurrected with
         # a pre-add() view for the rest of that second.
@@ -126,7 +137,7 @@ class WindowStore:
                 if self._accept_signal(source_digest, "tag", tag, ledger_now):
                     bucket.tags[tag] += 1
                     label = feats.hashtag_labels.get(tag, tag)
-                    bucket.tag_labels.setdefault(tag, Counter())[label] += 1
+                    bucket.tag_labels[(tag, label)] += 1
                 else:
                     reason = "missing_source_tag" if source_digest is None else "duplicate_source_tag"
                     bucket.excluded[reason] += 1
@@ -160,6 +171,18 @@ class WindowStore:
             return None
         return hashlib.blake2b(encoded, key=self._dedupe_key, digest_size=16).digest()
 
+    def _drop_seen(self, digest: bytes) -> bool:
+        """Remove one tuple digest from global and per-source ledgers."""
+        if self._seen.pop(digest, None) is None:
+            return False
+        source_digest = self._seen_source.pop(digest, None)
+        source_entries = self._seen_by_source.get(source_digest) if source_digest is not None else None
+        if source_entries is not None:
+            source_entries.pop(digest, None)
+            if not source_entries:
+                del self._seen_by_source[source_digest]
+        return True
+
     def _expire_seen(self, now: float) -> None:
         """Bound expiry work so reconnect recovery cannot stall ingestion."""
         swept = 0
@@ -167,23 +190,36 @@ class WindowStore:
             expiry, digest = heapq.heappop(self._seen_expiry)
             seen_at = self._seen.get(digest)
             if seen_at is not None and seen_at + SOURCE_DEDUPE_SECONDS == expiry:
-                del self._seen[digest]
+                self._drop_seen(digest)
             swept += 1
 
+    def _record_ledger_eviction(self) -> None:
+        if self._on_ledger_eviction is not None:
+            self._on_ledger_eviction()
+
     def _evict_oldest_seen(self) -> None:
-        """Evict one live ledger entry while bounding stale-heap cleanup."""
+        """Evict one live global entry while bounding stale-heap cleanup."""
         swept = 0
         while self._seen_expiry and swept < _EXPIRY_SWEEP_LIMIT:
             expiry, digest = heapq.heappop(self._seen_expiry)
             seen_at = self._seen.get(digest)
             if seen_at is not None and seen_at + SOURCE_DEDUPE_SECONDS == expiry:
-                del self._seen[digest]
+                self._drop_seen(digest)
+                self._record_ledger_eviction()
                 return
             swept += 1
         if self._seen:
             # Assignment order tracks accepted contribution time. This fallback
             # bounds work even if the heap contains an adversarial stale prefix.
-            del self._seen[next(iter(self._seen))]
+            self._drop_seen(next(iter(self._seen)))
+            self._record_ledger_eviction()
+
+    def _evict_oldest_for_source(self, source_digest: bytes) -> None:
+        """Evict one source's oldest tuple without weakening other sources."""
+        source_entries = self._seen_by_source.get(source_digest)
+        if source_entries:
+            self._drop_seen(next(iter(source_entries)))
+            self._record_ledger_eviction()
 
     def _accept_signal(self, source_digest: bytes | None, family: str, value: str, now: float) -> bool:
         """Accept one source/signal contribution per rolling five minutes.
@@ -201,10 +237,15 @@ class WindowStore:
             return False
         if seen_at is not None:
             # Reinsert at the end so dict order remains an oldest-first fallback.
-            del self._seen[digest]
+            self._drop_seen(digest)
+        source_entries = self._seen_by_source.get(source_digest)
+        if source_entries is not None and len(source_entries) >= MAX_SOURCE_LEDGER_ENTRIES_PER_SOURCE:
+            self._evict_oldest_for_source(source_digest)
         if len(self._seen) >= MAX_SOURCE_LEDGER_ENTRIES:
             self._evict_oldest_seen()
         self._seen[digest] = now
+        self._seen_source[digest] = source_digest
+        self._seen_by_source.setdefault(source_digest, {})[digest] = now
         heapq.heappush(self._seen_expiry, (now + SOURCE_DEDUPE_SECONDS, digest))
         return True
 
@@ -246,8 +287,7 @@ class WindowStore:
             out.langs.update(b.langs)
             out.emoji.update(b.emoji)
             out.excluded.update(b.excluded)
-            for tag, labels in b.tag_labels.items():
-                out.tag_labels.setdefault(tag, Counter()).update(labels)
+            out.tag_labels.update(b.tag_labels)
             for lang, (s, c) in b.sent.items():
                 acc = out.sent.setdefault(lang, [0.0, 0])
                 acc[0] += s
@@ -262,8 +302,8 @@ class WindowStore:
                 self._memo[key] = out
         return out
 
-    # 16 buckets/chunk keeps each lock hold ~1-2 ms even at firehose-dense
-    # buckets; the per-chunk lock overhead itself is microseconds.
+    # Copy in bounded chunks so one read never holds the add() lock across the
+    # whole retained window. Per-bucket cost still scales with live cardinality.
     _COPY_CHUNK = 16
 
     def _copy_range(self, lo: float = float("-inf"), hi: float = float("inf")) -> list[tuple[int, Bucket]]:
@@ -272,7 +312,7 @@ class WindowStore:
         Copy, don't reference: add() mutates hot buckets' Counters in place, and
         iterating a Counter that grows mid-merge raises "dictionary changed size
         during iteration" (the round-1 bug class). Chunking bounds add()'s worst
-        stall to one chunk's copy (~few ms) instead of a full-window copy; a bucket
+        stall to one bounded chunk's copy instead of a full-window copy; a bucket
         created or pruned between chunks simply lands in or out of this tick's view,
         which periodic analytics tolerates.
         """
@@ -300,10 +340,11 @@ class WindowStore:
             "normalization_version": NORMALIZATION_VERSION,
         }
         if operation == "trending_hashtags":
+            label_index = _tag_label_index(m.tag_labels)
             value["hashtags"] = [
                 {
                     "tag": tag,
-                    "display": _display_label(m.tag_labels.get(tag), tag),
+                    "display": _display_label(label_index.get(tag), tag),
                     "count": count,
                 }
                 for tag, count in m.tags.most_common(top_n)
@@ -340,8 +381,8 @@ class WindowStore:
     def snapshot(self, now: float) -> dict:
         """Truncated, msgpack-friendly dump of the buckets for checkpointing.
 
-        Per-bucket counters are cut to their top-K entries, so long-tail trend
-        and language counts are approximate after a restore; post and
+        Per-bucket counters are cut to their top-K entries, so long-tail trend,
+        language, and emoji counts are approximate after a restore; post and
         signal-candidate totals stay exact.
 
         Per-language sentiment (`sent`) is deliberately NOT persisted: it is the
@@ -362,26 +403,7 @@ class WindowStore:
             "v": SNAPSHOT_VERSION,
             "normalization_version": NORMALIZATION_VERSION,
             "saved_at": int(now),
-            "buckets": [
-                [
-                    minute,
-                    {
-                        "n": b.n,
-                        "signal_candidates": b.signal_candidates,
-                        "tags": dict(b.tags.most_common(_K_TAGS)),
-                        "links": dict(b.links.most_common(_K_LINKS)),
-                        "domains": dict(b.domains.most_common(_K_DOMAINS)),
-                        "langs": dict(b.langs.most_common(_K_LANGS)),
-                        "emoji": dict(b.emoji.most_common(_K_EMOJI)),
-                        "tag_labels": {
-                            tag: dict(b.tag_labels.get(tag, Counter()).most_common(3))
-                            for tag, _count in b.tags.most_common(_K_TAGS)
-                        },
-                        "excluded": dict(b.excluded),
-                    },
-                ]
-                for minute, b in copies
-            ],
+            "buckets": [[minute, _checkpoint_bucket(b)] for minute, b in copies],
         }
 
     def restore(self, snap: dict, now: float) -> int:
@@ -463,7 +485,7 @@ class WindowStore:
                         ),
                         emoji=_coerced_counter(
                             d.get("emoji"),
-                            key_validator=lambda value: EMOJI_RE.fullmatch(value) is not None,
+                            key_validator=lambda value: len(value) <= MAX_EMOJI_LENGTH and EMOJI_RE.fullmatch(value) is not None,
                             reject_reason="checkpoint_invalid_emoji",
                             rejected=rejected,
                             max_entries=_K_EMOJI,
@@ -483,6 +505,8 @@ class WindowStore:
             self._memo.clear()
             self._seen.clear()
             self._seen_expiry.clear()
+            self._seen_source.clear()
+            self._seen_by_source.clear()
             self._gen += 1
         return restored
 
@@ -502,9 +526,14 @@ def _coerced_counter(data, *, key_validator, reject_reason: str, rejected: Count
     if not isinstance(data, dict):
         rejected[reject_reason] += 1
         return output
+    if len(data) > _MAX_CHECKPOINT_MAP_ENTRIES:
+        raise ValueError(f"checkpoint map exceeds {_MAX_CHECKPOINT_MAP_ENTRIES} entries")
     for index, (raw_key, value) in enumerate(data.items()):
-        if index >= max_entries + _RESTORE_SCAN_SLACK or len(output) >= max_entries:
-            rejected[reject_reason] += len(data) - index
+        if len(output) >= max_entries:
+            rejected[reject_reason] = min(
+                rejected[reject_reason] + len(data) - index,
+                _MAX_CHECKPOINT_COUNT,
+            )
             break
         if not isinstance(raw_key, str) or not key_validator(raw_key):
             rejected[reject_reason] += 1
@@ -515,16 +544,22 @@ def _coerced_counter(data, *, key_validator, reject_reason: str, rejected: Count
     return output
 
 
-def _coerced_tag_labels(data, rejected: Counter[str]) -> dict[str, Counter]:
-    output: dict[str, Counter] = {}
+def _coerced_tag_labels(data, rejected: Counter[str]) -> Counter[tuple[str, str]]:
+    output: Counter[tuple[str, str]] = Counter()
+    accepted_tags = 0
     if data is None:
         return output
     if not isinstance(data, dict):
         rejected["checkpoint_invalid_label"] += 1
         return output
+    if len(data) > _MAX_CHECKPOINT_MAP_ENTRIES:
+        raise ValueError(f"checkpoint map exceeds {_MAX_CHECKPOINT_MAP_ENTRIES} entries")
     for index, (canonical, labels) in enumerate(data.items()):
-        if index >= _K_TAGS + _RESTORE_SCAN_SLACK or len(output) >= _K_TAGS:
-            rejected["checkpoint_invalid_label"] += len(data) - index
+        if accepted_tags >= _K_TAGS:
+            rejected["checkpoint_invalid_label"] = min(
+                rejected["checkpoint_invalid_label"] + len(data) - index,
+                _MAX_CHECKPOINT_COUNT,
+            )
             break
         if not isinstance(canonical, str) or not _is_canonical_tag(canonical):
             rejected["checkpoint_invalid_label"] += 1
@@ -542,8 +577,33 @@ def _coerced_tag_labels(data, rejected: Counter[str]) -> dict[str, Counter]:
             max_entries=3,
         )
         if counter:
-            output[canonical] = counter
+            output.update({(canonical, display): count for display, count in counter.items()})
+            accepted_tags += 1
     return output
+
+
+def _tag_label_index(labels: Counter[tuple[str, str]]) -> dict[str, Counter[str]]:
+    output: dict[str, Counter[str]] = {}
+    for (canonical, display), count in labels.items():
+        output.setdefault(canonical, Counter())[display] += count
+    return output
+
+
+def _checkpoint_bucket(bucket: Bucket) -> dict:
+    label_index = _tag_label_index(bucket.tag_labels)
+    return {
+        "n": bucket.n,
+        "signal_candidates": bucket.signal_candidates,
+        "tags": dict(bucket.tags.most_common(_K_TAGS)),
+        "links": dict(bucket.links.most_common(_K_LINKS)),
+        "domains": dict(bucket.domains.most_common(_K_DOMAINS)),
+        "langs": dict(bucket.langs.most_common(_K_LANGS)),
+        "emoji": dict(bucket.emoji.most_common(_K_EMOJI)),
+        "tag_labels": {
+            tag: dict(label_index.get(tag, Counter()).most_common(3)) for tag, _count in bucket.tags.most_common(_K_TAGS)
+        },
+        "excluded": dict(bucket.excluded),
+    }
 
 
 def _is_canonical_tag(value: str) -> bool:

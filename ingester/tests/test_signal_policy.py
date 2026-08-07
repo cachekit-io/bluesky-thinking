@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from skyline_ingester import policy as signal_policy
 from skyline_ingester.extract import PostFeatures, extract_post
 from skyline_ingester.health import HealthState
 from skyline_ingester.jetstream import ingest_raw
@@ -16,6 +17,7 @@ from skyline_ingester.windows import SOURCE_DEDUPE_SECONDS, WindowStore
 from .conftest import NOW
 
 QUALITY_FIXTURE = Path(__file__).parent / "fixtures" / "signal_quality_events.jsonl"
+HOST_SWEEP_FIXTURE = Path(__file__).parent / "fixtures" / "host_provider_sweep.json"
 
 
 def _quality_events() -> list[dict]:
@@ -145,6 +147,22 @@ def test_link_canonicalization_preserves_resource_identity():
 def test_dangerous_or_filtered_links_are_rejected(value, reason):
     link, actual = normalize_link(value)
     assert link is None and actual == reason
+
+
+def test_checked_in_provider_sweep_matches_host_policy():
+    sweep = json.loads(HOST_SWEEP_FIXTURE.read_text())
+    assert sweep["verified_on"] == "2026-08-07"
+    providers = sweep["providers"]
+    roots = {provider["root"] for provider in providers}
+    assert roots == signal_policy._LOCAL_HOSTS
+    assert set(sweep["known_live_provider_roots"]) < roots
+    for provider in providers:
+        assert provider["observed_answers"]
+        link, reason = normalize_link(f"http://{provider['probe']}/admin")
+        assert link is None and reason == "unsafe_host"
+    for probe in sweep["local_suffix_probes"]:
+        link, reason = normalize_link(f"http://{probe}/admin")
+        assert link is None and reason == "unsafe_host"
 
 
 def test_link_output_length_is_bounded_after_root_slash_insertion():

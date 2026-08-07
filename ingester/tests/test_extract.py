@@ -3,7 +3,7 @@
 import json
 
 from skyline_ingester.extract import extract_post, score_sentiment
-from skyline_ingester.jetstream import ingest_raw, subscribe_url
+from skyline_ingester.jetstream import _advanced_cursor, ingest_raw, subscribe_url
 from skyline_ingester.windows import WindowStore
 
 from .conftest import FIXTURE_TOTALS
@@ -88,7 +88,7 @@ def test_facet_and_feature_overflow_is_visible(fixture_lines):
     record["facets"] = [{"features": [{"$type": "app.bsky.richtext.facet#tag", "tag": None} for _ in range(10)]}]
     features = extract_post(event)
     assert features is not None
-    assert features.exclusions == {"malformed_tag": 10}
+    assert features.exclusions == {"malformed_tag": 1}
 
     record["facets"] = []
     record["embed"] = {"$type": "app.bsky.embed.external", "external": {"uri": ""}}
@@ -100,6 +100,25 @@ def test_facet_and_feature_overflow_is_visible(fixture_lines):
 def test_emoji_extraction_counts_zwj_sequence_once(fixture_lines):
     family = next(p for p in _posts(fixture_lines) if "👨‍👩‍👧" in p.emoji)
     assert family.emoji == ["👨‍👩‍👧", "❤️"]
+
+    event = json.loads(fixture_lines[0])
+    at_limit = "😀" + "‍😀" * 31
+    event["commit"]["record"]["text"] = at_limit
+    features = extract_post(event)
+    assert features is not None and features.emoji == [at_limit]
+
+    event["commit"]["record"]["text"] = "😀" + "‍😀" * 32
+    features = extract_post(event)
+    assert features is not None and features.emoji == []
+
+
+def test_text_nfkc_output_is_capped_before_feature_work(fixture_lines, monkeypatch):
+    captured = []
+    monkeypatch.setattr("skyline_ingester.extract.score_sentiment", lambda text: captured.append(text))
+    event = json.loads(fixture_lines[0])
+    event["commit"]["record"]["text"] = "ﷺ" * 4_096
+    assert extract_post(event) is not None
+    assert len(captured) == 1 and len(captured[0]) == 4_096
 
 
 def test_sentiment_signs():
@@ -166,6 +185,12 @@ def test_fixture_totals_match_windows(store):
 
     for window, total in FIXTURE_TOTALS.items():
         assert store.merged(window, NOW).n == total
+
+
+def test_resume_cursor_never_rewinds():
+    assert _advanced_cursor(None, 100) == 100
+    assert _advanced_cursor(100, 1) == 100
+    assert _advanced_cursor(100, 101) == 101
 
 
 def test_subscribe_url():

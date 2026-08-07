@@ -2,9 +2,14 @@
 
 import sys
 import threading
+from collections import Counter
 
 from skyline_ingester.extract import PostFeatures
-from skyline_ingester.windows import WindowStore
+from skyline_ingester.windows import (
+    MAX_SOURCE_LEDGER_ENTRIES,
+    MAX_SOURCE_LEDGER_ENTRIES_PER_SOURCE,
+    WindowStore,
+)
 
 from .conftest import FIXTURE_TOTALS, NOW
 
@@ -64,6 +69,14 @@ def test_expired_source_cleanup_is_bounded_per_event(monkeypatch):
     assert len(store._seen_expiry) == 904
 
 
+def test_tag_labels_use_one_flat_counter_per_bucket(store):
+    assert store._buckets
+    for bucket in store._buckets.values():
+        assert isinstance(bucket.tag_labels, Counter)
+        assert all(isinstance(key, tuple) and len(key) == 2 for key in bucket.tag_labels)
+        assert all(isinstance(count, int) for count in bucket.tag_labels.values())
+
+
 def test_source_ledger_evicts_oldest_at_hard_cap(monkeypatch):
     monkeypatch.setattr("skyline_ingester.windows.MAX_SOURCE_LEDGER_ENTRIES", 3)
     store = WindowStore(dedupe_key=b"x" * 32)
@@ -74,6 +87,27 @@ def test_source_ledger_evicts_oldest_at_hard_cap(monkeypatch):
     assert len(store._seen_expiry) == 3
     assert store._accept_signal(source_digest, "tag", "tag0", 4.0)
     assert not store._accept_signal(source_digest, "tag", "tag3", 4.0)
+
+
+def test_per_source_ledger_cap_cannot_evict_other_sources(monkeypatch):
+    assert MAX_SOURCE_LEDGER_ENTRIES_PER_SOURCE == 1_024
+    assert MAX_SOURCE_LEDGER_ENTRIES == 100_000
+    monkeypatch.setattr("skyline_ingester.windows.MAX_SOURCE_LEDGER_ENTRIES", 5)
+    monkeypatch.setattr("skyline_ingester.windows.MAX_SOURCE_LEDGER_ENTRIES_PER_SOURCE", 2)
+    evictions = []
+    store = WindowStore(dedupe_key=b"x" * 32, on_ledger_eviction=lambda: evictions.append(1))
+    campaign_a = b"a" * 16
+    campaign_b = b"b" * 16
+    attacker = b"x" * 16
+    assert store._accept_signal(campaign_a, "url", "https://campaign.test/a", 1.0)
+    assert store._accept_signal(campaign_b, "url", "https://campaign.test/b", 1.0)
+    for index in range(4):
+        assert store._accept_signal(attacker, "tag", f"junk{index}", 1.0)
+    assert len(store._seen) == 4
+    assert len(store._seen_by_source[attacker]) == 2
+    assert not store._accept_signal(campaign_a, "url", "https://campaign.test/a", 1.0)
+    assert not store._accept_signal(campaign_b, "url", "https://campaign.test/b", 1.0)
+    assert len(evictions) == 2
 
 
 def test_windows_expire(store):
