@@ -72,8 +72,10 @@ instance URL is a `[vars]` entry, `CACHEKIT_API_URL`). Production routing and
 a custom domain are Stage 4.
 
 Two build-time accommodations for `@cachekit-io/cachekit` 0.1.3 (both retire
-with the 0.1.4 WASM core, blocked on LAB-780): the `nodejs_compat` flag
-(transitive node builtins), and a wrangler `[alias]` stubbing the NAPI-native
-`@cachekit-io/cachekit-core-ts` — the edge never runs that path (interop
-reads only, no ByteStorage envelope), and the stub throws if that ever stops
-being true.
+with the 0.1.5 WASM core — see `wrangler.toml` for the bump tracking): the
+`nodejs_compat` flag (transitive node builtins), and a wrangler `[alias]`
+stubbing the NAPI-native `@cachekit-io/cachekit-core-ts` — the edge never
+runs that path (interop reads only, no ByteStorage envelope), and the stub
+throws if that ever stops being true. Any new code path that needs the
+native core (ByteStorage envelopes, encryption) compiles fine and **throws
+at runtime**. Do not target 0.1.4 — it is abandoned and uninstallable.

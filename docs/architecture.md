@@ -147,7 +147,8 @@ Round-trip verified end-to-end: `spike/roundtrip/roundtrip.py` (exists, runs aga
   (`SystemTime::now()` panic in its session headers, affected 0.2.0–0.6.0) was fixed in
   cachekit-rs 0.7.0 — the hot path's interim direct `worker::Fetch` GET was removed in LAB-1492.
 - Workers builds: `--no-default-features --features workers,cachekitio`
-  (`l1`/moka and `redis`/fred are native-only; `encryption`/`macros` are unused and dropped).
+  (`l1`/moka and `redis`/fred are native-only; `encryption`/`macros` were dropped in `dcb6da0` —
+  the hot path never used them, see `hotpath/Cargo.toml`).
 
 ## Open items (flagged, not blocking the spec)
 

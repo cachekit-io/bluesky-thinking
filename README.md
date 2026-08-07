@@ -16,9 +16,14 @@ interop test, and a working proof of CacheKit's differentiators:
   stores ciphertext only.
 - **≈ $0/month** — all third-party hosting stays inside free tiers (cost table below).
 
-> Status: **Stage 3 merged (live cross-SDK integration proven), Stage 4 deploy in progress**
-> (LAB-738). Architecture locked in [`docs/architecture.md`](docs/architecture.md); build stages
-> are groomed from it.
+> Status: **live** — dashboard + API at
+> [`skyline-edge.raywalker.workers.dev`](https://skyline-edge.raywalker.workers.dev), ingester on
+> Render ([`skyline-ingester.onrender.com/health`](https://skyline-ingester.onrender.com/health)),
+> hot path at
+> [`skyline-hotpath.raywalker.workers.dev`](https://skyline-hotpath.raywalker.workers.dev).
+> Re-verify any time with
+> [`stage4/verify.sh`](stage4/verify.sh) (reachability, `X-Cache: HIT` from a non-origin POP,
+> payload freshness). Architecture locked in [`docs/architecture.md`](docs/architecture.md).
 
 ## Architecture
 
