@@ -1,9 +1,8 @@
 /**
- * Credential-free local demo: serves the dashboard plus the real API handler
- * against an in-memory backend seeded with plausible aggregates (5m window
- * only — other windows render the MISS path). Verifies AC "dashboard renders
- * from the API responses in a plain browser" without network or
- * CACHEKIT_API_KEY.
+ * Credential-free local demo: serves the real static dashboard assets plus the
+ * real API handler against an in-memory backend seeded with current ingester
+ * payloads. It returns 404 for unknown assets so a missing dashboard module is
+ * visible during local verification.
  *
  *   npm run demo   →  http://localhost:8788
  */
@@ -12,22 +11,34 @@ import { readFileSync } from 'node:fs';
 import { encodeInteropValue, generateInteropKey, type Backend } from '@cachekit-io/cachekit';
 import { handleApi, NAMESPACE } from '../src/handler.ts';
 
-const computed_at = new Date().toISOString();
+const generated_at = Math.floor(Date.now() / 1000);
+const base = { window: '5m', generated_at, total_posts: 1024 };
 const seed: Record<string, unknown> = {
   trending_hashtags: {
-    computed_at,
-    counts: { cachekit: 412, bluesky: 300, rustlang: 187, typescript: 121, ai: 98, webdev: 55 },
+    ...base,
+    hashtags: [
+      { tag: 'cachekit', count: 412 },
+      { tag: 'bluesky', count: 300 },
+      { tag: 'rustlang', count: 187 },
+    ],
   },
   trending_links: {
-    computed_at,
-    counts: { 'github.com': 231, 'youtube.com': 144, 'cachekit.io': 89, 'arxiv.org': 34 },
+    ...base,
+    links: [
+      { uri: 'https://github.com/cachekit-io', count: 231 },
+      { uri: 'https://cachekit.io', count: 89 },
+    ],
   },
-  lang_mix: {
-    computed_at,
-    share: { en: 0.62, ja: 0.14, pt: 0.09, de: 0.06, es: 0.05, other: 0.04 },
+  lang_mix: { ...base, langs: { en: 0.62, ja: 0.14, pt: 0.09, other: 0.15 } },
+  posts_per_minute: { ...base, ppm: 204.8 },
+  top_emoji: {
+    ...base,
+    emoji: [
+      { emoji: '😂', count: 902 },
+      { emoji: '❤️', count: 671 },
+      { emoji: '🔥', count: 402 },
+    ],
   },
-  posts_per_minute: { computed_at, value: 4211 },
-  top_emoji: { computed_at, counts: { '😂': 902, '❤️': 671, '🔥': 402, '🦋': 217, '👀': 133 } },
 };
 
 const store = new Map(
@@ -45,16 +56,37 @@ const backend: Backend = {
   close: async () => undefined,
 };
 
-const html = readFileSync(new URL('../public/index.html', import.meta.url));
+const assets = new Map([
+  [
+    '/',
+    {
+      body: readFileSync(new URL('../public/index.html', import.meta.url)),
+      type: 'text/html; charset=utf-8',
+    },
+  ],
+  [
+    '/dashboard.js',
+    {
+      body: readFileSync(new URL('../public/dashboard.js', import.meta.url)),
+      type: 'text/javascript; charset=utf-8',
+    },
+  ],
+]);
 
 createServer(async (req, res) => {
   const url = new URL(req.url ?? '/', 'http://localhost');
-  if (!url.pathname.startsWith('/api/')) {
-    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-    res.end(html);
+  if (url.pathname.startsWith('/api/')) {
+    const response = await handleApi(url, backend);
+    res.writeHead(response.status, Object.fromEntries(response.headers));
+    res.end(Buffer.from(await response.arrayBuffer()));
     return;
   }
-  const response = await handleApi(url, backend);
-  res.writeHead(response.status, Object.fromEntries(response.headers));
-  res.end(Buffer.from(await response.arrayBuffer()));
+  const asset = assets.get(url.pathname);
+  if (!asset) {
+    res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
+    res.end('Not found');
+    return;
+  }
+  res.writeHead(200, { 'content-type': asset.type });
+  res.end(asset.body);
 }).listen(8788, () => console.log('Skyline demo: http://localhost:8788'));

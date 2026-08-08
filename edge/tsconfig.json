@@ -9,8 +9,10 @@
     "noEmit": true,
     "allowImportingTsExtensions": true,
     "skipLibCheck": true,
+    "allowJs": true,
+    "checkJs": true,
     "isolatedModules": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["src", "test", "scripts"]
+  "include": ["src", "test", "scripts", "public"]
 }
