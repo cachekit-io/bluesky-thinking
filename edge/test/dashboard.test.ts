@@ -221,6 +221,6 @@ describe('dashboard bootstrap smoke test', () => {
       expect(cards.get('card-trending_hashtags')?.innerHTML).toContain('cachekit'),
     );
     expect(grid.innerHTML).toContain('card-trending_hashtags');
-    expect(tiles.innerHTML).toContain('Cache hit rate');
+    expect(tiles.innerHTML).toContain('Key availability (this isolate)');
   });
 });
