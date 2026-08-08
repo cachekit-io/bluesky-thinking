@@ -237,6 +237,17 @@ class WindowStore:
             # entries free capacity, via _expire_seen on every add(). The
             # anti-replay guarantee therefore holds under both ceilings, and
             # degradation is public: rate_limited_global_* exclusion counts.
+            #
+            # ponytail: refuse-at-cap trades the round-10 integrity bug for a
+            # bounded availability one — ~98 minted DIDs sustaining ~333
+            # distinct tuples/s can hold the 100k ledger full and get every
+            # source's *new* signals refused for the 5-min horizon. Accepted
+            # for a best-effort public demo: it self-heals within one horizon
+            # of the flood stopping, is publicly visible in the exclusion
+            # counts, and never corrupts a count. Split the memory ceiling
+            # from the anti-replay structure (a separate LRU that sheds by
+            # age without re-crediting) if the ranking ever becomes
+            # load-bearing.
             return f"rate_limited_global_{family}"
         self._seen[digest] = now
         self._seen_source[digest] = source_digest

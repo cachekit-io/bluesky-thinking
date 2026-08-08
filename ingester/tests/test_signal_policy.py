@@ -193,14 +193,14 @@ def test_checked_in_provider_sweep_matches_host_policy():
     [
         # The provider class is unbounded (registering localdev.<newTLD> costs
         # ~ten dollars), so names NOT in any enumerated list must still be
-        # denied when a label matches the local-development class rule.
+        # denied when a label carries one of the four distinctive stems of the
+        # local/loopback family (local|lokal|lokaal|loopback), including the
+        # embeddings devlocal/mylocal/localhost/lokalhost.
         "http://skyline.localdev.example.org/admin",
         "http://loopback9000.example.com/admin",
-        "http://my-home.router.example.net/admin",
         "http://api.lokalzone.example.com/admin",
-        "http://svc127.example.io/admin",
-        "http://intern.example.de/admin",
-        "http://lvh2.example.com/admin",
+        "http://mylocal.example.net/admin",
+        "http://foo.lokaalspul.example.com/admin",
     ],
 )
 def test_unenumerated_local_class_labels_are_denied(value):
@@ -208,17 +208,25 @@ def test_unenumerated_local_class_labels_are_denied(value):
     assert link is None and reason == "unsafe_host"
 
 
-def test_local_label_class_rule_accepts_known_false_positives():
-    # The class rule is substring-per-label and DELIBERATELY over-broad: a
-    # legitimate host with a local-ish label is excluded from the ranking.
-    # That cost is accepted policy (the published set is a ranking, not a
-    # directory); this test pins the trade-off so it stays a conscious one.
-    denied_false_positive, reason = normalize_link("https://homedepot.example.com/deals")
-    assert denied_false_positive is None and reason == "unsafe_host"
-    # Hosts without a matching label are untouched.
-    for value in ("https://news.example.com/story", "https://intl.example.com/x", "https://dev.example.com/x"):
+def test_local_label_class_rule_is_scoped_to_the_local_loopback_family():
+    # Round-11: the class rule is deliberately narrowed to the four distinctive
+    # stems. Short ambiguous tokens (home/lcl/lvh/intern/127) were reverted —
+    # they cannot be told from legitimate public hosts by syntax, and those
+    # specific classic dev domains live in the enumerated _LOCAL_HOSTS backstop
+    # instead. These mainstream hosts must therefore rank normally.
+    for value in (
+        "https://homedepot.example.com/deals",
+        "https://internet.example.org/x",
+        "https://internetarchive.example.org/x",
+        "https://lclark.example.edu/x",
+        "https://route127.example.net/x",
+        "https://news.example.com/story",
+    ):
         link, reason = normalize_link(value)
-        assert link is not None and reason is None
+        assert link is not None and reason is None, value
+    # The one accepted false positive: a legitimate label embedding "local".
+    denied_false_positive, reason = normalize_link("https://localize.example.com/x")
+    assert denied_false_positive is None and reason == "unsafe_host"
 
 
 def test_link_output_length_is_bounded_after_root_slash_insertion():

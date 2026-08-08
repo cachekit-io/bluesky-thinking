@@ -156,13 +156,20 @@ Skyline rejects:
 - an exact host or subdomain of the enumerated local-network suffix roots `corp`,
   `home`, `home.arpa`, `internal`, `intra`, `intranet`, `lan`, `local`,
   `localdomain`, `localhost`, `private`, or `test`;
-- any hostname with a DNS label containing a match of the local-development
-  class pattern `local|lokal|lokaal|loopback|lcl|lvh|intern|127|home|dev-?local|local-?dev`.
-  This syntactic rule exists because the provider class below is unbounded —
+- any hostname with a DNS label containing one of the four distinctive stems
+  of the local/loopback family — `local`, `lokal`, `lokaal`, or `loopback`
+  (so `localdev`, `devlocal`, `mylocal`, `localhost`, and `lokalhost` are all
+  caught). This syntactic rule exists because that provider class is unbounded:
   registering `localdev.<newTLD>` and pointing it at a loopback or private
-  address costs about ten dollars, so enumeration alone cannot converge. False
-  positives (a legitimate host with a local-looking label) are knowingly
-  excluded: the published set is a ranking, not a directory;
+  address costs about ten dollars, so enumeration alone cannot converge. The
+  rule is deliberately scoped to those four stems; shorter, more ambiguous
+  tokens (`home`, `lcl`, `lvh`, `intern`, `127`) are NOT used as substrings,
+  because they cannot be told apart by syntax from legitimate public hosts
+  (`home.cern`, `lcl.fr`, `internet.org`, `route127.net`) — those specific
+  classic dev domains are enumerated in the provider-root list below instead.
+  The one accepted false positive is a legitimate label that embeds `local`
+  (for example `localize`): it is excluded from the ranking, never a safety
+  miss — the published set is a ranking, not a directory;
 - an exact host or subdomain of the enumerated wildcard-DNS/rebinding/loopback
   provider roots `1u.ms`, `backname.io`, `ddev.site`, `devlocal.dev`, `devlocal.io`,
   `devlocal.me`, `devlocal.nl`, `devlocal.site`, `devlocal.us`, `docksal.site`,
