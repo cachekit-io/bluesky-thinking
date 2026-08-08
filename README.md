@@ -8,6 +8,9 @@ by a Python ingester, served from a TypeScript edge API, with a Rust-WASM hot pa
 writing the **same** [CacheKit](https://cachekit.io) cache entries. The demo *is* a live cross-SDK
 interop test, and a working proof of CacheKit's differentiators:
 
+Public trend signals are Unicode-normalized, tracking-aware, source-bounded, and
+safety-filtered under the transparent [Skyline public signal policy](docs/signal-policy.md).
+
 - **Metered-misses pricing made literal** — a cache miss is a real window recompute; the hit rate
   is the product story.
 - **Distributed locking** — concurrent misses on one window trigger exactly one recompute
@@ -83,8 +86,8 @@ jobs are paid, which is why the ingester serves `GET /health` on `$PORT` and why
 a Cloudflare cron, not a Render one. Free services spin down after 15 min without *inbound* traffic
 (the outbound Jetstream socket doesn't count); the cron ping supplies that traffic. Restarts lose
 in-memory window state, mitigated by checkpointing aggregation state into CacheKit (`posts_per_minute`
-and `lang_mix` restore exactly; per-minute trending counters are top-K-truncated in the snapshot, so
-long-tail counts are approximate after a restart).
+and signal-candidate totals restore exactly; per-minute trending and language counters are
+top-K-truncated in the snapshot, so long-tail counts are approximate after a restart).
 ² CachekitIO is the platform being showcased — we build, run, and own it. No third-party line item.
 
 Fly.io was evaluated and **rejected**: its free tier was discontinued in 2024 (new orgs get a

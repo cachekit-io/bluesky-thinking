@@ -1,17 +1,26 @@
-"""One Jetstream event -> the features the windows aggregate.
+"""One Jetstream event -> privacy-safe features for window aggregation.
 
-Aggregate-only by design: PostFeatures carries counters' inputs (tags, links,
-lang, emoji, a sentiment score) — never the post text, author DID, or rkey.
+PostFeatures contains normalized counter inputs and aggregate exclusion reasons
+only — never post text, an author DID, a record key, or a stable pseudonym.
 """
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+import unicodedata
+from collections import Counter
+from dataclasses import dataclass, field
+
+from skyline_ingester.policy import hashtag_candidate_fingerprint, hashtags_from_text, normalize_hashtag, normalize_link
 
 POST_COLLECTION = "app.bsky.feed.post"
-
-TAG_RE = re.compile(r"#(\w[\w-]*)")
+MAX_TEXT_LENGTH = 4_096
+MAX_FACET_FEATURES = 64
+MAX_TAG_CANDIDATES = 32
+MAX_LINK_CANDIDATES = 16
+MAX_EMOJI_CANDIDATES = 16
+MAX_EMOJI_LENGTH = 64
+_PRIMARY_LANGUAGE_RE = re.compile(r"[a-z]{2,8}")
 
 # Common emoji blocks; a match is one emoji possibly extended by variation
 # selectors, skin tones, and ZWJ sequences (so 👨‍👩‍👧 counts once, not thrice).
@@ -95,6 +104,9 @@ class PostFeatures:
     links: list[str]
     emoji: list[str]
     sentiment: float | None  # [-1.0, 1.0]; None when nothing scoreable
+    domains: list[str] = field(default_factory=list)
+    hashtag_labels: dict[str, str] = field(default_factory=dict)
+    exclusions: Counter[str] = field(default_factory=Counter)
 
 
 def extract_post(event: dict) -> PostFeatures | None:
@@ -102,43 +114,160 @@ def extract_post(event: dict) -> PostFeatures | None:
     if not isinstance(event, dict) or event.get("kind") != "commit":
         return None
     commit = event.get("commit") or {}
+    if not isinstance(commit, dict):
+        return None
     if commit.get("operation") != "create" or commit.get("collection") != POST_COLLECTION:
         return None
     time_us = event.get("time_us")
     if not isinstance(time_us, int):
         return None
     record = commit.get("record") or {}
+    if not isinstance(record, dict):
+        return None
     text = record.get("text") or ""
+    if not isinstance(text, str):
+        text = ""
+    text = unicodedata.normalize("NFKC", text[:MAX_TEXT_LENGTH])[:MAX_TEXT_LENGTH]
+
+    tag_candidates: list[object] = []
+    link_candidates: list[object] = []
+    exclusions: Counter[str] = Counter()
+    facets = record.get("facets") or []
+    if not isinstance(facets, list):
+        facets = []
+    features_examined = 0
+    malformed_nonstring_tag_seen = False
+    for facet in facets:
+        if features_examined >= MAX_FACET_FEATURES:
+            break
+        if not isinstance(facet, dict):
+            continue
+        features = facet.get("features") or []
+        if not isinstance(features, list):
+            continue
+        for feature in features:
+            if features_examined >= MAX_FACET_FEATURES:
+                break
+            features_examined += 1
+            if not isinstance(feature, dict):
+                continue
+            ftype = feature.get("$type")
+            if ftype == "app.bsky.richtext.facet#tag":
+                tag_candidate = feature.get("tag")
+                if not isinstance(tag_candidate, str):
+                    if not malformed_nonstring_tag_seen:
+                        exclusions["malformed_tag"] += 1
+                        malformed_nonstring_tag_seen = True
+                elif len(tag_candidates) < MAX_TAG_CANDIDATES:
+                    tag_candidates.append(tag_candidate)
+                else:
+                    exclusions["candidate_limit_tag"] += 1
+            elif ftype == "app.bsky.richtext.facet#link":
+                if len(link_candidates) < MAX_LINK_CANDIDATES:
+                    link_candidates.append(feature.get("uri"))
+                else:
+                    exclusions["candidate_limit_url"] += 1
+    embed = record.get("embed") or {}
+    if isinstance(embed, dict) and embed.get("$type") == "app.bsky.embed.external":
+        external = embed.get("external") or {}
+        uri = external.get("uri") if isinstance(external, dict) else None
+        if len(link_candidates) < MAX_LINK_CANDIDATES:
+            link_candidates.append(uri)
+        else:
+            exclusions["candidate_limit_url"] += 1
 
     hashtags: list[str] = []
+    hashtag_labels: dict[str, str] = {}
+    rejected_tag_reasons: dict[tuple[str, str], str] = {}
+
+    def add_hashtag(candidate: object) -> None:
+        tag, reason = normalize_hashtag(candidate)
+        if tag is None:
+            rejection = reason or "malformed_tag"
+            candidate_key = hashtag_candidate_fingerprint(candidate)
+            previous = rejected_tag_reasons.get(candidate_key) if candidate_key is not None else None
+            if previous is None:
+                exclusions[rejection] += 1
+                if candidate_key is not None:
+                    rejected_tag_reasons[candidate_key] = rejection
+            elif previous == "malformed_tag" and rejection == "filtered_tag":
+                exclusions[previous] -= 1
+                if not exclusions[previous]:
+                    del exclusions[previous]
+                exclusions[rejection] += 1
+                rejected_tag_reasons[candidate_key] = rejection
+        elif tag.canonical in hashtag_labels:
+            exclusions["duplicate_in_event_tag"] += 1
+        else:
+            hashtags.append(tag.canonical)
+            hashtag_labels[tag.canonical] = tag.display
+
+    for candidate in tag_candidates:
+        add_hashtag(candidate)
+
+    # A malformed facet must not suppress usable hashtags in the post body.
+    # Fall back when no facet candidate survived normalization, just as clients
+    # without facets do.
+    if not hashtags:
+        text_candidates = hashtags_from_text(text)
+        if len(text_candidates) > MAX_TAG_CANDIDATES:
+            exclusions["candidate_limit_tag"] += len(text_candidates) - MAX_TAG_CANDIDATES
+        for candidate in text_candidates[:MAX_TAG_CANDIDATES]:
+            add_hashtag(candidate)
+
     links: list[str] = []
-    for facet in record.get("facets") or []:
-        for feature in facet.get("features") or []:
-            ftype = feature.get("$type")
-            if ftype == "app.bsky.richtext.facet#tag" and feature.get("tag"):
-                hashtags.append(str(feature["tag"]).lower())
-            elif ftype == "app.bsky.richtext.facet#link" and feature.get("uri"):
-                links.append(str(feature["uri"]))
-    if not hashtags:  # posts from clients that don't emit tag facets
-        hashtags = [m.group(1).lower() for m in TAG_RE.finditer(text)]
-    embed = record.get("embed") or {}
-    if embed.get("$type") == "app.bsky.embed.external":
-        uri = (embed.get("external") or {}).get("uri")
-        if uri:
-            links.append(str(uri))
+    domains: list[str] = []
+    seen_links: set[str] = set()
+    seen_domains: set[str] = set()
+    for candidate in link_candidates:
+        link, reason = normalize_link(candidate)
+        if link is None:
+            exclusions[reason or "malformed_url"] += 1
+            continue
+        if link.uri in seen_links:
+            exclusions["duplicate_in_event_url"] += 1
+        else:
+            seen_links.add(link.uri)
+            links.append(link.uri)
+        if link.domain in seen_domains:
+            exclusions["duplicate_in_event_domain"] += 1
+        else:
+            seen_domains.add(link.domain)
+            domains.append(link.domain)
+
+    # Emoji are one signal per distinct emoji per post, mirroring tag/link
+    # dedup and caps: rotating distinct ZWJ chains must not mint hundreds of
+    # counter keys from one legal post. Over-length matches stay silently
+    # dropped (they are regex artifacts, not user signals). Sentiment below
+    # still sees every occurrence.
+    emoji: list[str] = []
+    seen_emoji: set[str] = set()
+    for match in EMOJI_RE.findall(text):
+        if len(match) > MAX_EMOJI_LENGTH:
+            continue
+        if match in seen_emoji:
+            exclusions["duplicate_in_event_emoji"] += 1
+        elif len(emoji) >= MAX_EMOJI_CANDIDATES:
+            exclusions["candidate_limit_emoji"] += 1
+        else:
+            seen_emoji.add(match)
+            emoji.append(match)
 
     langs = record.get("langs") or []
-    lang = "und"
-    if langs and isinstance(langs[0], str) and langs[0]:
-        lang = langs[0].split("-")[0].lower()
+    if not isinstance(langs, list):
+        langs = []
+    lang = normalize_language(langs[0] if langs else None)
 
     return PostFeatures(
         ts=time_us / 1_000_000,
         lang=lang,
-        hashtags=list(dict.fromkeys(hashtags)),
-        links=list(dict.fromkeys(links)),
-        emoji=EMOJI_RE.findall(text),
+        hashtags=hashtags,
+        links=links,
+        emoji=emoji,
         sentiment=score_sentiment(text),
+        domains=domains,
+        hashtag_labels=hashtag_labels,
+        exclusions=exclusions,
     )
 
 
@@ -156,3 +285,15 @@ def score_sentiment(text: str) -> float | None:
     if pos + neg == 0:
         return None
     return (pos - neg) / (pos + neg)
+
+
+def normalize_language(value: object) -> str:
+    """Return a safe lowercase BCP-47 primary language subtag or ``und``."""
+    if not isinstance(value, str):
+        return "und"
+    primary = value.partition("-")[0].lower()
+    return primary if _PRIMARY_LANGUAGE_RE.fullmatch(primary) else "und"
+
+
+def is_primary_language(value: str) -> bool:
+    return _PRIMARY_LANGUAGE_RE.fullmatch(value) is not None

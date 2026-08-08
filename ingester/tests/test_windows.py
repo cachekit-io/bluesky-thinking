@@ -2,9 +2,15 @@
 
 import sys
 import threading
+from collections import Counter
 
 from skyline_ingester.extract import PostFeatures
-from skyline_ingester.windows import WindowStore
+from skyline_ingester.windows import (
+    MAX_SOURCE_LEDGER_ENTRIES,
+    MAX_SOURCE_LEDGER_ENTRIES_PER_SOURCE,
+    SOURCE_DEDUPE_SECONDS,
+    WindowStore,
+)
 
 from .conftest import FIXTURE_TOTALS, NOW
 
@@ -54,6 +60,100 @@ def test_top_emoji(store):
     assert emoji["👨‍👩‍👧"] == 1  # ZWJ family counted as one emoji
 
 
+def test_expired_source_cleanup_is_bounded_per_event(monkeypatch):
+    store = WindowStore(dedupe_key=b"x" * 32)
+    store._seen = {index.to_bytes(16): -300.0 for index in range(5_000)}
+    store._seen_expiry = [(0.0, index.to_bytes(16)) for index in range(5_000)]
+    monkeypatch.setattr("skyline_ingester.windows.time.monotonic", lambda: 1.0)
+    store.add(PostFeatures(NOW, "en", [], [], [], None), source_id="did:plc:test")
+    assert len(store._seen) == 904
+    assert len(store._seen_expiry) == 904
+
+
+def test_tag_labels_use_one_flat_counter_per_bucket(store):
+    assert store._buckets
+    for bucket in store._buckets.values():
+        assert isinstance(bucket.tag_labels, Counter)
+        assert all(isinstance(key, tuple) and len(key) == 2 for key in bucket.tag_labels)
+        assert all(isinstance(count, int) for count in bucket.tag_labels.values())
+
+
+def test_source_ledger_evicts_oldest_at_hard_cap(monkeypatch):
+    monkeypatch.setattr("skyline_ingester.windows.MAX_SOURCE_LEDGER_ENTRIES", 3)
+    store = WindowStore(dedupe_key=b"x" * 32)
+    # Distinct sources: the global cap must evict, the per-source cap must not fire.
+    for index in range(4):
+        assert store._accept_signal(bytes([index]) * 16, "tag", f"tag{index}", float(index)) is None
+    assert len(store._seen) == 3
+    assert len(store._seen_expiry) == 3
+    assert store._accept_signal(bytes([0]) * 16, "tag", "tag0", 4.0) is None
+    assert store._accept_signal(bytes([3]) * 16, "tag", "tag3", 4.0) == "duplicate_source"
+
+
+def test_per_source_ledger_cap_refuses_instead_of_evicting(monkeypatch):
+    assert MAX_SOURCE_LEDGER_ENTRIES_PER_SOURCE == 1_024
+    assert MAX_SOURCE_LEDGER_ENTRIES == 100_000
+    monkeypatch.setattr("skyline_ingester.windows.MAX_SOURCE_LEDGER_ENTRIES_PER_SOURCE", 2)
+    evictions = []
+    store = WindowStore(dedupe_key=b"x" * 32, on_ledger_eviction=lambda: evictions.append(1))
+    campaign = b"a" * 16
+    attacker = b"x" * 16
+    assert store._accept_signal(campaign, "url", "https://campaign.example/a", 1.0) is None
+    # The attacker's own cap refuses further inserts; nothing is evicted, so a
+    # source can never free its earlier tuples (its own or anyone else's) with junk.
+    assert store._accept_signal(attacker, "tag", "junk0", 1.0) is None
+    assert store._accept_signal(attacker, "tag", "junk1", 1.0) is None
+    assert store._accept_signal(attacker, "tag", "junk2", 1.0) == "rate_limited_source"
+    assert store._accept_signal(attacker, "tag", "junk0", 1.0) == "duplicate_source"
+    assert len(store._seen_by_source[attacker]) == 2
+    assert store._accept_signal(campaign, "url", "https://campaign.example/a", 1.0) == "duplicate_source"
+    assert evictions == []
+    # Expiry frees per-source capacity: the bound is a rate, not a lifetime total.
+    later = 1.0 + SOURCE_DEDUPE_SECONDS
+    store._expire_seen(later)
+    assert store._accept_signal(attacker, "tag", "junk2", later) is None
+
+
+def test_source_cannot_flush_own_ledger_to_replay_a_signal(monkeypatch):
+    # Round-9 CRIT reproducer: with own-oldest eviction, 40 boost posts
+    # interleaved with junk each re-credited the same tag (count 40). With
+    # refuse-at-cap the boost tuple survives and the count stays 1.
+    monkeypatch.setattr("skyline_ingester.windows.MAX_SOURCE_LEDGER_ENTRIES_PER_SOURCE", 4)
+    store = WindowStore(dedupe_key=b"x" * 32)
+    junk_index = 0
+    for _round in range(40):
+        store.add(
+            PostFeatures(ts=NOW, lang="en", hashtags=["boostme"], links=[], emoji=[], sentiment=None),
+            source_id="did:plc:booster",
+        )
+        for _ in range(33):
+            store.add(
+                PostFeatures(ts=NOW, lang="en", hashtags=[f"junk{junk_index}"], links=[], emoji=[], sentiment=None),
+                source_id="did:plc:booster",
+            )
+            junk_index += 1
+    merged = store.merged("5m", NOW)
+    assert merged.tags["boostme"] == 1
+    assert merged.excluded["duplicate_source_tag"] == 39
+    assert merged.excluded["rate_limited_source_tag"] == 40 * 33 - 3
+
+
+def test_emoji_are_source_bounded_like_every_other_signal(store):
+    # Emoji were the one family bypassing the ledger; one source repeating an
+    # emoji inside the horizon must count once, and no source means no count.
+    before = store.merged("5m", NOW).emoji["🔥"]
+    for _ in range(5):
+        store.add(
+            PostFeatures(ts=NOW, lang="en", hashtags=[], links=[], emoji=["🔥"], sentiment=None),
+            source_id="did:plc:emojirepeat",
+        )
+    store.add(PostFeatures(ts=NOW, lang="en", hashtags=[], links=[], emoji=["🔥"], sentiment=None))
+    merged = store.merged("5m", NOW)
+    assert merged.emoji["🔥"] == before + 1
+    assert merged.excluded["duplicate_source_emoji"] == 4
+    assert merged.excluded["missing_source_emoji"] == 1
+
+
 def test_windows_expire(store):
     # 6 minutes later every 5m-window fixture post has aged out.
     later = NOW + 6 * 60
@@ -79,7 +179,10 @@ def test_memo_is_not_resurrected_by_a_concurrent_add(store):
 
     def add_mid_merge(lo, hi):
         copies = orig(lo, hi)
-        store.add(PostFeatures(ts=NOW, lang="en", hashtags=[], links=[], emoji=[], sentiment=None))
+        store.add(
+            PostFeatures(ts=NOW, lang="en", hashtags=[], links=[], emoji=[], sentiment=None),
+            source_id="did:plc:midmerge",
+        )
         return copies
 
     store._copy_range = add_mid_merge
@@ -102,8 +205,14 @@ def test_memo_does_not_leak_across_now(store):
 def test_prune_drops_buckets_beyond_24h():
     s = WindowStore()
     base = 20_000_000 * 60.0
-    s.add(PostFeatures(ts=base, lang="en", hashtags=["old"], links=[], emoji=[], sentiment=None))
-    s.add(PostFeatures(ts=base + 1441 * 60, lang="en", hashtags=["new"], links=[], emoji=[], sentiment=None))
+    s.add(
+        PostFeatures(ts=base, lang="en", hashtags=["old"], links=[], emoji=[], sentiment=None),
+        source_id="did:plc:old",
+    )
+    s.add(
+        PostFeatures(ts=base + 1441 * 60, lang="en", hashtags=["new"], links=[], emoji=[], sentiment=None),
+        source_id="did:plc:new",
+    )
     assert len(s._buckets) == 1  # the 1441-min-old bucket was pruned on insert
     assert "new" in s.merged("24h", base + 1441 * 60).tags
 
@@ -115,9 +224,22 @@ def test_prune_recovers_after_a_future_timestamp():
     # added lets the window recover; the stray future bucket is excluded by merged().
     s = WindowStore()
     base_min = 20_000_000
-    s.add(PostFeatures(ts=(base_min + 10_000_000) * 60.0, lang="en", hashtags=["bogus"], links=[], emoji=[], sentiment=None))
-    for _ in range(3):  # real events arriving after the bogus one must still register
-        s.add(PostFeatures(ts=base_min * 60.0, lang="en", hashtags=["real"], links=[], emoji=[], sentiment=None))
+    s.add(
+        PostFeatures(
+            ts=(base_min + 10_000_000) * 60.0,
+            lang="en",
+            hashtags=["bogus"],
+            links=[],
+            emoji=[],
+            sentiment=None,
+        ),
+        source_id="did:plc:bogus",
+    )
+    for source in range(3):  # distinct real sources must all register
+        s.add(
+            PostFeatures(ts=base_min * 60.0, lang="en", hashtags=["real"], links=[], emoji=[], sentiment=None),
+            source_id=f"did:plc:real{source}",
+        )
     m = s.merged("5m", base_min * 60.0)
     assert m.n == 3
     assert m.tags["real"] == 3

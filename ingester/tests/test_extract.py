@@ -3,7 +3,7 @@
 import json
 
 from skyline_ingester.extract import extract_post, score_sentiment
-from skyline_ingester.jetstream import ingest_raw, subscribe_url
+from skyline_ingester.jetstream import _advanced_cursor, ingest_raw, subscribe_url
 from skyline_ingester.windows import WindowStore
 
 from .conftest import FIXTURE_TOTALS
@@ -44,9 +44,99 @@ def test_lang_normalization(fixture_lines):
     assert "ja-jp" not in langs and "ja-JP" not in langs
 
 
+def test_invalid_language_is_collapsed_to_und(fixture_lines):
+    event = json.loads(fixture_lines[0])
+    event["commit"]["record"]["langs"] = ["<script>alert(1)</script>"]
+    features = extract_post(event)
+    assert features is not None and features.lang == "und"
+
+
+def test_invalid_facet_falls_back_to_text_and_candidate_work_is_bounded(fixture_lines):
+    event = json.loads(fixture_lines[0])
+    event["commit"]["record"]["text"] = "#body " + " #tag" * 10_000
+    event["commit"]["record"]["facets"] = [{"features": [{"$type": "app.bsky.richtext.facet#tag", "tag": "#invalid"}]}]
+    features = extract_post(event)
+    assert features is not None
+    assert features.hashtags[0] == "body"
+    assert len(features.hashtags) <= 32
+    assert features.exclusions["malformed_tag"] == 1
+    assert features.exclusions["candidate_limit_tag"] > 0
+
+
+def test_facet_and_feature_overflow_is_visible(fixture_lines):
+    event = json.loads(fixture_lines[0])
+    record = event["commit"]["record"]
+    record["text"] = ""
+    record["facets"] = [{"features": [{"$type": "app.bsky.richtext.facet#tag", "tag": f"tag{index}"} for index in range(200)]}]
+    features = extract_post(event)
+    assert features is not None
+    assert len(features.hashtags) == 32
+    assert features.exclusions["candidate_limit_tag"] == 32
+
+    record["facets"] = [
+        {"features": [{"$type": "app.bsky.richtext.facet#tag", "tag": f"tag{facet}_{index}"} for index in range(20)]}
+        for facet in range(200)
+    ]
+    features = extract_post(event)
+    assert features is not None
+    assert len(features.hashtags) + features.exclusions["candidate_limit_tag"] == 64
+
+    record["facets"] = [{"features": [{"$type": "app.bsky.richtext.facet#mention", "did": "did:plc:x"}]} for _ in range(100)]
+    features = extract_post(event)
+    assert features is not None and features.exclusions == {}
+
+    record["facets"] = [{"features": [{"$type": "app.bsky.richtext.facet#tag", "tag": None} for _ in range(10)]}]
+    features = extract_post(event)
+    assert features is not None
+    assert features.exclusions == {"malformed_tag": 1}
+
+    record["facets"] = []
+    record["embed"] = {"$type": "app.bsky.embed.external", "external": {"uri": ""}}
+    features = extract_post(event)
+    assert features is not None
+    assert features.exclusions == {"malformed_url": 1}
+
+
 def test_emoji_extraction_counts_zwj_sequence_once(fixture_lines):
     family = next(p for p in _posts(fixture_lines) if "👨‍👩‍👧" in p.emoji)
     assert family.emoji == ["👨‍👩‍👧", "❤️"]
+
+    event = json.loads(fixture_lines[0])
+    at_limit = "😀" + "‍😀" * 31
+    event["commit"]["record"]["text"] = at_limit
+    features = extract_post(event)
+    assert features is not None and features.emoji == [at_limit]
+
+    event["commit"]["record"]["text"] = "😀" + "‍😀" * 32
+    features = extract_post(event)
+    assert features is not None and features.emoji == []
+
+
+def test_emoji_are_deduped_and_capped_per_post(fixture_lines):
+    event = json.loads(fixture_lines[0])
+    event["commit"]["record"]["text"] = "😂😂😂"
+    features = extract_post(event)
+    assert features is not None
+    assert features.emoji == ["😂"]
+    assert features.exclusions["duplicate_in_event_emoji"] == 2
+
+    # 18 distinct emoji: 16 kept, 2 charged — rotating distinct ZWJ chains
+    # cannot mint hundreds of counter keys from one legal post.
+    distinct = ["😀", "😁", "😂", "😃", "😄", "😅", "😆", "😇", "😈", "😉", "😊", "😋", "😌", "😍", "😎", "😏", "😐", "😑"]
+    event["commit"]["record"]["text"] = "".join(distinct)
+    features = extract_post(event)
+    assert features is not None
+    assert features.emoji == distinct[:16]
+    assert features.exclusions["candidate_limit_emoji"] == 2
+
+
+def test_text_nfkc_output_is_capped_before_feature_work(fixture_lines, monkeypatch):
+    captured = []
+    monkeypatch.setattr("skyline_ingester.extract.score_sentiment", lambda text: captured.append(text))
+    event = json.loads(fixture_lines[0])
+    event["commit"]["record"]["text"] = "ﷺ" * 4_096
+    assert extract_post(event) is not None
+    assert len(captured) == 1 and len(captured[0]) == 4_096
 
 
 def test_sentiment_signs():
@@ -62,6 +152,21 @@ def test_ingest_raw_returns_cursor_and_skips_garbage():
     store = WindowStore()
     assert ingest_raw("not json{", store) is None
     assert ingest_raw('{"kind": "commit", "time_us": 123}', store) == 123
+
+
+def test_ingest_raw_advances_cursor_past_recursive_or_downstream_poison(monkeypatch):
+    cursor = 123_000_000
+    nested = "[" * 20_000 + "0" + "]" * 20_000
+    raw = f'{{"time_us": {cursor}, "nested": {nested}}}'
+    assert ingest_raw(raw, WindowStore(), now_fn=lambda: 1_000.0) == cursor
+    assert ingest_raw(f'{{"time_us": {cursor},', WindowStore(), now_fn=lambda: 1_000.0) is None
+
+    def recurse(_event):
+        raise RecursionError("poison")
+
+    monkeypatch.setattr("skyline_ingester.jetstream.extract_post", recurse)
+    ordinary = json.dumps({"kind": "commit", "time_us": cursor})
+    assert ingest_raw(ordinary, WindowStore(), now_fn=lambda: 1_000.0) == cursor
 
 
 def test_ingest_raw_drops_future_dated_events(fixture_lines):
@@ -98,6 +203,22 @@ def test_fixture_totals_match_windows(store):
 
     for window, total in FIXTURE_TOTALS.items():
         assert store.merged(window, NOW).n == total
+
+
+def test_resume_cursor_never_rewinds():
+    assert _advanced_cursor(None, 100) == 100
+    assert _advanced_cursor(100, 1) == 100
+    assert _advanced_cursor(100, 101) == 101
+
+
+def test_ingest_raw_drops_astronomical_time_us_without_raising():
+    # int/float on a 300+-digit int raises OverflowError, and the
+    # _cursor_is_usable call sits outside every try: unguarded, one such frame
+    # escapes to consume()'s blanket handler and replays forever (the cursor
+    # never advances past it). It must be dropped like any other bad frame.
+    huge = 10**400
+    raw = json.dumps({"kind": "commit", "time_us": huge})
+    assert ingest_raw(raw, WindowStore(), now_fn=lambda: 1_000.0) is None
 
 
 def test_subscribe_url():
