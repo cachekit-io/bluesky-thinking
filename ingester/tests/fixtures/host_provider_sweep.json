@@ -13,21 +13,7 @@
     "box.private",
     "grafana.test"
   ],
-  "local_suffix_roots": [
-    "corp",
-    "home",
-    "home.arpa",
-    "internal",
-    "intra",
-    "intranet",
-    "lan",
-    "local",
-    "localdomain",
-    "localhost",
-    "private",
-    "test"
-  ],
-  "method": "manual public-provider documentation and DNS sweep (dig @8.8.8.8 / @1.1.1.1); checked in so policy roots and probes change together. The test bounds this sweep's age at 90 days: re-run the sweep, update observed_answers, and re-date verified_on. providers[].probe is the probe list; local_suffix_roots mirrors _LOCAL_SUFFIXES and every suffix has a probe.",
+  "method": "manual public-provider documentation, mechanical label-x-TLD permutation sweep, and DNS verification (A/AAAA lookups against public resolvers, with NXDOMAIN controls); checked in so policy roots and probes change together. The test bounds this sweep's age at 90 days: re-run the sweep, update observed_answers, and re-date verified_on. providers[].probe is the probe list; every _LOCAL_SUFFIXES root has a probe in local_suffix_probes.",
   "providers": [
     {
       "note": "rebinding utility; apex now serves a public site (206.81.28.151) but rebind labels answer loopback",
@@ -64,6 +50,48 @@
       "status": "live"
     },
     {
+      "observed_answers": [
+        "127.0.0.1"
+      ],
+      "probe": "skyline-probe.devlocal.io",
+      "root": "devlocal.io",
+      "status": "live"
+    },
+    {
+      "observed_answers": [
+        "127.0.0.1"
+      ],
+      "probe": "skyline-probe.devlocal.me",
+      "root": "devlocal.me",
+      "status": "live",
+      "note": "apex NXDOMAIN; wildcard label answers loopback"
+    },
+    {
+      "observed_answers": [
+        "127.0.0.1"
+      ],
+      "probe": "devlocal.nl",
+      "root": "devlocal.nl",
+      "status": "live",
+      "note": "apex answers loopback; arbitrary labels NXDOMAIN"
+    },
+    {
+      "observed_answers": [
+        "127.0.0.1"
+      ],
+      "probe": "skyline-probe.devlocal.site",
+      "root": "devlocal.site",
+      "status": "live"
+    },
+    {
+      "observed_answers": [
+        "127.0.0.1"
+      ],
+      "probe": "skyline-probe.devlocal.us",
+      "root": "devlocal.us",
+      "status": "live"
+    },
+    {
       "note": "apex-public / subdomain-private shape (same class as lcl.host); wildcard answers RFC1918",
       "observed_answers": [
         "192.168.64.100"
@@ -80,6 +108,15 @@
       "probe": "login.fbi.com",
       "root": "fbi.com",
       "status": "live"
+    },
+    {
+      "observed_answers": [
+        "127.0.0.1"
+      ],
+      "probe": "home.no",
+      "root": "home.no",
+      "status": "live",
+      "note": "apex answers loopback; arbitrary labels NXDOMAIN"
     },
     {
       "observed_answers": [
@@ -141,12 +178,107 @@
       "status": "live"
     },
     {
+      "observed_answers": [
+        "127.0.0.1"
+      ],
+      "probe": "local.qinlili.bid",
+      "root": "local.qinlili.bid",
+      "status": "live",
+      "note": "loopback subtree of an otherwise-public apex (same class as local.sisteminha.com)"
+    },
+    {
       "note": "loopback subtree of an otherwise-public apex; root is the local. subtree, not sisteminha.com",
       "observed_answers": [
         "127.0.0.1"
       ],
       "probe": "foo.local.sisteminha.com",
       "root": "local.sisteminha.com",
+      "status": "live"
+    },
+    {
+      "observed_answers": [
+        "10.0.64.4"
+      ],
+      "probe": "skyline-probe.localdev.cc",
+      "root": "localdev.cc",
+      "status": "live",
+      "note": "apex and wildcard answer RFC1918"
+    },
+    {
+      "observed_answers": [
+        "127.0.0.1"
+      ],
+      "probe": "skyline-probe.localdev.hu",
+      "root": "localdev.hu",
+      "status": "live",
+      "note": "apex-public / subdomain-private shape (same class as lcl.host); wildcard answers loopback"
+    },
+    {
+      "observed_answers": [
+        "127.0.0.1",
+        "::1"
+      ],
+      "probe": "skyline-probe.localdev.it",
+      "root": "localdev.it",
+      "status": "live",
+      "note": "apex-public (GitHub Pages) / subdomain-private shape; wildcard answers loopback"
+    },
+    {
+      "observed_answers": [
+        "172.31.254.1"
+      ],
+      "probe": "localdev.name",
+      "root": "localdev.name",
+      "status": "live",
+      "note": "apex answers RFC1918; arbitrary labels NXDOMAIN"
+    },
+    {
+      "observed_answers": [
+        "127.0.0.1"
+      ],
+      "probe": "skyline-probe.localdev.pl",
+      "root": "localdev.pl",
+      "status": "live"
+    },
+    {
+      "observed_answers": [
+        "127.0.0.1"
+      ],
+      "probe": "skyline-probe.localdev.pw",
+      "root": "localdev.pw",
+      "status": "live"
+    },
+    {
+      "observed_answers": [
+        "127.0.0.1"
+      ],
+      "probe": "skyline-probe.localdev.space",
+      "root": "localdev.space",
+      "status": "live"
+    },
+    {
+      "observed_answers": [
+        "127.0.0.1"
+      ],
+      "probe": "skyline-probe.localdev.tech",
+      "root": "localdev.tech",
+      "status": "live"
+    },
+    {
+      "observed_answers": [
+        "127.0.0.1"
+      ],
+      "probe": "skyline-probe.localdev.top",
+      "root": "localdev.top",
+      "status": "live",
+      "note": "apex NXDOMAIN; wildcard label answers loopback"
+    },
+    {
+      "observed_answers": [
+        "127.0.0.1"
+      ],
+      "probe": "skyline-probe.localdev.xyz",
+      "root": "localdev.xyz",
       "status": "live"
     },
     {
@@ -178,6 +310,15 @@
     },
     {
       "observed_answers": [
+        "127.0.0.1",
+        "::1"
+      ],
+      "probe": "skyline-probe.localhost.cool",
+      "root": "localhost.cool",
+      "status": "live"
+    },
+    {
+      "observed_answers": [
         "127.0.0.1"
       ],
       "probe": "a.localhost.direct",
@@ -190,6 +331,15 @@
       ],
       "probe": "foo.localhost.team",
       "root": "localhost.team",
+      "status": "live"
+    },
+    {
+      "observed_answers": [
+        "127.0.0.1",
+        "::1"
+      ],
+      "probe": "skyline-probe.localhost.tw",
+      "root": "localhost.tw",
       "status": "live"
     },
     {
@@ -220,10 +370,86 @@
     },
     {
       "observed_answers": [
+        "172.16.44.1"
+      ],
+      "probe": "skyline-probe.lokaal.host",
+      "root": "lokaal.host",
+      "status": "live",
+      "note": "apex and wildcard answer RFC1918"
+    },
+    {
+      "observed_answers": [
+        "127.0.0.1"
+      ],
+      "probe": "skyline-probe.lokal.host",
+      "root": "lokal.host",
+      "status": "live"
+    },
+    {
+      "observed_answers": [
+        "127.0.0.1"
+      ],
+      "probe": "skyline-probe.lokalhost.link",
+      "root": "lokalhost.link",
+      "status": "live"
+    },
+    {
+      "observed_answers": [
+        "127.0.0.1"
+      ],
+      "probe": "loopback.cz",
+      "root": "loopback.cz",
+      "status": "live",
+      "note": "apex answers loopback; arbitrary labels NXDOMAIN"
+    },
+    {
+      "observed_answers": [
+        "127.0.0.1"
+      ],
+      "probe": "loopback.it",
+      "root": "loopback.it",
+      "status": "live",
+      "note": "apex answers loopback; arbitrary labels do not answer"
+    },
+    {
+      "observed_answers": [
+        "127.0.0.1"
+      ],
+      "probe": "skyline-probe.loopback.link",
+      "root": "loopback.link",
+      "status": "live"
+    },
+    {
+      "observed_answers": [
+        "127.0.0.1",
+        "::1"
+      ],
+      "probe": "skyline-probe.loopback.run",
+      "root": "loopback.run",
+      "status": "live"
+    },
+    {
+      "observed_answers": [
         "127.0.0.1"
       ],
       "probe": "lvh.me",
       "root": "lvh.me",
+      "status": "live"
+    },
+    {
+      "observed_answers": [
+        "127.0.0.1"
+      ],
+      "probe": "skyline-probe.mylocal.in",
+      "root": "mylocal.in",
+      "status": "live"
+    },
+    {
+      "observed_answers": [
+        "127.0.0.1"
+      ],
+      "probe": "skyline-probe.mylocal.zone",
+      "root": "mylocal.zone",
       "status": "live"
     },
     {
@@ -260,6 +486,16 @@
       "probe": "127.0.0.1.sslip.io",
       "root": "sslip.io",
       "status": "live"
+    },
+    {
+      "observed_answers": [
+        "127.0.0.1",
+        "::1"
+      ],
+      "probe": "skyline-probe.test.ws",
+      "root": "test.ws",
+      "status": "live",
+      "note": "not caught by the local-label class rule (no local-ish label) - enumeration is load-bearing for this root"
     },
     {
       "observed_answers": [

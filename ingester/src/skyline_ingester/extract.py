@@ -35,7 +35,7 @@ _EMOJI_CORE = (
     "✀-➿"
 )
 _EXT = "[️\U0001f3fb-\U0001f3ff]"
-EMOJI_RE = re.compile(f"[{_EMOJI_CORE}](?:{_EXT}|‍[{_EMOJI_CORE}]{_EXT}?)*")
+EMOJI_RE = re.compile(f"[{_EMOJI_CORE}](?:{_EXT}|‍[{_EMOJI_CORE}])*")
 
 # ponytail: ~40-word lexicon + emoji valence — demo-grade sentiment. Swap for a
 # real model (e.g. vader / a small transformer) if the secure cache ever matters.
@@ -237,9 +237,12 @@ def extract_post(event: dict) -> PostFeatures | None:
 
     # Emoji are one signal per distinct emoji per post, mirroring tag/link
     # dedup and caps: rotating distinct ZWJ chains must not mint hundreds of
-    # counter keys from one legal post. Over-length matches stay silently
-    # dropped (they are regex artifacts, not user signals). Sentiment below
-    # still sees every occurrence.
+    # counter keys from one legal post. Every distinct emoji is charged to the
+    # public denominator exactly once — accepted or candidate_limit_emoji —
+    # and its repeats fall to duplicate_in_event_emoji, so one legal post
+    # cannot inflate total_signal_candidates by repeating a beyond-cap emoji.
+    # Over-length matches stay silently dropped (they are regex artifacts,
+    # not user signals). Sentiment below still sees every occurrence.
     emoji: list[str] = []
     seen_emoji: set[str] = set()
     for match in EMOJI_RE.findall(text):
@@ -247,11 +250,12 @@ def extract_post(event: dict) -> PostFeatures | None:
             continue
         if match in seen_emoji:
             exclusions["duplicate_in_event_emoji"] += 1
-        elif len(emoji) >= MAX_EMOJI_CANDIDATES:
-            exclusions["candidate_limit_emoji"] += 1
         else:
             seen_emoji.add(match)
-            emoji.append(match)
+            if len(emoji) >= MAX_EMOJI_CANDIDATES:
+                exclusions["candidate_limit_emoji"] += 1
+            else:
+                emoji.append(match)
 
     langs = record.get("langs") or []
     if not isinstance(langs, list):

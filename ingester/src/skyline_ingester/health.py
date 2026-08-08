@@ -48,7 +48,6 @@ class HealthState:
         self.jetstream_connected = False
         self.events_seen = 0
         self.events_missing_source = 0
-        self.source_ledger_evictions = 0
         self.last_event_at: float | None = None
         self.last_publish_at: float | None = None
 
@@ -63,9 +62,6 @@ class HealthState:
         self.events_missing_source += 1
         return self.events_missing_source
 
-    def ledger_eviction(self) -> None:
-        self.source_ledger_evictions += 1
-
     def snapshot(self) -> tuple[int, dict]:
         """(HTTP status, body) for /health — 503 whenever Jetstream is down."""
         now = self._now()
@@ -79,7 +75,6 @@ class HealthState:
             "jetstream_connected": self.jetstream_connected,
             "events_seen": self.events_seen,
             "events_missing_source": self.events_missing_source,
-            "source_ledger_evictions": self.source_ledger_evictions,
             "last_event_age_seconds": age(self.last_event_at),
             "last_publish_age_seconds": age(self.last_publish_at),
             "uptime_seconds": round(now - self.started_at, 1),

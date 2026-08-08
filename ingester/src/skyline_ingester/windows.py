@@ -21,7 +21,6 @@ import secrets
 import threading
 import time
 from collections import Counter
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from itertools import islice
 
@@ -95,7 +94,6 @@ class WindowStore:
         max_minutes: int = WINDOW_MINUTES["24h"],
         *,
         dedupe_key: bytes | None = None,
-        on_ledger_eviction: Callable[[], None] | None = None,
     ):
         self._max = max_minutes
         self._buckets: dict[int, Bucket] = {}
@@ -108,7 +106,6 @@ class WindowStore:
         self._seen_expiry: list[tuple[float, bytes]] = []
         self._seen_source: dict[bytes, bytes] = {}
         self._seen_by_source: dict[bytes, dict[bytes, float]] = {}
-        self._on_ledger_eviction = on_ledger_eviction
         # Bumped by every add(); a merge only memoises its result if no add()
         # landed since it started, so a cleared memo can't be resurrected with
         # a pre-add() view for the rest of that second.
@@ -140,25 +137,25 @@ class WindowStore:
                     label = feats.hashtag_labels.get(tag, tag)
                     bucket.tag_labels[(tag, label)] += 1
                 else:
-                    bucket.excluded[f"{rejection}_tag"] += 1
+                    bucket.excluded[rejection] += 1
             for link in feats.links:
                 rejection = self._accept_signal(source_digest, "url", link, ledger_now)
                 if rejection is None:
                     bucket.links[link] += 1
                 else:
-                    bucket.excluded[f"{rejection}_url"] += 1
+                    bucket.excluded[rejection] += 1
             for domain in feats.domains:
                 rejection = self._accept_signal(source_digest, "domain", domain, ledger_now)
                 if rejection is None:
                     bucket.domains[domain] += 1
                 else:
-                    bucket.excluded[f"{rejection}_domain"] += 1
+                    bucket.excluded[rejection] += 1
             for emoji in feats.emoji:
                 rejection = self._accept_signal(source_digest, "emoji", emoji, ledger_now)
                 if rejection is None:
                     bucket.emoji[emoji] += 1
                 else:
-                    bucket.excluded[f"{rejection}_emoji"] += 1
+                    bucket.excluded[rejection] += 1
             bucket.langs[feats.lang] += 1
             if feats.sentiment is not None:
                 acc = bucket.sent.setdefault(feats.lang, [0.0, 0])
@@ -176,17 +173,16 @@ class WindowStore:
             return None
         return hashlib.blake2b(encoded, key=self._dedupe_key, digest_size=16).digest()
 
-    def _drop_seen(self, digest: bytes) -> bool:
+    def _drop_seen(self, digest: bytes) -> None:
         """Remove one tuple digest from global and per-source ledgers."""
         if self._seen.pop(digest, None) is None:
-            return False
+            return
         source_digest = self._seen_source.pop(digest, None)
         source_entries = self._seen_by_source.get(source_digest) if source_digest is not None else None
         if source_entries is not None:
             source_entries.pop(digest, None)
             if not source_entries:
                 del self._seen_by_source[source_digest]
-        return True
 
     def _expire_seen(self, now: float) -> None:
         """Bound expiry work so reconnect recovery cannot stall ingestion."""
@@ -198,43 +194,22 @@ class WindowStore:
                 self._drop_seen(digest)
             swept += 1
 
-    def _record_ledger_eviction(self) -> None:
-        if self._on_ledger_eviction is not None:
-            self._on_ledger_eviction()
-
-    def _evict_oldest_seen(self) -> None:
-        """Evict one live global entry while bounding stale-heap cleanup."""
-        swept = 0
-        while self._seen_expiry and swept < _EXPIRY_SWEEP_LIMIT:
-            expiry, digest = heapq.heappop(self._seen_expiry)
-            seen_at = self._seen.get(digest)
-            if seen_at is not None and seen_at + SOURCE_DEDUPE_SECONDS == expiry:
-                self._drop_seen(digest)
-                self._record_ledger_eviction()
-                return
-            swept += 1
-        if self._seen:
-            # Assignment order tracks accepted contribution time. This fallback
-            # bounds work even if the heap contains an adversarial stale prefix.
-            self._drop_seen(next(iter(self._seen)))
-            self._record_ledger_eviction()
-
     def _accept_signal(self, source_digest: bytes | None, family: str, value: str, now: float) -> str | None:
         """Accept one source/signal contribution per rolling five minutes.
 
-        Returns None on accept, else the exclusion-reason prefix (the caller
-        appends the signal family). Caller holds self._lock. The digest is
-        process-keyed, non-portable, and discarded after the horizon. Restarts
-        intentionally start with an empty ledger rather than persisting a
-        stable identity boundary.
+        Returns None on accept, else the complete public exclusion reason
+        (always a member of EXCLUSION_REASONS). Caller holds self._lock. The
+        digest is process-keyed, non-portable, and discarded after the horizon.
+        Restarts intentionally start with an empty ledger rather than
+        persisting a stable identity boundary.
         """
         if source_digest is None:
-            return "missing_source"
+            return f"missing_source_{family}"
         material = source_digest + b"\0" + family.encode("ascii") + b"\0" + value.encode("utf-8")
         digest = hashlib.blake2b(material, key=self._dedupe_key, digest_size=16).digest()
         seen_at = self._seen.get(digest)
         if seen_at is not None and seen_at + SOURCE_DEDUPE_SECONDS > now:
-            return "duplicate_source"
+            return f"duplicate_source_{family}"
         source_entries = self._seen_by_source.get(source_digest)
         if (
             source_entries is not None
@@ -249,12 +224,31 @@ class WindowStore:
             # of MAX_SOURCE_LEDGER_ENTRIES_PER_SOURCE accepted contributions
             # per source per SOURCE_DEDUPE_SECONDS, surfaced per family as
             # rate_limited_source_* in the public exclusion counts.
-            return "rate_limited_source"
+            return f"rate_limited_source_{family}"
         if seen_at is not None:
             # Reinsert at the end so dict order remains an oldest-first fallback.
             self._drop_seen(digest)
         if len(self._seen) >= MAX_SOURCE_LEDGER_ENTRIES:
-            self._evict_oldest_seen()
+            # The full GLOBAL ledger also refuses, never evicts: dropping a
+            # live in-horizon tuple both re-credits an already-counted signal
+            # and refills its source's per-source budget, so global pressure
+            # from freely minted DIDs became a second flush path around the
+            # per-source refusal (round-10 CRIT). Only genuinely expired
+            # entries free capacity, via _expire_seen on every add(). The
+            # anti-replay guarantee therefore holds under both ceilings, and
+            # degradation is public: rate_limited_global_* exclusion counts.
+            #
+            # ponytail: refuse-at-cap trades the round-10 integrity bug for a
+            # bounded availability one — ~98 minted DIDs sustaining ~333
+            # distinct tuples/s can hold the 100k ledger full and get every
+            # source's *new* signals refused for the 5-min horizon. Accepted
+            # for a best-effort public demo: it self-heals within one horizon
+            # of the flood stopping, is publicly visible in the exclusion
+            # counts, and never corrupts a count. Split the memory ceiling
+            # from the anti-replay structure (a separate LRU that sheds by
+            # age without re-crediting) if the ranking ever becomes
+            # load-bearing.
+            return f"rate_limited_global_{family}"
         self._seen[digest] = now
         self._seen_source[digest] = source_digest
         self._seen_by_source.setdefault(source_digest, {})[digest] = now
@@ -316,6 +310,13 @@ class WindowStore:
 
     # Copy in bounded chunks so one read never holds the add() lock across the
     # whole retained window. Per-bucket cost still scales with live cardinality.
+    # ponytail: live per-bucket counter cardinality is unbounded across the
+    # 1,440 retained minutes (~295 MiB per 1M distinct link keys; a merged()
+    # pass transiently allocates a second copy). At a sustained 100
+    # link-posts/s the 24h window needs ~2,550 MiB — against Render free's
+    # 512 MiB the real sustained ceiling is ~20 link-posts/s of distinct
+    # links. Cap live per-bucket cardinality above top-K if the firehose
+    # ever approaches that rate.
     _COPY_CHUNK = 16
 
     def _copy_range(self, lo: float = float("-inf"), hi: float = float("inf")) -> list[tuple[int, Bucket]]:

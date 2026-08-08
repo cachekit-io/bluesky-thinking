@@ -96,6 +96,10 @@ EXCLUSION_REASONS = frozenset(
         "missing_source_emoji",
         "missing_source_tag",
         "missing_source_url",
+        "rate_limited_global_domain",
+        "rate_limited_global_emoji",
+        "rate_limited_global_tag",
+        "rate_limited_global_url",
         "rate_limited_source_domain",
         "rate_limited_source_emoji",
         "rate_limited_source_tag",
@@ -107,6 +111,23 @@ EXCLUSION_REASONS = frozenset(
 
 _BAD_PERCENT_ESCAPE_RE = re.compile(r"%(?![0-9a-fA-F]{2})")
 _DNS_LABEL_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+# Syntactic class rule for the ONE attacker move enumeration cannot outrun:
+# registering a local/loopback-themed name under an arbitrary new TLD
+# (localdev.<newTLD>, <x>local.<tld>, loopback.<tld>) and pointing it at a
+# private address for ~ten dollars (round-10 verdict). Matched as a substring
+# against every DNS label, so it also catches embeddings (devlocal, mylocal,
+# localhost, lokalhost). Tokens are limited to the four DISTINCTIVE stems of
+# that family — bare short tokens like `home`/`lcl`/`lvh`/`intern`/`127` were
+# tried and reverted: they silently denied mainstream public hosts
+# (home.cern, lcl.fr, internet.org, route127.net) they cannot be told apart
+# from a target by syntax alone. Those specific classic dev-domains live in
+# the enumerated _LOCAL_HOSTS backstop below instead, which is DNS-verified
+# and non-redundant (21 of its roots, e.g. nip.io / sslip.io / rbndr.us /
+# home.no / test.ws, carry no local-ish stem and are caught ONLY by the list).
+# The one accepted false-positive class is a legitimate label that embeds
+# "local" (e.g. "localize"): excluded from the ranking, never a safety miss —
+# the published set is a ranking, not a directory.
+_LOCAL_LABEL_RE = re.compile(r"local|lokal|lokaal|loopback")
 # Dated resolution/probe fixture: tests/fixtures/host_provider_sweep.json.
 # Last verified 2026-08-08; keep parked former providers conservatively denied.
 # The fixture test bounds the sweep's age at 90 days, so the list MUST be
@@ -117,8 +138,14 @@ _LOCAL_HOSTS = frozenset(
         "backname.io",
         "ddev.site",
         "devlocal.dev",
+        "devlocal.io",
+        "devlocal.me",
+        "devlocal.nl",
+        "devlocal.site",
+        "devlocal.us",
         "docksal.site",
         "fbi.com",
+        "home.no",
         "ip.es.io",
         "l0pb.dev",
         "l0pb.me",
@@ -126,20 +153,43 @@ _LOCAL_HOSTS = frozenset(
         "lcl.host",
         "lndo.site",
         "local.gd",
+        "local.qinlili.bid",
         "local.sisteminha.com",
+        "localdev.cc",
+        "localdev.hu",
+        "localdev.it",
+        "localdev.name",
+        "localdev.pl",
+        "localdev.pw",
+        "localdev.space",
+        "localdev.tech",
+        "localdev.top",
+        "localdev.xyz",
         "localfabriek.nl",
         "localho.st",
         "localhost",
+        "localhost.cool",
         "localhost.direct",
         "localhost.team",
+        "localhost.tw",
         "localhst.co.uk",
         "localtest.dev",
         "localtest.me",
+        "lokaal.host",
+        "lokal.host",
+        "lokalhost.link",
+        "loopback.cz",
+        "loopback.it",
+        "loopback.link",
+        "loopback.run",
         "lvh.me",
+        "mylocal.in",
+        "mylocal.zone",
         "nip.io",
         "rbndr.us",
         "rebind.network",
         "sslip.io",
+        "test.ws",
         "traefik.me",
         "vcap.me",
         "yoogle.com",
@@ -354,6 +404,8 @@ def _normalize_host(raw_host: str) -> str | None:
     if _domain_matches(host, _LOCAL_HOSTS) or _domain_matches(host, _LOCAL_SUFFIXES) or "." not in host:
         return None
     if any(_DNS_LABEL_RE.fullmatch(label) is None for label in labels):
+        return None
+    if any(_LOCAL_LABEL_RE.search(label) for label in labels):
         return None
     if _contains_non_global_ipv4_alias(labels):
         return None

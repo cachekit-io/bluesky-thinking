@@ -2,17 +2,45 @@
 
 import sys
 import threading
+import time
 from collections import Counter
 
 from skyline_ingester.extract import PostFeatures
+from skyline_ingester.policy import NORMALIZATION_VERSION
 from skyline_ingester.windows import (
     MAX_SOURCE_LEDGER_ENTRIES,
     MAX_SOURCE_LEDGER_ENTRIES_PER_SOURCE,
+    SNAPSHOT_VERSION,
     SOURCE_DEDUPE_SECONDS,
     WindowStore,
 )
 
 from .conftest import FIXTURE_TOTALS, NOW
+
+
+def test_restore_bounds_backtracking_hostile_emoji_keys():
+    # Round-10 CRIT: an ambiguous EMOJI_RE made the ANCHORED fullmatch in the
+    # checkpoint emoji validator backtrack exponentially — 100 hostile keys
+    # blocked restore() for ~7.7 s while holding the store lock, and restore()
+    # runs before the health port binds, so a poisoned 26h-TTL checkpoint was
+    # a permanent boot loop. Hostile shape (panel): CORE (ZWJ CORE EXT)^k + "x",
+    # k=20, inside the 64-codepoint cap so MAX_EMOJI_LENGTH cannot mitigate it.
+    hostile = {chr(0x1F300 + index) + "‍\U0001f600\U0001f3fb" * 20 + "x": 1 for index in range(100)}
+    snap = {
+        "v": SNAPSHOT_VERSION,
+        "normalization_version": NORMALIZATION_VERSION,
+        "saved_at": int(NOW),
+        "buckets": [[int(NOW // 60), {"n": 1, "emoji": hostile}]],
+    }
+    store = WindowStore()
+    start = time.perf_counter()
+    assert store.restore(snap, NOW) == 1
+    elapsed = time.perf_counter() - start
+    # Pre-fix ~7.7 s, post-fix milliseconds; the slack keeps slow CI green
+    # while still failing an exponential regex by a factor of ~4.
+    assert elapsed < 2.0, f"restore took {elapsed:.2f}s on backtracking-hostile emoji keys"
+    merged = store.merged("5m", NOW)
+    assert merged.excluded["checkpoint_invalid_emoji"] == 100
 
 
 def test_trending_hashtags_per_window(store):
@@ -78,24 +106,67 @@ def test_tag_labels_use_one_flat_counter_per_bucket(store):
         assert all(isinstance(count, int) for count in bucket.tag_labels.values())
 
 
-def test_source_ledger_evicts_oldest_at_hard_cap(monkeypatch):
+def test_global_ledger_cap_refuses_new_contributions(monkeypatch):
     monkeypatch.setattr("skyline_ingester.windows.MAX_SOURCE_LEDGER_ENTRIES", 3)
     store = WindowStore(dedupe_key=b"x" * 32)
-    # Distinct sources: the global cap must evict, the per-source cap must not fire.
-    for index in range(4):
+    # Distinct sources: the global cap must refuse the newcomer, never evict a
+    # live tuple — eviction both re-credited an already-counted signal and
+    # refilled its source's per-source budget (round-10 CRIT).
+    for index in range(3):
         assert store._accept_signal(bytes([index]) * 16, "tag", f"tag{index}", float(index)) is None
+    assert store._accept_signal(bytes([3]) * 16, "tag", "tag3", 3.0) == "rate_limited_global_tag"
     assert len(store._seen) == 3
     assert len(store._seen_expiry) == 3
-    assert store._accept_signal(bytes([0]) * 16, "tag", "tag0", 4.0) is None
-    assert store._accept_signal(bytes([3]) * 16, "tag", "tag3", 4.0) == "duplicate_source"
+    # Every pre-cap tuple is still live: replays stay denied inside the horizon.
+    for index in range(3):
+        assert store._accept_signal(bytes([index]) * 16, "tag", f"tag{index}", 4.0) == "duplicate_source_tag"
+    # Expiry (not eviction) frees capacity for new contributions.
+    later = SOURCE_DEDUPE_SECONDS + 5.0
+    store._expire_seen(later)
+    assert store._accept_signal(bytes([3]) * 16, "tag", "tag3", later) is None
+
+
+def test_global_cap_pressure_cannot_recredit_capped_source(monkeypatch):
+    # Round-10 CRIT reproduction (frozen clock, so nothing expires): source A
+    # fills its per-source cap, 600 other DIDs push the global cap, and A's
+    # live tuples must NOT be re-credited nor its per-source budget refilled.
+    monkeypatch.setattr("skyline_ingester.windows.MAX_SOURCE_LEDGER_ENTRIES_PER_SOURCE", 8)
+    monkeypatch.setattr("skyline_ingester.windows.MAX_SOURCE_LEDGER_ENTRIES", 50)
+    monkeypatch.setattr("skyline_ingester.windows.time.monotonic", lambda: 100.0)
+    store = WindowStore(dedupe_key=b"x" * 32)
+
+    def post(tags: list[str], source: str) -> None:
+        store.add(
+            PostFeatures(ts=NOW, lang="en", hashtags=tags, links=[], emoji=[], sentiment=None),
+            source_id=source,
+        )
+
+    for index in range(8):
+        post([f"a{index}"], "did:plc:capped")
+    post(["a-overflow"], "did:plc:capped")  # 9th -> rate_limited_source_tag
+    for index in range(600):
+        post([f"flood{index}"], f"did:plc:flood{index}")
+    # A's live tuples survived the flood: replaying every accepted tag is
+    # still a duplicate, and A's per-source budget was not refilled.
+    for index in range(8):
+        post([f"a{index}"], "did:plc:capped")
+    post(["a-still-capped"], "did:plc:capped")
+
+    merged = store.merged("5m", NOW)
+    for index in range(8):
+        assert merged.tags[f"a{index}"] == 1
+    assert "a-overflow" not in merged.tags and "a-still-capped" not in merged.tags
+    assert merged.excluded["duplicate_source_tag"] == 8
+    assert merged.excluded["rate_limited_source_tag"] == 2
+    assert merged.excluded["rate_limited_global_tag"] == 600 - (50 - 8)
+    assert sum(merged.tags.values()) == 50
 
 
 def test_per_source_ledger_cap_refuses_instead_of_evicting(monkeypatch):
     assert MAX_SOURCE_LEDGER_ENTRIES_PER_SOURCE == 1_024
     assert MAX_SOURCE_LEDGER_ENTRIES == 100_000
     monkeypatch.setattr("skyline_ingester.windows.MAX_SOURCE_LEDGER_ENTRIES_PER_SOURCE", 2)
-    evictions = []
-    store = WindowStore(dedupe_key=b"x" * 32, on_ledger_eviction=lambda: evictions.append(1))
+    store = WindowStore(dedupe_key=b"x" * 32)
     campaign = b"a" * 16
     attacker = b"x" * 16
     assert store._accept_signal(campaign, "url", "https://campaign.example/a", 1.0) is None
@@ -103,11 +174,11 @@ def test_per_source_ledger_cap_refuses_instead_of_evicting(monkeypatch):
     # source can never free its earlier tuples (its own or anyone else's) with junk.
     assert store._accept_signal(attacker, "tag", "junk0", 1.0) is None
     assert store._accept_signal(attacker, "tag", "junk1", 1.0) is None
-    assert store._accept_signal(attacker, "tag", "junk2", 1.0) == "rate_limited_source"
-    assert store._accept_signal(attacker, "tag", "junk0", 1.0) == "duplicate_source"
+    assert store._accept_signal(attacker, "tag", "junk2", 1.0) == "rate_limited_source_tag"
+    assert store._accept_signal(attacker, "tag", "junk0", 1.0) == "duplicate_source_tag"
     assert len(store._seen_by_source[attacker]) == 2
-    assert store._accept_signal(campaign, "url", "https://campaign.example/a", 1.0) == "duplicate_source"
-    assert evictions == []
+    assert store._accept_signal(campaign, "url", "https://campaign.example/a", 1.0) == "duplicate_source_url"
+    assert len(store._seen) == 3
     # Expiry frees per-source capacity: the bound is a rate, not a lifetime total.
     later = 1.0 + SOURCE_DEDUPE_SECONDS
     store._expire_seen(later)

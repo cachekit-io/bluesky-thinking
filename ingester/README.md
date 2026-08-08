@@ -45,7 +45,7 @@ key material:
 
 ```json
 {"status": "ok", "jetstream_connected": true, "events_seen": 12345,
- "events_missing_source": 0, "source_ledger_evictions": 0,
+ "events_missing_source": 0,
  "last_event_age_seconds": 0.4, "last_publish_age_seconds": 7.1, "uptime_seconds": 900.0}
 ```
 
@@ -130,11 +130,12 @@ local call boundary, is immediately folded into a process-keyed tuple digest,
 and is never stored or logged. The random key and opaque five-minute ledger are
 excluded from buckets, checkpoints, cache values, and history, and rotate on
 restart. The ledger holds at most 1,024 tuples per source and 100,000 globally.
-A source at its own ceiling has further contributions refused (reported as
-`rate_limited_source_*`) — never evicted, so a source cannot flush its own
-tuples to replay a signal; global pressure from many distinct sources can evict
-the globally oldest tuple, and every such eviction increments
-`source_ledger_evictions` on `/health`. Full canonicalization, safety,
+Both ceilings refuse rather than evict: a source at its own ceiling has further
+contributions refused (reported as `rate_limited_source_*`), and global
+pressure from many distinct sources refuses new contributions (reported as
+`rate_limited_global_*`) instead of evicting the globally oldest tuple — a
+live-tuple eviction would re-credit an already-counted signal and refill its
+source's budget. Only genuinely expired entries free capacity. Full canonicalization, safety,
 filter-list, tracking-parameter, and transparency
 semantics: [public signal policy](../docs/signal-policy.md).
 
