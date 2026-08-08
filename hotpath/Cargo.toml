@@ -21,7 +21,7 @@ cachekit-rs = { version = "0.7.0", default-features = false }
 # xxHash3-64 integrity primitive — same function that backs StorageEnvelope
 # checksums, so wire values are identical. 0.4 matches cachekit-rs 0.7.0's
 # pin so only one copy lands in the wasm binary.
-cachekit-core = { version = "0.4", default-features = false, features = ["checksum"] }
+cachekit-core = { version = "0.5", default-features = false, features = ["checksum"] }
 serde = { version = "1", features = ["derive"] }
 hex = "0.4"
 
