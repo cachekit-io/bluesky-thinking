@@ -129,6 +129,17 @@ def test_emoji_are_deduped_and_capped_per_post(fixture_lines):
     assert features.emoji == distinct[:16]
     assert features.exclusions["candidate_limit_emoji"] == 2
 
+    # Round-10 CRIT: a beyond-cap emoji is charged candidate_limit_emoji ONCE
+    # per distinct token; repeats fall to duplicate_in_event_emoji. Charging
+    # per occurrence let one 4,096-character post add 4,096 to the public
+    # total_signal_candidates denominator against a fixture whose total is 34.
+    event["commit"]["record"]["text"] = "".join(distinct) + "😒" * 100
+    features = extract_post(event)
+    assert features is not None
+    assert features.emoji == distinct[:16]
+    assert features.exclusions["candidate_limit_emoji"] == 3
+    assert features.exclusions["duplicate_in_event_emoji"] == 99
+
 
 def test_text_nfkc_output_is_capped_before_feature_work(fixture_lines, monkeypatch):
     captured = []

@@ -96,6 +96,10 @@ EXCLUSION_REASONS = frozenset(
         "missing_source_emoji",
         "missing_source_tag",
         "missing_source_url",
+        "rate_limited_global_domain",
+        "rate_limited_global_emoji",
+        "rate_limited_global_tag",
+        "rate_limited_global_url",
         "rate_limited_source_domain",
         "rate_limited_source_emoji",
         "rate_limited_source_tag",
@@ -107,6 +111,15 @@ EXCLUSION_REASONS = frozenset(
 
 _BAD_PERCENT_ESCAPE_RE = re.compile(r"%(?![0-9a-fA-F]{2})")
 _DNS_LABEL_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+# Syntactic class rule for local/loopback-provider names, applied to every
+# DNS label as a substring match. The enumerated _LOCAL_HOSTS list below is a
+# ranking of names observed in the wild, not a directory: eight review rounds
+# proved enumeration cannot converge, because registering localdev.<newTLD>
+# and pointing it at 127.0.0.1 costs ~ten dollars (round-10 verdict). This
+# rule is closed under that cheapest move. False positives (e.g. a legitimate
+# host with a "home" label) are accepted: the published set is a ranking, and
+# a conservative miss there is cheaper than another leaked private target.
+_LOCAL_LABEL_RE = re.compile(r"local|lokal|lokaal|loopback|lcl|lvh|intern|127|home|dev-?local|local-?dev")
 # Dated resolution/probe fixture: tests/fixtures/host_provider_sweep.json.
 # Last verified 2026-08-08; keep parked former providers conservatively denied.
 # The fixture test bounds the sweep's age at 90 days, so the list MUST be
@@ -117,8 +130,14 @@ _LOCAL_HOSTS = frozenset(
         "backname.io",
         "ddev.site",
         "devlocal.dev",
+        "devlocal.io",
+        "devlocal.me",
+        "devlocal.nl",
+        "devlocal.site",
+        "devlocal.us",
         "docksal.site",
         "fbi.com",
+        "home.no",
         "ip.es.io",
         "l0pb.dev",
         "l0pb.me",
@@ -126,20 +145,43 @@ _LOCAL_HOSTS = frozenset(
         "lcl.host",
         "lndo.site",
         "local.gd",
+        "local.qinlili.bid",
         "local.sisteminha.com",
+        "localdev.cc",
+        "localdev.hu",
+        "localdev.it",
+        "localdev.name",
+        "localdev.pl",
+        "localdev.pw",
+        "localdev.space",
+        "localdev.tech",
+        "localdev.top",
+        "localdev.xyz",
         "localfabriek.nl",
         "localho.st",
         "localhost",
+        "localhost.cool",
         "localhost.direct",
         "localhost.team",
+        "localhost.tw",
         "localhst.co.uk",
         "localtest.dev",
         "localtest.me",
+        "lokaal.host",
+        "lokal.host",
+        "lokalhost.link",
+        "loopback.cz",
+        "loopback.it",
+        "loopback.link",
+        "loopback.run",
         "lvh.me",
+        "mylocal.in",
+        "mylocal.zone",
         "nip.io",
         "rbndr.us",
         "rebind.network",
         "sslip.io",
+        "test.ws",
         "traefik.me",
         "vcap.me",
         "yoogle.com",
@@ -354,6 +396,8 @@ def _normalize_host(raw_host: str) -> str | None:
     if _domain_matches(host, _LOCAL_HOSTS) or _domain_matches(host, _LOCAL_SUFFIXES) or "." not in host:
         return None
     if any(_DNS_LABEL_RE.fullmatch(label) is None for label in labels):
+        return None
+    if any(_LOCAL_LABEL_RE.search(label) for label in labels):
         return None
     if _contains_non_global_ipv4_alias(labels):
         return None

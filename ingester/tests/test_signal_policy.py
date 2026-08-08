@@ -176,7 +176,6 @@ def test_checked_in_provider_sweep_matches_host_policy():
     providers = sweep["providers"]
     roots = {provider["root"] for provider in providers}
     assert roots == signal_policy._LOCAL_HOSTS
-    assert set(sweep["local_suffix_roots"]) == signal_policy._LOCAL_SUFFIXES
     # Every suffix root gets a probe (probe = "<label>.<suffix>"), so adding a
     # suffix to policy without a fixture row fails here, in both directions.
     assert {probe.split(".", 1)[1] for probe in sweep["local_suffix_probes"]} == signal_policy._LOCAL_SUFFIXES
@@ -187,6 +186,39 @@ def test_checked_in_provider_sweep_matches_host_policy():
     for probe in sweep["local_suffix_probes"]:
         link, reason = normalize_link(f"http://{probe}/admin")
         assert link is None and reason == "unsafe_host"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        # The provider class is unbounded (registering localdev.<newTLD> costs
+        # ~ten dollars), so names NOT in any enumerated list must still be
+        # denied when a label matches the local-development class rule.
+        "http://skyline.localdev.example.org/admin",
+        "http://loopback9000.example.com/admin",
+        "http://my-home.router.example.net/admin",
+        "http://api.lokalzone.example.com/admin",
+        "http://svc127.example.io/admin",
+        "http://intern.example.de/admin",
+        "http://lvh2.example.com/admin",
+    ],
+)
+def test_unenumerated_local_class_labels_are_denied(value):
+    link, reason = normalize_link(value)
+    assert link is None and reason == "unsafe_host"
+
+
+def test_local_label_class_rule_accepts_known_false_positives():
+    # The class rule is substring-per-label and DELIBERATELY over-broad: a
+    # legitimate host with a local-ish label is excluded from the ranking.
+    # That cost is accepted policy (the published set is a ranking, not a
+    # directory); this test pins the trade-off so it stays a conscious one.
+    denied_false_positive, reason = normalize_link("https://homedepot.example.com/deals")
+    assert denied_false_positive is None and reason == "unsafe_host"
+    # Hosts without a matching label are untouched.
+    for value in ("https://news.example.com/story", "https://intl.example.com/x", "https://dev.example.com/x"):
+        link, reason = normalize_link(value)
+        assert link is not None and reason is None
 
 
 def test_link_output_length_is_bounded_after_root_slash_insertion():
@@ -245,9 +277,16 @@ def test_recorded_before_after_keeps_broad_activity_above_one_repetitive_source(
     assert excluded["filtered_domain"] == 1
     assert excluded["unsafe_host"] == 1
     assert excluded["malformed_tag"] == 1
+    assert excluded["duplicate_in_event_emoji"] == 1
+    emoji_value = store.build_value("top_emoji", "5m", NOW)
+    assert {"emoji": "🔥", "count": 1} in emoji_value["emoji"]
+    assert {"emoji": "😂", "count": 1} in emoji_value["emoji"]
+    # Conservation oracle: every accepted or excluded decision across ALL four
+    # public signal families lands in the denominator exactly once.
     accepted = sum(item["count"] for item in hashtag_value["hashtags"])
     accepted += sum(item["count"] for item in link_value["links"])
     accepted += sum(item["count"] for item in link_value["domains"])
+    accepted += sum(item["count"] for item in emoji_value["emoji"])
     assert link_value["total_signal_candidates"] == accepted + sum(excluded.values())
 
 

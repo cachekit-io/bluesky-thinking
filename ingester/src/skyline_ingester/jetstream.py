@@ -136,7 +136,15 @@ def ingest_raw(
         logger.warning("dropping Jetstream frame without int time_us")
         return None
     if not _cursor_is_usable(time_us, now):
-        logger.warning("dropping future-dated Jetstream event (time_us=%d)", time_us)
+        # Name the failed predicate: three distinct rejections shared one
+        # "future-dated" line, hiding which bound actually fired.
+        if time_us < 0:
+            predicate = "negative"
+        elif time_us.bit_length() >= 64:
+            predicate = "wider than 64 bits"
+        else:
+            predicate = "future-dated"
+        logger.warning("dropping Jetstream event with %s time_us (time_us=%d)", predicate, time_us)
         return None
     try:
         feats = extract_post(event)

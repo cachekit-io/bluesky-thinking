@@ -40,9 +40,12 @@ Genuine tag/link declarations examined beyond their family cap are reported as
 `candidate_limit_tag` or `candidate_limit_url`. If supplied tag facets produce
 no usable tag, the same bounded text fallback is still applied. Repeated rejected
 spellings within one post count once per normalized token, whether they came from
-facets or text. Emoji are one signal per distinct emoji per post: repeats are
-reported as `duplicate_in_event_emoji`, at most 16 distinct emoji per post enter
-the denominator (`candidate_limit_emoji` beyond that), and emoji contributions
+facets or text. Emoji are one signal per distinct emoji per post: at most 16
+distinct emoji per post are accepted into the ranking, each distinct emoji
+beyond that cap is charged `candidate_limit_emoji` exactly once, and every
+repeat of an already-seen emoji is reported per occurrence as
+`duplicate_in_event_emoji` — so each emoji occurrence contributes exactly one
+decision to the denominator, mirroring tags and links. Emoji contributions
 pass through the same rolling source bound as every other signal family.
 Live and restored emoji keys are limited to 64 code points; overlong ZWJ chains
 are omitted rather than becoming oversized public keys.
@@ -93,16 +96,21 @@ complete `(source, signal family, canonical value)` tuple. The key is random for
 each process. Only these opaque tuple digests and expiry timestamps live in the
 five-minute ledger.
 
-The ledger holds at most 1,024 live tuples per source and 100,000 globally. A
-source that fills its own ceiling has further contributions REFUSED (reported
-per family as `rate_limited_source_*`) rather than evicting any tuple: an
-eviction — even of the source's own oldest entry — would let a source flush its
-earlier tuples with junk and replay an already-credited signal. Refusal makes
-self-flushing cost the attacker the contribution instead of buying one, and
-bounds each source at 1,024 accepted contributions per rolling five minutes.
-Global pressure from many distinct sources can still evict the globally oldest
-tuple; each such eviction increments the aggregate `source_ledger_evictions`
-health counter so that degradation is visible. The key,
+The ledger holds at most 1,024 live tuples per source and 100,000 globally.
+Both ceilings REFUSE rather than evict. A source that fills its own ceiling has
+further contributions refused (reported per family as `rate_limited_source_*`):
+an eviction — even of the source's own oldest entry — would let a source flush
+its earlier tuples with junk and replay an already-credited signal. When the
+global ceiling is reached, new contributions are likewise refused (reported per
+family as `rate_limited_global_*`) rather than evicting the globally oldest
+tuple, because a global eviction of a live in-horizon tuple both re-credits an
+already-counted signal and refills its source's per-source budget — a second
+flush path reachable by anyone minting DIDs. Only genuinely expired entries
+free capacity. A live tuple is therefore never evicted under either ceiling,
+refusal makes self-flushing cost the attacker the contribution instead of
+buying one, each source is bounded at at most 1,024 accepted contributions per
+rolling five minutes, and degradation under global pressure is visible in the
+public `rate_limited_global_*` exclusion counts. The key,
 digests, and raw DIDs are never put in minute buckets, checkpoints, CacheKit values,
 logs, history, or health output. `/health` also exposes the aggregate
 `events_missing_source` counter so a Jetstream schema change cannot silently empty
@@ -126,7 +134,9 @@ the bound.
 
 URL checks are local and syntactic. The ingestion hot path never resolves DNS,
 opens a socket, follows a redirect, or fetches submitted content. Known
-enumerated wildcard-DNS, rebinding, and loopback provider roots are denied, and
+enumerated wildcard-DNS, rebinding, and loopback provider roots are denied;
+any hostname with a DNS label matching the local-development class pattern is
+denied syntactically (see below); and
 hostnames containing dotted or dashed non-global IPv4 spellings are rejected as
 additional defence. An
 arbitrary hostname controlled by an attacker can still resolve to a
@@ -146,12 +156,25 @@ Skyline rejects:
 - an exact host or subdomain of the enumerated local-network suffix roots `corp`,
   `home`, `home.arpa`, `internal`, `intra`, `intranet`, `lan`, `local`,
   `localdomain`, `localhost`, `private`, or `test`;
+- any hostname with a DNS label containing a match of the local-development
+  class pattern `local|lokal|lokaal|loopback|lcl|lvh|intern|127|home|dev-?local|local-?dev`.
+  This syntactic rule exists because the provider class below is unbounded —
+  registering `localdev.<newTLD>` and pointing it at a loopback or private
+  address costs about ten dollars, so enumeration alone cannot converge. False
+  positives (a legitimate host with a local-looking label) are knowingly
+  excluded: the published set is a ranking, not a directory;
 - an exact host or subdomain of the enumerated wildcard-DNS/rebinding/loopback
-  provider roots `1u.ms`, `backname.io`, `ddev.site`, `devlocal.dev`, `docksal.site`,
-  `fbi.com`, `ip.es.io`, `l0pb.dev`, `l0pb.me`, `lacolhost.com`, `lcl.host`,
-  `lndo.site`, `local.gd`, `local.sisteminha.com`, `localfabriek.nl`, `localho.st`,
-  `localhost.direct`, `localhost.team`, `localhst.co.uk`, `localtest.dev`,
-  `localtest.me`, `lvh.me`, `nip.io`, `rbndr.us`, `rebind.network`, `sslip.io`,
+  provider roots `1u.ms`, `backname.io`, `ddev.site`, `devlocal.dev`, `devlocal.io`,
+  `devlocal.me`, `devlocal.nl`, `devlocal.site`, `devlocal.us`, `docksal.site`,
+  `fbi.com`, `home.no`, `ip.es.io`, `l0pb.dev`, `l0pb.me`, `lacolhost.com`,
+  `lcl.host`, `lndo.site`, `local.gd`, `local.qinlili.bid`, `local.sisteminha.com`,
+  `localdev.cc`, `localdev.hu`, `localdev.it`, `localdev.name`, `localdev.pl`,
+  `localdev.pw`, `localdev.space`, `localdev.tech`, `localdev.top`, `localdev.xyz`,
+  `localfabriek.nl`, `localho.st`, `localhost.cool`, `localhost.direct`,
+  `localhost.team`, `localhost.tw`, `localhst.co.uk`, `localtest.dev`,
+  `localtest.me`, `lokaal.host`, `lokal.host`, `lokalhost.link`, `loopback.cz`,
+  `loopback.it`, `loopback.link`, `loopback.run`, `lvh.me`, `mylocal.in`,
+  `mylocal.zone`, `nip.io`, `rbndr.us`, `rebind.network`, `sslip.io`, `test.ws`,
   `traefik.me`, `vcap.me`, or `yoogle.com`;
 - an exact host or subdomain of `pornhub.com`, `redtube.com`, `xhamster.com`,
   `xnxx.com`, or `xvideos.com`.
