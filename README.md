@@ -87,7 +87,10 @@ a Cloudflare cron, not a Render one. Free services spin down after 15 min withou
 (the outbound Jetstream socket doesn't count); the cron ping supplies that traffic. Restarts lose
 in-memory window state, mitigated by checkpointing aggregation state into CacheKit (`posts_per_minute`
 and signal-candidate totals restore exactly; per-minute trending and language counters are
-top-K-truncated in the snapshot, so long-tail counts are approximate after a restart).
+top-K-truncated, so long-tail counts are approximate). That truncation is **steady-state, not just
+post-restart**: the free plan's 512 MiB is the binding constraint, so a minute bucket keeps every
+distinct key only while it is inside the live 5 m window and is then compacted to its top-K
+entries — see [`ingester/README.md`](ingester/README.md#window-retention-and-memory).
 ² CachekitIO is the platform being showcased — we build, run, and own it. No third-party line item.
 
 Fly.io was evaluated and **rejected**: its free tier was discontinued in 2024 (new orgs get a

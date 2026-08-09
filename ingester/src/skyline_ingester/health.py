@@ -18,18 +18,14 @@ import asyncio
 import json
 import logging
 import resource
+import sys
 import time
 from collections.abc import Callable
 from contextlib import suppress
-from typing import Protocol
+
+from skyline_ingester.windows import WindowStore
 
 logger = logging.getLogger(__name__)
-
-
-class _Sized(Protocol):
-    """The slice of WindowStore /health reports on (avoids a circular import)."""
-
-    def stats(self) -> dict[str, int]: ...
 
 
 _REASONS = {200: "OK", 404: "Not Found", 405: "Method Not Allowed", 503: "Service Unavailable"}
@@ -46,9 +42,15 @@ _MIB = 1024 * 1024
 
 
 def _peak_rss_mib() -> float:
-    """High-water resident set. ru_maxrss is KiB on Linux, bytes on macOS."""
+    """High-water resident set.
+
+    ru_maxrss is KiB on Linux and BYTES on macOS. Branch on the platform, not on
+    the magnitude: a magnitude test only picks the bytes branch above its
+    threshold, so any plausible threshold misreports one platform by 1024x for
+    ordinary process sizes.
+    """
     raw = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    return round((raw if raw > 1 << 32 else raw * 1024) / _MIB, 1)
+    return round((raw if sys.platform == "darwin" else raw * 1024) / _MIB, 1)
 
 
 def _rss_mib() -> float | None:
@@ -73,7 +75,7 @@ class HealthState:
     plain attributes need no locking.
     """
 
-    def __init__(self, now_fn: Callable[[], float] = time.time, store: _Sized | None = None) -> None:
+    def __init__(self, now_fn: Callable[[], float] = time.time, store: WindowStore | None = None) -> None:
         self._now = now_fn
         # Read-only, for reporting sizes. None in tests and in any caller that
         # only needs liveness; the payload then simply omits the size fields.

@@ -220,14 +220,22 @@ and emoji rankings are approximate immediately after a restart; event and signal
 candidate totals remain exact.
 
 The same top-K truncation also applies in steady state, not only after a restart
-(LAB-1775). A minute bucket keeps every distinct key while it is inside the 5 m
-window and is then compacted in place to its top 20 tags, 20 URLs, 20 domains,
-10 emoji and 32 languages. So the **5 m window is exact**, while 1 h and 24 h
-long-tail rankings are approximate — bounded memory is what keeps the service
-inside its 512 MiB host at all. Truncation is frequency-ordered and only ever
-drops keys, so the counts that survive are exact, and `posts_per_minute`,
-`total_events_considered`, `total_signal_candidates` and every
-`excluded_count_by_reason` entry stay exact in all three windows.
+(LAB-1775). A minute bucket keeps every distinct key while it is inside the
+full-fidelity horizon — the 5 m window plus 5 minutes of slack for the future
+skew `ingest_raw` accepts — and is then compacted in place to its top 20 tags,
+20 URLs, 20 domains, 10 emoji and 32 languages. So the **5 m window is exact**,
+while 1 h and 24 h long-tail rankings are approximate — bounded memory is what
+keeps the service inside its 512 MiB host at all. Truncation is
+frequency-ordered and only ever drops keys, so the counts that survive are
+exact, and `posts_per_minute`, `total_events_considered`,
+`total_signal_candidates` and every `excluded_count_by_reason` entry stay exact
+in all three windows.
+
+One consequence is worth stating plainly rather than leaving for a reader to
+derive: `lang_mix` computes its shares over the languages a bucket **retains**,
+so once a minute carries more than 32 distinct languages the 1 h and 24 h shares
+describe the retained set rather than every post. At observed rates a minute
+carries 23–27, so the bound does not bite; `total_posts` is exact either way.
 
 ## Recorded evaluation
 

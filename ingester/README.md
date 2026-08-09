@@ -70,10 +70,19 @@ The store keeps one counter bucket per minute for 24 h. Resident cost is therefo
 ~2,470 distinct keys — so 1,440 full-fidelity minutes projected to **~1,050 MiB**, against the
 512 MiB of the Render free plan. That is the OOM restart LAB-1775 chased down.
 
-A bucket keeps every distinct key only while it is inside the **5 m window**. Once it ages past
-that it is truncated in place to its top-K entries (20 tags / 20 links / 20 domains / 10 emoji /
-32 languages, one display spelling per surviving tag) and stays truncated. Consequences worth
-knowing:
+A bucket keeps every distinct key while it is inside the **full-fidelity horizon** — the 5 m
+window plus 5 minutes of slack, 10 minutes in total. Once it ages past that it is truncated in
+place to its top-K entries (20 tags / 20 links / 20 domains / 10 emoji / 32 languages, one display
+spelling per surviving tag) and is re-truncated if it ever regrows.
+
+The slack is load-bearing, not padding. `_prune` anchors the compaction floor on the minute being
+*added* (deliberately — one far-future timestamp must never become a permanent retention anchor),
+and `jetstream.ingest_raw` accepts events up to `MAX_FUTURE_SKEW_SECONDS` (300 s) ahead. Without
+slack, a single accepted future-dated post dragged the floor into the live window and truncated
+it — measured 1,000 → 100 distinct tags in the 5 m window from one `+300 s` frame, repeatable
+every minute. `test_windows.py` pins slack ≥ the accepted skew.
+
+Consequences worth knowing:
 
 - **The 5 m window is bit-exact.** Only the 1 h and 24 h *long tails* are approximate — the same
   approximation the CacheKit checkpoint has always shipped for restore.
@@ -81,7 +90,13 @@ knowing:
 - **`posts_per_minute` and the exclusion denominators are exact in every window.** Compaction
   never touches `n`, `signal_candidates` or `excluded`.
 - Truncation is **frequency-ordered**, not arrival-ordered, so it keeps what was actually
-  trending in that minute.
+  trending in that minute. Measured on a Zipf-distributed hour: the published top-25 is
+  unchanged, top-10 order and counts are identical, and 47–49 of the top 50 survive — what is
+  lost is the tail below roughly one occurrence per minute.
+- **`lang_mix` shares are renormalized over the languages a bucket retains.** Below 32 distinct
+  languages per minute — every minute at observed rates, which carry 23–27 — that is a no-op;
+  above it, 1 h and 24 h shares describe the retained set, not all posts. `total_posts` stays
+  exact regardless.
 
 Measured with [`tools/soak_memory.py`](tools/soak_memory.py) against the live public Jetstream —
 no credentials needed, it drives `extract` → `WindowStore` directly:
@@ -91,9 +106,14 @@ uv run python tools/soak_memory.py live --seconds 540      # RSS + cardinality v
 uv run python tools/soak_memory.py saturate --minutes 1440 # a full 24h window, synthetically filled
 ```
 
-At a full 1,440-bucket window and observed live cardinality that is **41.6 MiB steady / 47.2 MiB
+At a full 1,440-bucket window and observed live cardinality that is **43.0 MiB steady / 49.1 MiB
 peak** including the `merged()` transient, versus **438.5 MiB / 634.2 MiB** with compaction
 disabled (`--no-compaction`) — the latter over the 512 MiB limit on retained structure alone.
+
+Worst case, measured: a full compacted tail plus a 10-minute head saturated at the contribution
+ledger's own ceiling (20,000 accepted signals/minute) is **71.8 MiB** at the 24 h merge peak. The
+head needs no cap of its own — `MAX_SOURCE_LEDGER_ENTRIES` over `SOURCE_DEDUPE_SECONDS` already
+bounds distinct tag/link/domain/emoji keys per minute, and `test_windows.py` pins that coupling.
 
 ## What it publishes
 

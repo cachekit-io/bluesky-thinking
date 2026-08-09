@@ -48,12 +48,13 @@ _EXPIRY_SWEEP_LIMIT = 4_096
 _MAX_CHECKPOINT_MAP_ENTRIES = 1_024
 # Checkpoint truncation: keep the per-minute head of each counter so the
 # serialized snapshot stays small enough for one cache entry.
-_K_TAGS, _K_LINKS, _K_DOMAINS, _K_EMOJI, _K_LANGS = 20, 20, 20, 10, 15
+_K_TAGS, _K_LINKS, _K_DOMAINS, _K_EMOJI = 20, 20, 20, 10
 _MAX_CHECKPOINT_COUNT = 10_000_000
 
-# Live compaction (LAB-1775). A bucket keeps every distinct key only while it
-# is inside the 5m window; once it ages past that it is truncated to its top-K
-# entries, in place, forever after. Rationale and the measurement behind it:
+# Live compaction (LAB-1775). A bucket keeps every distinct key only while it is
+# inside the full-fidelity horizon (the 5m window plus future-skew slack, see
+# below); once it ages past that it is truncated to its top-K entries, in place,
+# and re-truncated if it regrows. Rationale and the measurement behind it:
 #
 #   Resident cost is (retained minutes) x (distinct keys per minute) x ~299 B
 #   -- the per-key figure is measured, not guessed (tools/soak_memory.py, live
@@ -77,16 +78,31 @@ _MAX_CHECKPOINT_COUNT = 10_000_000
 #   langs/sent by the firehose's own post rate. test_windows.py pins that
 #   coupling so raising the ledger cap cannot silently reopen this.
 #
+#   The horizon carries SLACK past the 5m window, and the slack is load-bearing.
+#   _prune anchors on the minute being ADDED, never on max(self._buckets) — a
+#   deliberate choice so one far-future timestamp cannot become a permanent
+#   retention anchor. jetstream.ingest_raw accepts events up to
+#   MAX_FUTURE_SKEW_SECONDS (300 s) ahead, so without slack a SINGLE accepted
+#   future-dated post drags the compaction floor into the live window and
+#   truncates it: measured 1,000 -> 100 distinct tags in merged("5m") from one
+#   +300 s frame, repeatable every minute (panel CRIT). Slack keeps compaction
+#   purely event-time anchored; clamping to wall-clock instead would hand a
+#   container whose clock runs behind the power to switch compaction off
+#   entirely and bring the OOM back. test_windows.py pins slack >= the skew.
+#
 # Retained counts are exact; truncation only drops keys. n, signal_candidates
 # and excluded are never touched, so posts_per_minute and the exclusion
 # denominators stay exact in every window.
-_FULL_FIDELITY_MINUTES = WINDOW_MINUTES["5m"]
+_MAX_FUTURE_SKEW_MINUTES = 5
+_FULL_FIDELITY_MINUTES = WINDOW_MINUTES["5m"] + _MAX_FUTURE_SKEW_MINUTES
 # Per-family survivors in an aged bucket. Tags/links/domains/emoji reuse the
-# checkpoint's already-accepted fidelity bar; langs gets its own, larger value
-# because _K_LANGS (15) sits below the ~23-27 distinct languages a real minute
-# carries, and lang_mix's shares are computed over the languages it retains.
+# checkpoint's fidelity bar; langs needs its own, larger value because a real
+# minute carries ~23-27 distinct languages (measured) and lang_mix's shares are
+# computed over the languages a bucket retains — so the checkpoint's old 15
+# would have dropped a third of them from every 1h/24h language mix. snapshot()
+# and restore() use this same bound, so a bucket does not silently lose
+# languages the live store was keeping the moment it round-trips a checkpoint.
 _COMPACT_LANGS = 32
-_COMPACT_LABELS_PER_TAG = 1
 
 
 @dataclass(slots=True)
@@ -577,7 +593,7 @@ class WindowStore:
                             key_validator=is_primary_language,
                             reject_reason="checkpoint_invalid_lang",
                             rejected=rejected,
-                            max_entries=_K_LANGS,
+                            max_entries=_COMPACT_LANGS,
                         ),
                         emoji=_coerced_counter(
                             d.get("emoji"),
@@ -721,14 +737,16 @@ def _compact_bucket(bucket: Bucket) -> None:
         # sent is keyed by language, so it inherits langs' bound; left alone it
         # would become the unbounded axis langs just stopped being.
         bucket.sent = {lang: acc for lang, acc in bucket.sent.items() if lang in bucket.langs}
-    if tags_cut or len(bucket.tag_labels) > len(bucket.tags) * _COMPACT_LABELS_PER_TAG:
-        # Display sugar only: keep the winning spelling per surviving tag. A tag
-        # that loses every label falls back to its canonical form in
-        # build_value — never to a wrong one.
+    if tags_cut or len(bucket.tag_labels) > len(bucket.tags):
+        # Display sugar only: keep one spelling per surviving tag, picked by the
+        # same _display_label build_value renders with — so compaction can never
+        # strand a tag on a spelling the reader would not have chosen anyway. A
+        # tag that loses every label falls back to its canonical form there,
+        # never to a wrong one.
         kept: Counter[tuple[str, str]] = Counter()
         for canonical, labels in _tag_label_index(bucket.tag_labels, wanted=set(bucket.tags)).items():
-            for display, count in sorted(labels.items(), key=lambda item: (-item[1], item[0]))[:_COMPACT_LABELS_PER_TAG]:
-                kept[(canonical, display)] = count
+            display = _display_label(labels, canonical)
+            kept[(canonical, display)] = labels[display]
         bucket.tag_labels = kept
 
 
@@ -741,7 +759,7 @@ def _checkpoint_bucket(bucket: Bucket) -> dict:
         "tags": dict(top_tags),
         "links": dict(bucket.links.most_common(_K_LINKS)),
         "domains": dict(bucket.domains.most_common(_K_DOMAINS)),
-        "langs": dict(bucket.langs.most_common(_K_LANGS)),
+        "langs": dict(bucket.langs.most_common(_COMPACT_LANGS)),
         "emoji": dict(bucket.emoji.most_common(_K_EMOJI)),
         "tag_labels": {tag: dict(label_index.get(tag, Counter()).most_common(3)) for tag, _count in top_tags},
         "excluded": dict(bucket.excluded),

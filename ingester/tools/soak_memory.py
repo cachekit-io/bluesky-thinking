@@ -28,7 +28,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import gc
-import resource
 import statistics
 import time
 from collections import Counter
@@ -37,6 +36,7 @@ import websockets
 
 from skyline_ingester import windows
 from skyline_ingester.extract import PostFeatures
+from skyline_ingester.health import _peak_rss_mib, _rss_mib
 from skyline_ingester.jetstream import ingest_raw, subscribe_url
 from skyline_ingester.windows import WINDOW_MINUTES, WindowStore
 
@@ -44,19 +44,20 @@ MIB = 1024 * 1024
 FAMILIES = ("tags", "links", "domains", "langs", "emoji", "tag_labels", "excluded", "sent")
 
 
-def rss_bytes() -> int:
-    """Current resident set. /proc where available, else the getrusage peak."""
-    try:
-        with open("/proc/self/statm") as handle:
-            return int(handle.read().split()[1]) * resource.getpagesize()
-    except OSError:
-        return peak_rss_bytes()
+def rss_bytes() -> float:
+    """Current resident set, falling back to the high-water mark off Linux.
+
+    Deliberately reuses /health's own helpers rather than keeping a second copy:
+    ru_maxrss's KiB-on-Linux/bytes-on-macOS split is subtle enough that the two
+    copies had already drifted apart once, which would have silently scaled
+    every number a macOS soak reports — and those numbers are quoted in the
+    docs — by 1024x.
+    """
+    return (_rss_mib() or _peak_rss_mib()) * MIB
 
 
-def peak_rss_bytes() -> int:
-    """High-water RSS. ru_maxrss is KiB on Linux, bytes on macOS."""
-    raw = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    return raw if raw > 1 << 32 else raw * 1024
+def peak_rss_bytes() -> float:
+    return _peak_rss_mib() * MIB
 
 
 def live_key_counts(store: WindowStore) -> tuple[int, dict[str, int]]:
@@ -75,7 +76,7 @@ def ledger_size(store: WindowStore) -> int:
         return len(store._seen)  # noqa: SLF001
 
 
-def report_sample(elapsed: float, store: WindowStore, events: int) -> tuple[float, int, int]:
+def report_sample(elapsed: float, store: WindowStore, events: int) -> tuple[float, float, int]:
     total_keys, per_family = live_key_counts(store)
     with store._lock:  # noqa: SLF001
         buckets = len(store._buckets)  # noqa: SLF001
@@ -91,7 +92,7 @@ def report_sample(elapsed: float, store: WindowStore, events: int) -> tuple[floa
 
 async def run_live(url: str, seconds: float, sample_interval: float) -> None:
     store = WindowStore()
-    samples: list[tuple[float, int, int]] = []
+    samples: list[tuple[float, float, int]] = []
     events = 0
     posts = 0
     link_posts = 0
@@ -117,7 +118,12 @@ async def run_live(url: str, seconds: float, sample_interval: float) -> None:
         while time.monotonic() < deadline:
             try:
                 raw = await asyncio.wait_for(ws.recv(), timeout=max(1.0, deadline - time.monotonic()))
-            except TimeoutError:
+            except (TimeoutError, websockets.WebSocketException) as exc:
+                # Jetstream drops long-lived subscribers routinely; a soak long
+                # enough to be useful is long enough to get dropped. Report on
+                # what was collected instead of losing the whole run to a
+                # traceback — reproduced at t=240s of a 360s soak.
+                print(f"# stream ended early ({type(exc).__name__}) — reporting on {events} events", flush=True)
                 break
             ingest_raw(raw, store)
             events += 1

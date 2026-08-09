@@ -6,15 +6,19 @@ import time
 from collections import Counter
 
 from skyline_ingester.extract import PostFeatures
+from skyline_ingester.jetstream import MAX_FUTURE_SKEW_SECONDS
 from skyline_ingester.policy import NORMALIZATION_VERSION
 from skyline_ingester.windows import (
     _COMPACT_LANGS,
     _FULL_FIDELITY_MINUTES,
     _K_TAGS,
+    _MAX_FUTURE_SKEW_MINUTES,
     MAX_SOURCE_LEDGER_ENTRIES,
     MAX_SOURCE_LEDGER_ENTRIES_PER_SOURCE,
     SNAPSHOT_VERSION,
     SOURCE_DEDUPE_SECONDS,
+    WINDOW_MINUTES,
+    Bucket,
     WindowStore,
 )
 
@@ -487,7 +491,10 @@ def test_compaction_bounds_langs_and_sent_together():
     _age_out(store, aged)
     with store._lock:
         bucket = store._buckets[aged]
-        assert len(bucket.langs) == _COMPACT_LANGS
+        # Literal, not just the constant: `== _COMPACT_LANGS` alone still passes
+        # if someone raises it past the 200-language fill, i.e. with langs
+        # compaction effectively switched off (panel finding).
+        assert len(bucket.langs) == 32 == _COMPACT_LANGS
         assert set(bucket.sent) <= set(bucket.langs)
 
 
@@ -529,3 +536,88 @@ def test_stats_reports_live_sizes():
     assert stats["ledger_entries"] == 5
     # 5 tags + 5 (tag, label) pairs + 1 lang
     assert stats["counter_keys"] == 11
+
+
+def test_full_fidelity_horizon_clears_the_accepted_future_skew():
+    # Executable oracle for a cross-module coupling, not a restatement of a
+    # constant: _prune anchors the compaction floor on the minute being ADDED
+    # (deliberately — a far-future stamp must never become a permanent retention
+    # anchor), so the horizon MUST clear the largest future skew ingest_raw will
+    # accept. Shrink either side of this and the next test fails for real.
+    assert _MAX_FUTURE_SKEW_MINUTES * 60 >= MAX_FUTURE_SKEW_SECONDS
+    assert WINDOW_MINUTES["5m"] + _MAX_FUTURE_SKEW_MINUTES <= _FULL_FIDELITY_MINUTES
+
+
+def test_one_future_dated_post_cannot_truncate_the_live_5m_window():
+    # Panel CRIT (LAB-1775): jetstream accepts events up to MAX_FUTURE_SKEW_SECONDS
+    # ahead, so before the horizon carried slack a SINGLE such post dragged
+    # compact_floor into the live window — measured 1,000 -> 100 distinct tags,
+    # repeatable every minute, silently falsifying "the 5m window is bit-exact".
+    def build():
+        store = WindowStore()
+        for offset in range(WINDOW_MINUTES["5m"]):
+            _fill(store, NOW_MIN - 4 + offset, 200, prefix=f"m{offset}t")
+        return store
+
+    now = NOW_MIN * 60.0 + 59
+    baseline = len(build().merged("5m", now).tags)
+    assert baseline == 200 * WINDOW_MINUTES["5m"]
+
+    hostile = build()
+    skewed = NOW_MIN + (MAX_FUTURE_SKEW_SECONDS // 60)
+    hostile.add(_post(skewed, tags=["evil"]), source_id="did:plc:attacker")
+    assert len(hostile.merged("5m", now).tags) == baseline
+
+
+def test_checkpoint_round_trip_preserves_the_compaction_language_bound():
+    # The live store and the checkpoint must agree on how many languages a
+    # bucket keeps. They did not: live kept 32, a checkpoint round-trip silently
+    # dropped it to 15 — on the restart path this whole ticket exists to
+    # survive, and against two doc surfaces that state 32 (panel finding).
+    store = WindowStore()
+    aged = NOW_MIN - 20
+    for index in range(200):
+        lang = f"x{chr(97 + index // 26)}{chr(97 + index % 26)}"
+        store.add(_post(aged, lang=lang), source_id=f"did:plc:l{index}")
+    _age_out(store, aged)
+    with store._lock:
+        live_langs = len(store._buckets[aged].langs)
+    assert live_langs == _COMPACT_LANGS
+
+    now = (aged + _FULL_FIDELITY_MINUTES + 1) * 60.0
+    restored = WindowStore()
+    assert restored.restore(store.snapshot(now), now) >= 1
+    with restored._lock:
+        assert len(restored._buckets[aged].langs) == live_langs
+
+
+def test_a_full_24h_window_stays_inside_its_absolute_key_budget():
+    # THE bound this ticket delivers, asserted as an absolute number rather than
+    # against the constants that produce it. `len(x) == _K_TAGS` passes for any
+    # _K_TAGS; this fails if any per-family K is raised, if a new Bucket counter
+    # family is added uncapped, or if compaction is disabled outright.
+    #
+    # 200 keys/bucket x 1440 buckets x ~299 B/key (measured, tools/soak_memory.py)
+    # = ~82 MiB of retained counters, which leaves the 512 MiB Render plan room
+    # for the interpreter, the uncompacted head, and the merged() transient.
+    # Measured at this budget: 40 MiB steady, 55 MiB at the 24h merge peak.
+    budget_per_bucket = 200
+    store = WindowStore()
+    newest = NOW_MIN
+    for offset in range(WINDOW_MINUTES["24h"]):
+        minute = newest - WINDOW_MINUTES["24h"] + 1 + offset
+        bucket = Bucket(n=1200, signal_candidates=4000)
+        for index in range(60):  # 60 distinct keys per family, i.e. above every K
+            bucket.tags[f"tag{minute}x{index}"] = index + 1
+            bucket.links[f"https://e{index}.example.com/{minute}"] = index + 1
+            bucket.domains[f"e{minute}x{index}.example.com"] = index + 1
+            bucket.emoji[f"e{minute}x{index}"] = index + 1
+            bucket.langs[f"g{minute}x{index}"] = index + 1
+            bucket.tag_labels[(f"tag{minute}x{index}", f"Tag{index}")] = index + 1
+            bucket.sent[f"g{minute}x{index}"] = [0.5, 1]
+        store._buckets[minute] = bucket
+    with store._lock:
+        store._prune(newest)  # the pass that compacts everything past the horizon
+
+    keys = store.stats()["counter_keys"]
+    assert keys <= budget_per_bucket * WINDOW_MINUTES["24h"], f"retained {keys} counter keys"
