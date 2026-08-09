@@ -228,7 +228,7 @@ while 1 h and 24 h long-tail rankings are approximate — bounded memory is what
 keeps the service inside its 512 MiB host at all. Truncation is
 frequency-ordered and only ever drops keys, never rewrites a count, and
 `posts_per_minute`, `total_events_considered`, `total_signal_candidates` and
-every `excluded_count_by_reason` entry stay exact in all three windows.
+every `excluded_count_by_reason` entry stays exact in all three windows.
 
 Be precise about what that leaves, because "counts are exact" would overclaim:
 a surviving key's count is exact *within its minute*, but a 1 h or 24 h total is

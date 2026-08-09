@@ -383,7 +383,10 @@ def test_concurrent_add_and_read_is_race_free():
 # --- LAB-1775: age-based compaction bounds the retained window -----------------
 
 
-def _post(minute, *, tags=(), links=(), lang="en", sentiment=None, labels=None):
+def _post(minute, *, tags=(), links=(), domains=(), lang="en", sentiment=None, labels=None):
+    # domains is explicit, not derived from links: add() spends one ledger entry
+    # per domain the extractor supplies, so a test that omits them measures a
+    # cheaper post than production sends.
     return PostFeatures(
         ts=minute * 60.0,
         lang=lang,
@@ -391,7 +394,7 @@ def _post(minute, *, tags=(), links=(), lang="en", sentiment=None, labels=None):
         links=list(links),
         emoji=[],
         sentiment=sentiment,
-        domains=[],
+        domains=list(domains),
         hashtag_labels=labels if labels is not None else {tag: tag for tag in tags},
     )
 
@@ -554,15 +557,20 @@ def test_a_concentrated_ledger_mints_keys_in_every_eligible_family(monkeypatch):
     store = WindowStore()
     for index in range(200):
         store.add(
-            _post(NOW_MIN, tags=[f"t{index}"], links=[f"https://e{index}.example.com/{index}"]),
+            _post(
+                NOW_MIN,
+                tags=[f"t{index}"],
+                links=[f"https://e{index}.example.com/{index}"],
+                domains=[f"e{index}.example.com"],
+            ),
             source_id=f"did:plc:{index}",
         )
     with store._lock:
         bucket = store._buckets[NOW_MIN]
-        accepted = len(bucket.tags) + len(bucket.links)
+        accepted = len(bucket.tags) + len(bucket.links) + len(bucket.domains)
         assert accepted == ledger, "the ledger bounds accepted CONTRIBUTIONS across families, not per family"
         # Keys outrun ledger entries: tag_labels rides along on every tag.
-        assert len(bucket.tags) + len(bucket.tag_labels) + len(bucket.links) > ledger
+        assert accepted + len(bucket.tag_labels) > ledger
 
 
 def test_stats_reports_live_sizes():
@@ -757,6 +765,7 @@ def test_the_uncompacted_head_stays_inside_a_ledger_derived_key_budget(monkeypat
                     minute,
                     tags=[f"t{offset}x{index}"],
                     links=[f"https://e{index}.example.com/{offset}"],
+                    domains=[f"e{index}.example.com"],
                 ),
                 source_id=f"did:plc:{offset}x{index}",
             )
