@@ -58,7 +58,9 @@ checkpoint makes that restart safe. Deployment blueprint: [`../render.yaml`](../
 The last five fields are memory diagnostics (LAB-1775). They are **sizes, never contents** — a
 count of live counter keys, not the keys — so the endpoint stays liveness-only. `rss_mib` is the
 current resident set (`/proc/self/statm`, `null` off Linux) and `rss_peak_mib` the high-water mark
-(`resource.getrusage`); both are stdlib, no new dependency. They exist because Render's memory
+(`resource.getrusage`); both are stdlib, no new dependency. The two come from different kernel
+accounting paths and `ru_maxrss` updates lazily, so `rss_mib` can read a little *above*
+`rss_peak_mib` — that is expected, not a bug. They exist because Render's memory
 graph is behind a dashboard login that no agent has, so an OOM recurrence has to be diagnosable
 from the public endpoint alone: `counter_keys` climbing without bound is the signature of the
 LAB-1775 regression returning.
