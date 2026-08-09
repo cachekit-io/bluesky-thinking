@@ -46,12 +46,101 @@ key material:
 ```json
 {"status": "ok", "jetstream_connected": true, "events_seen": 12345,
  "events_missing_source": 0,
- "last_event_age_seconds": 0.4, "last_publish_age_seconds": 7.1, "uptime_seconds": 900.0}
+ "last_event_age_seconds": 0.4, "last_publish_age_seconds": 7.1, "uptime_seconds": 900.0,
+ "rss_mib": 61.4, "rss_peak_mib": 74.2,
+ "buckets": 1440, "counter_keys": 217565, "ledger_entries": 11976}
 ```
 
 Returns **503** whenever the Jetstream socket is down, so a dead consumer inside a live process is
 visible from outside — Render's health check then restarts the service, and the CacheKit
 checkpoint makes that restart safe. Deployment blueprint: [`../render.yaml`](../render.yaml).
+
+The last five fields are memory diagnostics (LAB-1775). They are **sizes, never contents** — a
+count of live counter keys, not the keys — so the endpoint stays liveness-only. `rss_mib` is the
+current resident set (`/proc/self/statm`, `null` off Linux) and `rss_peak_mib` the high-water mark
+(`resource.getrusage`); both are stdlib, no new dependency. The two come from different kernel
+accounting paths and `ru_maxrss` updates lazily, so `rss_mib` can read a little *above*
+`rss_peak_mib` — that is expected, not a bug. They exist because Render's memory
+graph is behind a dashboard login that no agent has, so an OOM recurrence has to be diagnosable
+from the public endpoint alone: `counter_keys` climbing without bound is the signature of the
+LAB-1775 regression returning.
+
+## Window retention and memory
+
+The store keeps one counter bucket per minute for 24 h. Resident cost is therefore
+*(retained minutes) × (distinct keys per minute)*, and at observed firehose rates a minute carries
+~2,470 distinct keys — so 1,440 full-fidelity minutes projected to **~1,050 MiB**, against the
+512 MiB of the Render free plan. That is the OOM restart LAB-1775 chased down.
+
+A bucket keeps every distinct key while it is inside the **full-fidelity horizon** — the 5 m
+window plus 5 minutes of slack, 10 minutes in total. Once it ages past that it is truncated in
+place to its top-K entries (20 tags / 20 links / 20 domains / 10 emoji / 32 languages, one display
+spelling per surviving tag) and is re-truncated if it ever regrows.
+
+The slack is load-bearing, not padding. `_prune` anchors the compaction floor on the minute being
+*added* (deliberately — one far-future timestamp must never become a permanent retention anchor),
+and `jetstream.ingest_raw` accepts events up to `MAX_FUTURE_SKEW_SECONDS` (300 s) ahead. Without
+slack, a single accepted future-dated post dragged the floor into the live window and truncated
+it — measured 1,000 → 100 distinct tags in the 5 m window from one `+300 s` frame, repeatable
+every minute. `test_windows.py` pins slack ≥ the accepted skew.
+
+Consequences worth knowing:
+
+- **The 5 m window is bit-exact.** Only the 1 h and 24 h *long tails* are approximate — the same
+  approximation the CacheKit checkpoint has always shipped for restore.
+- **Retained counts are exact.** Truncation drops keys; it never rewrites a count.
+- **`posts_per_minute` and the exclusion denominators are exact in every window.** Compaction
+  never touches `n`, `signal_candidates` or `excluded`.
+- Truncation is **frequency-ordered**, not arrival-ordered, so it keeps what was actually
+  trending in that minute. Measured on a Zipf-distributed hour against an uncompacted control:
+  top-25 *membership* is unchanged and top-10 *ordering* is preserved. Counts are exact for the
+  heaviest tags and degrade gradually down the ranking — ranks 1–6 exact, rank 10 at 97.5 %,
+  median 92 % across the top 25, worst 55 %. 47 of the top 50 survive; a tag averaging under
+  about one occurrence per minute never makes a minute's top-K and can drop out entirely.
+  Trend *ranking* is what this preserves; per-key totals in the 1 h and 24 h windows are a
+  lower bound, not a census.
+- **`lang_mix` shares are renormalized over the languages a bucket retains.** Below 32 distinct
+  languages per minute — every minute at observed rates, which carry 23–27 — that is a no-op;
+  above it, 1 h and 24 h shares describe the retained set, not all posts. `total_posts` stays
+  exact regardless.
+
+Measured with [`tools/soak_memory.py`](tools/soak_memory.py) against the live public Jetstream —
+no credentials needed, it drives `extract` → `WindowStore` directly:
+
+```bash
+uv run python tools/soak_memory.py live --seconds 540      # RSS + cardinality vs the real firehose
+uv run python tools/soak_memory.py saturate --minutes 1440 # a full 24h window, synthetically filled
+```
+
+At a full 1,440-bucket window and observed live cardinality that is **41.6 MiB steady / 48.0 MiB
+peak** including the `merged()` transient, versus **438.5 MiB / 634.2 MiB** with compaction
+disabled (`--no-compaction`) — the latter over the 512 MiB limit on retained structure alone.
+
+Worst case, measured: a quiet tail then a burst into the uncompacted head, which is when the
+contribution ledger is empty and a single minute can draw on the whole of it —
+
+```bash
+uv run python tools/soak_memory.py saturate --minutes 1440 --per-bucket 200 --head-per-bucket 40000
+```
+
+— is **110.8 MiB steady / 140.9 MiB** at the 24 h merge peak, with the ledger refusing 1,000,000
+offered contributions. (An earlier pass published 71.8 MiB for this case. That number was low
+twice over: it counted one retained key per accepted contribution when a hashtag mints two, `tags`
+and `tag_labels`, and it treated the ledger's ~20,000/min *sustained* rate as a per-minute ceiling.)
+**While event time advances**, `MAX_SOURCE_LEDGER_ENTRIES` over `SOURCE_DEDUPE_SECONDS` bounds what
+the head can accept, so it needs no cap of its own; `test_windows.py` derives both the aged and the
+head budget from those constants (driving the head one through `add()`), so raising the ledger cap
+fails a test. That precondition is the firehose's own contract and what the measurement above
+assumes — it is not enforced.
+
+**One axis is still unbounded.** A feed that *stalls* event time while still delivering volume keeps
+one head bucket permanently inside the full-fidelity horizon: ledger entries expire on monotonic
+time and free capacity for new keys, while nothing ages the bucket out. It accumulates at roughly
+27k keys/min, without bound. `ingest_raw` bounds event time from above but accepts any past
+timestamp, so this is reachable from a broken or hostile feed, not from a healthy Jetstream. The
+bucket-count cap does not help — it bounds how many buckets exist, not how many keys one head
+bucket accumulates. Closing it needs a head admission cap with explicit at-cap semantics.
+`counter_keys` on `/health` climbing without bound is its signature.
 
 ## What it publishes
 
@@ -140,9 +229,11 @@ filter-list, tracking-parameter, and transparency
 semantics: [public signal policy](../docs/signal-policy.md).
 
 After a reconnect, a backlog delivered faster than real time shares the current
-process-time source bound and can under-count trend signals; volume and
-language aggregates remain exact. Event timestamps never expire the
-privacy ledger because they are untrusted.
+process-time source bound and can under-count trend signals; volume aggregates
+remain exact, and language aggregates remain exact in the 5 m window and for any
+minute that carried at most 32 distinct languages (every minute, at observed
+rates — see *Window retention and memory* for the compaction bound). Event
+timestamps never expire the privacy ledger because they are untrusted.
 
 ## Tests
 

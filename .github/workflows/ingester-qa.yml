@@ -28,9 +28,11 @@ jobs:
           cache-dependency-glob: ingester/uv.lock
       - name: Sync (locked)
         run: uv sync --locked
+      # tools/ is linted too (LAB-1775): soak_memory.py is the harness the
+      # window-memory bound is measured with, so it has to keep working.
       - name: Lint
-        run: uv run ruff check src tests
+        run: uv run ruff check src tests tools
       - name: Format check
-        run: uv run ruff format --check src tests
+        run: uv run ruff format --check src tests tools
       - name: Tests (no network, no creds)
         run: uv run pytest -q

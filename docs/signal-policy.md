@@ -114,7 +114,9 @@ public `rate_limited_global_*` exclusion counts. The key,
 digests, and raw DIDs are never put in minute buckets, checkpoints, CacheKit values,
 logs, history, or health output. `/health` also exposes the aggregate
 `events_missing_source` counter so a Jetstream schema change cannot silently empty
-all public trend rankings. The ledger is not restored:
+all public trend rankings, and (LAB-1775) `ledger_entries` — how many digests are
+live, never which — so ledger pressure is diagnosable without weakening that
+boundary. The ledger is not restored:
 after a process restart the key rotates and the five-minute bound starts fresh.
 That small, explicit continuity gap is preferable to creating a durable
 pseudonymous author index. A post without a usable source can still count toward
@@ -125,8 +127,9 @@ bound.
 Jetstream reconnects resume from the greatest validated cursor seen, so an
 out-of-order or hostile old timestamp cannot rewind the subscription. If a backlog
 longer than five minutes is delivered faster than real time, its trend signals share the current
-process-time bound and can be under-counted; event-volume and language
-aggregates remain exact. Event timestamps are deliberately not used to expire
+process-time bound and can be under-counted; event-volume aggregates remain
+exact, and language aggregates remain exact except where per-minute compaction
+applies (below). Event timestamps are deliberately not used to expire
 the ledger because they are untrusted and previously allowed a source to erase
 the bound.
 
@@ -215,6 +218,33 @@ unique events: one post can contain more than one excluded candidate. Checkpoint
 restore retains per-minute top-K entries, so long-tail tag, URL/domain, language,
 and emoji rankings are approximate immediately after a restart; event and signal
 candidate totals remain exact.
+
+The same top-K truncation also applies in steady state, not only after a restart
+(LAB-1775). A minute bucket keeps every distinct key while it is inside the
+full-fidelity horizon — the 5 m window plus 5 minutes of slack for the future
+skew `ingest_raw` accepts — and is then compacted in place to its top 20 tags,
+20 URLs, 20 domains, 10 emoji and 32 languages. So the **5 m window is exact**,
+while 1 h and 24 h long-tail rankings are approximate — bounded memory is what
+keeps the service inside its 512 MiB host at all. Truncation is
+frequency-ordered and only ever drops keys, never rewrites a count, and
+`posts_per_minute`, `total_events_considered`, `total_signal_candidates` and
+every `excluded_count_by_reason` entry stays exact in all three windows.
+
+Be precise about what that leaves, because "counts are exact" would overclaim:
+a surviving key's count is exact *within its minute*, but a 1 h or 24 h total is
+summed only over the minutes where that key made the top-K, so a published count
+is a **lower bound** on true occurrences. Measured against an uncompacted control
+on an hour of Zipf-distributed traffic: top-25 membership unchanged, top-10 order
+preserved, the six heaviest counts exact, rank 10 at 97.5 %, median 92 % across
+the top 25. A tag averaging under roughly one occurrence per minute never makes a
+minute's top-K and can be absent entirely. These aggregates are a trend
+**ranking**, not a census.
+
+One consequence is worth stating plainly rather than leaving for a reader to
+derive: `lang_mix` computes its shares over the languages a bucket **retains**,
+so once a minute carries more than 32 distinct languages the 1 h and 24 h shares
+describe the retained set rather than every post. At observed rates a minute
+carries 23–27, so the bound does not bite; `total_posts` is exact either way.
 
 ## Recorded evaluation
 
