@@ -51,6 +51,43 @@ _MAX_CHECKPOINT_MAP_ENTRIES = 1_024
 _K_TAGS, _K_LINKS, _K_DOMAINS, _K_EMOJI, _K_LANGS = 20, 20, 20, 10, 15
 _MAX_CHECKPOINT_COUNT = 10_000_000
 
+# Live compaction (LAB-1775). A bucket keeps every distinct key only while it
+# is inside the 5m window; once it ages past that it is truncated to its top-K
+# entries, in place, forever after. Rationale and the measurement behind it:
+#
+#   Resident cost is (retained minutes) x (distinct keys per minute) x ~299 B
+#   -- the per-key figure is measured, not guessed (tools/soak_memory.py, live
+#   Jetstream soak 2026-08-09: 2,472 distinct keys/minute, 298.7 B/key by
+#   RSS regression). Uncompacted, the 1,440-minute window projects to ~1,050
+#   MiB steady and ~2.1 GiB at the merge transient, against Render free's 512
+#   MiB -- which is the OOM this ticket chased.
+#
+#   The 1,440x multiplier is the whole problem, so compaction attacks it
+#   directly and leaves the 5m window -- the live view -- bit-exact. An
+#   insert-time cap was the alternative; at the cap value the memory budget
+#   actually affords (~48/family) it fills in ~4 s of each 60 s minute at
+#   observed rates, so EVERY window would silently degrade to "whatever was
+#   posted at the top of the minute". Truncating on age instead is
+#   frequency-ordered and only touches the 1h/24h long tail -- the same
+#   approximation snapshot() already ships for checkpoint restore.
+#
+#   The head needs no separate cap: distinct tag/link/domain/emoji keys per
+#   minute are already bounded by the global contribution ledger
+#   (MAX_SOURCE_LEDGER_ENTRIES over SOURCE_DEDUPE_SECONDS => <=20k/min), and
+#   langs/sent by the firehose's own post rate. test_windows.py pins that
+#   coupling so raising the ledger cap cannot silently reopen this.
+#
+# Retained counts are exact; truncation only drops keys. n, signal_candidates
+# and excluded are never touched, so posts_per_minute and the exclusion
+# denominators stay exact in every window.
+_FULL_FIDELITY_MINUTES = WINDOW_MINUTES["5m"]
+# Per-family survivors in an aged bucket. Tags/links/domains/emoji reuse the
+# checkpoint's already-accepted fidelity bar; langs gets its own, larger value
+# because _K_LANGS (15) sits below the ~23-27 distinct languages a real minute
+# carries, and lang_mix's shares are computed over the languages it retains.
+_COMPACT_LANGS = 32
+_COMPACT_LABELS_PER_TAG = 1
+
 
 @dataclass(slots=True)
 class Bucket:
@@ -262,8 +299,20 @@ class WindowStore:
         # this anchor a stray future bucket is excluded from every merged() query
         # (which bounds by `now`) and real minutes re-accumulate on the next event.
         floor = newest_minute - self._max
+        compact_floor = newest_minute - _FULL_FIDELITY_MINUTES
         for minute in [m for m in self._buckets if m <= floor]:
             del self._buckets[minute]
+        # Same pass compacts what has aged out of the 5m window. Deliberately
+        # stateless — no "already compacted" flag: a bucket that regrows (an
+        # in-skew event landing in an aged minute, or a future-stamped event
+        # dragging compact_floor forward and then real minutes catching up) is
+        # simply re-truncated on the next new minute. A flag would make the
+        # first compaction permanent and let such a bucket grow unbounded
+        # afterwards. Cost is one len() per counter per retained bucket per
+        # minute (~10k O(1) checks), which is why the scan can be unconditional.
+        for minute, bucket in self._buckets.items():
+            if minute <= compact_floor:
+                _compact_bucket(bucket)
 
     def merged(self, window: str, now: float) -> Bucket:
         """Merge the buckets inside (now - window, now] into one Bucket.
@@ -310,13 +359,21 @@ class WindowStore:
 
     # Copy in bounded chunks so one read never holds the add() lock across the
     # whole retained window. Per-bucket cost still scales with live cardinality.
-    # ponytail: live per-bucket counter cardinality is unbounded across the
-    # 1,440 retained minutes (~295 MiB per 1M distinct link keys; a merged()
-    # pass transiently allocates a second copy). At a sustained 100
-    # link-posts/s the 24h window needs ~2,550 MiB — against Render free's
-    # 512 MiB the real sustained ceiling is ~20 link-posts/s of distinct
-    # links. Cap live per-bucket cardinality above top-K if the firehose
-    # ever approaches that rate.
+    #
+    # Live per-bucket cardinality IS now bounded — see _FULL_FIDELITY_MINUTES:
+    # buckets past the 5m window are truncated to top-K, so the retained window
+    # is ~(5 x live cardinality) + (1,435 x ~194 keys) instead of 1,440 x live.
+    # That is what took the 24h projection from ~1,050 MiB steady / ~2.1 GiB at
+    # the merge transient down under the 512 MiB Render free plan (LAB-1775;
+    # measured by tools/soak_memory.py, not estimated).
+    #
+    # ponytail: _copy_range still materialises a copy of EVERY bucket in range
+    # before merged() folds them, so a 24h publish tick peaks at roughly twice
+    # the retained window plus the merge output. Compaction bought enough
+    # headroom to leave that alone; stream the chunks into the accumulator
+    # (yield per chunk instead of returning a list) if the peak ever needs
+    # halving again — it is the cheapest remaining win, and it does not change
+    # any published number.
     _COPY_CHUNK = 16
 
     def _copy_range(self, lo: float = float("-inf"), hi: float = float("inf")) -> list[tuple[int, Bucket]]:
@@ -339,6 +396,31 @@ class WindowStore:
                     if b is not None:  # pruned between chunks
                         copies.append((m, b.copy()))
         return copies
+
+    def stats(self) -> dict[str, int]:
+        """Live sizing counters for /health: retained buckets, counter keys, ledger entries.
+
+        The lock is held only for a pointer-copy of the bucket list; the len()
+        calls run outside it. len() never iterates, so counting a bucket that
+        add() is concurrently mutating is safe and just yields a slightly stale
+        number. That matters because /health is public and unauthenticated —
+        counting under the lock would let a request flood stall ingestion.
+        """
+        with self._lock:
+            buckets = list(self._buckets.values())
+            ledger_entries = len(self._seen)
+        keys = sum(
+            len(b.tags)
+            + len(b.links)
+            + len(b.domains)
+            + len(b.langs)
+            + len(b.emoji)
+            + len(b.tag_labels)
+            + len(b.excluded)
+            + len(b.sent)
+            for b in buckets
+        )
+        return {"buckets": len(buckets), "counter_keys": keys, "ledger_entries": ledger_entries}
 
     def build_value(self, operation: str, window: str, now: float, top_n: int = 50) -> dict:
         """The interop/v1 value for one (operation, window): a top-level map with string keys."""
@@ -606,6 +688,48 @@ def _tag_label_index(labels: Counter[tuple[str, str]], *, wanted: set[str]) -> d
         if canonical in wanted:
             output.setdefault(canonical, Counter())[display] += count
     return output
+
+
+def _truncate(counter: Counter, keep: int) -> bool:
+    """Cut `counter` to its `keep` most common entries in place; True if it cut.
+
+    Ordered by (-count, key) rather than Counter.most_common()'s
+    insertion-ordered ties, so which keys survive is a pure function of the
+    counts — the same stream compacts to the same bucket regardless of arrival
+    order, and a restored checkpoint compacts like the process that wrote it.
+    """
+    if len(counter) <= keep:
+        return False
+    survivors = sorted(counter.items(), key=lambda item: (-item[1], item[0]))[:keep]
+    counter.clear()
+    counter.update(dict(survivors))
+    return True
+
+
+def _compact_bucket(bucket: Bucket) -> None:
+    """Truncate one aged bucket's counters to their top-K entries, in place.
+
+    Idempotent and cheap when already small: every family short-circuits on a
+    len() check, which is what lets _prune call this unconditionally on every
+    aged bucket every minute (see _FULL_FIDELITY_MINUTES).
+    """
+    tags_cut = _truncate(bucket.tags, _K_TAGS)
+    _truncate(bucket.links, _K_LINKS)
+    _truncate(bucket.domains, _K_DOMAINS)
+    _truncate(bucket.emoji, _K_EMOJI)
+    if _truncate(bucket.langs, _COMPACT_LANGS):
+        # sent is keyed by language, so it inherits langs' bound; left alone it
+        # would become the unbounded axis langs just stopped being.
+        bucket.sent = {lang: acc for lang, acc in bucket.sent.items() if lang in bucket.langs}
+    if tags_cut or len(bucket.tag_labels) > len(bucket.tags) * _COMPACT_LABELS_PER_TAG:
+        # Display sugar only: keep the winning spelling per surviving tag. A tag
+        # that loses every label falls back to its canonical form in
+        # build_value — never to a wrong one.
+        kept: Counter[tuple[str, str]] = Counter()
+        for canonical, labels in _tag_label_index(bucket.tag_labels, wanted=set(bucket.tags)).items():
+            for display, count in sorted(labels.items(), key=lambda item: (-item[1], item[0]))[:_COMPACT_LABELS_PER_TAG]:
+                kept[(canonical, display)] = count
+        bucket.tag_labels = kept
 
 
 def _checkpoint_bucket(bucket: Bucket) -> dict:

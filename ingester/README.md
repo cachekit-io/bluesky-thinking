@@ -46,12 +46,54 @@ key material:
 ```json
 {"status": "ok", "jetstream_connected": true, "events_seen": 12345,
  "events_missing_source": 0,
- "last_event_age_seconds": 0.4, "last_publish_age_seconds": 7.1, "uptime_seconds": 900.0}
+ "last_event_age_seconds": 0.4, "last_publish_age_seconds": 7.1, "uptime_seconds": 900.0,
+ "rss_mib": 61.4, "rss_peak_mib": 74.2,
+ "buckets": 1440, "counter_keys": 217565, "ledger_entries": 11976}
 ```
 
 Returns **503** whenever the Jetstream socket is down, so a dead consumer inside a live process is
 visible from outside — Render's health check then restarts the service, and the CacheKit
 checkpoint makes that restart safe. Deployment blueprint: [`../render.yaml`](../render.yaml).
+
+The last five fields are memory diagnostics (LAB-1775). They are **sizes, never contents** — a
+count of live counter keys, not the keys — so the endpoint stays liveness-only. `rss_mib` is the
+current resident set (`/proc/self/statm`, `null` off Linux) and `rss_peak_mib` the high-water mark
+(`resource.getrusage`); both are stdlib, no new dependency. They exist because Render's memory
+graph is behind a dashboard login that no agent has, so an OOM recurrence has to be diagnosable
+from the public endpoint alone: `counter_keys` climbing without bound is the signature of the
+LAB-1775 regression returning.
+
+## Window retention and memory
+
+The store keeps one counter bucket per minute for 24 h. Resident cost is therefore
+*(retained minutes) × (distinct keys per minute)*, and at observed firehose rates a minute carries
+~2,470 distinct keys — so 1,440 full-fidelity minutes projected to **~1,050 MiB**, against the
+512 MiB of the Render free plan. That is the OOM restart LAB-1775 chased down.
+
+A bucket keeps every distinct key only while it is inside the **5 m window**. Once it ages past
+that it is truncated in place to its top-K entries (20 tags / 20 links / 20 domains / 10 emoji /
+32 languages, one display spelling per surviving tag) and stays truncated. Consequences worth
+knowing:
+
+- **The 5 m window is bit-exact.** Only the 1 h and 24 h *long tails* are approximate — the same
+  approximation the CacheKit checkpoint has always shipped for restore.
+- **Retained counts are exact.** Truncation drops keys; it never rewrites a count.
+- **`posts_per_minute` and the exclusion denominators are exact in every window.** Compaction
+  never touches `n`, `signal_candidates` or `excluded`.
+- Truncation is **frequency-ordered**, not arrival-ordered, so it keeps what was actually
+  trending in that minute.
+
+Measured with [`tools/soak_memory.py`](tools/soak_memory.py) against the live public Jetstream —
+no credentials needed, it drives `extract` → `WindowStore` directly:
+
+```bash
+uv run python tools/soak_memory.py live --seconds 540      # RSS + cardinality vs the real firehose
+uv run python tools/soak_memory.py saturate --minutes 1440 # a full 24h window, synthetically filled
+```
+
+At a full 1,440-bucket window and observed live cardinality that is **41.6 MiB steady / 47.2 MiB
+peak** including the `merged()` transient, versus **438.5 MiB / 634.2 MiB** with compaction
+disabled (`--no-compaction`) — the latter over the 512 MiB limit on retained structure alone.
 
 ## What it publishes
 
@@ -140,9 +182,11 @@ filter-list, tracking-parameter, and transparency
 semantics: [public signal policy](../docs/signal-policy.md).
 
 After a reconnect, a backlog delivered faster than real time shares the current
-process-time source bound and can under-count trend signals; volume and
-language aggregates remain exact. Event timestamps never expire the
-privacy ledger because they are untrusted.
+process-time source bound and can under-count trend signals; volume aggregates
+remain exact, and language aggregates remain exact in the 5 m window and for any
+minute that carried at most 32 distinct languages (every minute, at observed
+rates — see *Window retention and memory* for the compaction bound). Event
+timestamps never expire the privacy ledger because they are untrusted.
 
 ## Tests
 

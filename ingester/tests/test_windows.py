@@ -8,6 +8,9 @@ from collections import Counter
 from skyline_ingester.extract import PostFeatures
 from skyline_ingester.policy import NORMALIZATION_VERSION
 from skyline_ingester.windows import (
+    _COMPACT_LANGS,
+    _FULL_FIDELITY_MINUTES,
+    _K_TAGS,
     MAX_SOURCE_LEDGER_ENTRIES,
     MAX_SOURCE_LEDGER_ENTRIES_PER_SOURCE,
     SNAPSHOT_VERSION,
@@ -15,7 +18,7 @@ from skyline_ingester.windows import (
     WindowStore,
 )
 
-from .conftest import FIXTURE_TOTALS, NOW
+from .conftest import FIXTURE_TOTALS, NOW, NOW_MIN
 
 
 def test_restore_bounds_backtracking_hostile_emoji_keys():
@@ -368,3 +371,161 @@ def test_concurrent_add_and_read_is_race_free():
 
     assert not t.is_alive(), "writer thread did not finish (possible deadlock)"
     assert not errors, f"race detected: {errors[:3]}"
+
+
+# --- LAB-1775: age-based compaction bounds the retained window -----------------
+
+
+def _post(minute, *, tags=(), links=(), lang="en", sentiment=None, labels=None):
+    return PostFeatures(
+        ts=minute * 60.0,
+        lang=lang,
+        hashtags=list(tags),
+        links=list(links),
+        emoji=[],
+        sentiment=sentiment,
+        domains=[],
+        hashtag_labels=labels if labels is not None else {tag: tag for tag in tags},
+    )
+
+
+def _fill(store, minute, count, *, prefix="tag"):
+    for index in range(count):
+        store.add(_post(minute, tags=[f"{prefix}{index}"]), source_id=f"did:plc:{prefix}{minute}-{index}")
+
+
+def _age_out(store, minute):
+    """Create a newer bucket so `minute` falls past the full-fidelity window."""
+    store.add(_post(minute + _FULL_FIDELITY_MINUTES + 1, tags=["trigger"]), source_id="did:plc:trigger")
+
+
+def test_aged_buckets_compact_while_the_5m_window_stays_exact():
+    # The whole LAB-1775 fix in one assertion: resident cost is
+    # (retained minutes x keys per minute), so the 1,435 minutes nobody reads at
+    # full fidelity get truncated and the 5 the live view reads do not.
+    store = WindowStore()
+    base = NOW_MIN - 10
+    for offset in range(11):
+        _fill(store, base + offset, 200, prefix=f"m{offset}t")
+    with store._lock:
+        sizes = {minute: len(bucket.tags) for minute, bucket in store._buckets.items()}
+    newest = max(sizes)
+    aged = {minute: size for minute, size in sizes.items() if minute <= newest - _FULL_FIDELITY_MINUTES}
+    live = {minute: size for minute, size in sizes.items() if minute > newest - _FULL_FIDELITY_MINUTES}
+    assert aged and live
+    assert set(aged.values()) == {_K_TAGS}
+    assert set(live.values()) == {200}
+
+
+def test_compaction_keeps_the_most_frequent_keys_with_exact_counts():
+    # Arrival order is the INVERSE of frequency here: an insert-time cap (the
+    # alternative mitigation) keeps the first K keys and would retain exactly
+    # the wrong twenty. Compaction is frequency-ordered, so it keeps the right
+    # ones AND their counts stay exact — truncation only ever drops keys.
+    store = WindowStore()
+    aged = NOW_MIN - 10
+    for index in range(60):
+        for repeat in range(index + 1):
+            store.add(_post(aged, tags=[f"tag{index:02d}"]), source_id=f"did:plc:{index}-{repeat}")
+    _age_out(store, aged)
+    with store._lock:
+        survivors = dict(store._buckets[aged].tags)
+    assert set(survivors) == {f"tag{index:02d}" for index in range(40, 60)}
+    assert survivors["tag59"] == 60
+    assert survivors["tag40"] == 41
+
+
+def test_compaction_never_touches_the_exact_aggregates():
+    # posts_per_minute and the exclusion denominators are exact in every window,
+    # above the cap as well as below it: compaction drops counter KEYS and never
+    # n, signal_candidates or excluded.
+    store = WindowStore()
+    base = NOW_MIN - 30
+    posts = 0
+    for offset in range(31):
+        minute = base + offset
+        for index in range(50):
+            store.add(
+                _post(minute, tags=[f"t{minute}x{index}"], links=[f"https://e{index}.example.com/{minute}"]),
+                source_id=f"did:plc:{minute}-{index}",
+            )
+            posts += 1
+    now = (base + 30) * 60.0 + 59
+    merged = store.merged("1h", now)
+    assert merged.n == posts
+    assert merged.signal_candidates == posts * 2
+    assert store.build_value("posts_per_minute", "1h", now)["ppm"] == round(posts / 60, 3)
+
+
+def test_an_aged_bucket_that_regrows_is_recompacted():
+    # Compaction is deliberately stateless. With an "already compacted" flag, a
+    # late but in-skew event landing in an aged minute would let that bucket
+    # grow unbounded for the rest of the 24h retention — the same leak, just
+    # harder to find.
+    store = WindowStore()
+    aged = NOW_MIN - 10
+    _fill(store, aged, 200, prefix="a")
+    _age_out(store, aged)
+    with store._lock:
+        assert len(store._buckets[aged].tags) == _K_TAGS
+    _fill(store, aged, 200, prefix="b")
+    with store._lock:
+        assert len(store._buckets[aged].tags) > _K_TAGS
+    store.add(_post(aged + _FULL_FIDELITY_MINUTES + 2, tags=["trigger2"]), source_id="did:plc:trigger2")
+    with store._lock:
+        assert len(store._buckets[aged].tags) == _K_TAGS
+
+
+def test_compaction_bounds_langs_and_sent_together():
+    # sent is keyed by language, so leaving it out of compaction would just move
+    # the unbounded axis one field to the right (the round-9 lesson).
+    store = WindowStore()
+    aged = NOW_MIN - 10
+    for index in range(200):
+        lang = f"x{chr(97 + index // 26)}{chr(97 + index % 26)}"
+        store.add(_post(aged, lang=lang, sentiment=0.5), source_id=f"did:plc:l{index}")
+    _age_out(store, aged)
+    with store._lock:
+        bucket = store._buckets[aged]
+        assert len(bucket.langs) == _COMPACT_LANGS
+        assert set(bucket.sent) <= set(bucket.langs)
+
+
+def test_compaction_drops_display_labels_to_canonical_never_to_a_wrong_one():
+    store = WindowStore()
+    aged = NOW_MIN - 10
+    for index in range(60):
+        tag = f"tag{index:02d}"
+        for repeat in range(index + 1):
+            store.add(_post(aged, tags=[tag], labels={tag: tag.upper()}), source_id=f"did:plc:{index}-{repeat}")
+    _age_out(store, aged)
+    with store._lock:
+        bucket = store._buckets[aged]
+        assert len(bucket.tag_labels) <= len(bucket.tags)
+        assert {canonical for canonical, _display in bucket.tag_labels} <= set(bucket.tags)
+    for entry in store.build_value("trending_hashtags", "24h", (aged + 6) * 60.0 + 59)["hashtags"]:
+        assert entry["display"] in (entry["tag"], entry["tag"].upper())
+
+
+def test_full_ledger_stops_new_counter_keys_from_being_minted(monkeypatch):
+    # The head of the window (the 5 uncompacted minutes) is bounded by the GLOBAL
+    # contribution ledger, not by a second cap: at most MAX_SOURCE_LEDGER_ENTRIES
+    # accepted contributions per SOURCE_DEDUPE_SECONDS, and each one mints at
+    # most one counter key. Raising that constant without redoing the memory
+    # arithmetic reopens LAB-1775, so pin the behaviour rather than the number.
+    monkeypatch.setattr("skyline_ingester.windows.MAX_SOURCE_LEDGER_ENTRIES", 16)
+    store = WindowStore()
+    for index in range(200):
+        store.add(_post(NOW_MIN, tags=[f"t{index}"]), source_id=f"did:plc:{index}")
+    with store._lock:
+        assert len(store._buckets[NOW_MIN].tags) == 16
+
+
+def test_stats_reports_live_sizes():
+    store = WindowStore()
+    _fill(store, NOW_MIN, 5)
+    stats = store.stats()
+    assert stats["buckets"] == 1
+    assert stats["ledger_entries"] == 5
+    # 5 tags + 5 (tag, label) pairs + 1 lang
+    assert stats["counter_keys"] == 11

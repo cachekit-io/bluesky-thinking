@@ -114,7 +114,9 @@ public `rate_limited_global_*` exclusion counts. The key,
 digests, and raw DIDs are never put in minute buckets, checkpoints, CacheKit values,
 logs, history, or health output. `/health` also exposes the aggregate
 `events_missing_source` counter so a Jetstream schema change cannot silently empty
-all public trend rankings. The ledger is not restored:
+all public trend rankings, and (LAB-1775) `ledger_entries` — how many digests are
+live, never which — so ledger pressure is diagnosable without weakening that
+boundary. The ledger is not restored:
 after a process restart the key rotates and the five-minute bound starts fresh.
 That small, explicit continuity gap is preferable to creating a durable
 pseudonymous author index. A post without a usable source can still count toward
@@ -125,8 +127,9 @@ bound.
 Jetstream reconnects resume from the greatest validated cursor seen, so an
 out-of-order or hostile old timestamp cannot rewind the subscription. If a backlog
 longer than five minutes is delivered faster than real time, its trend signals share the current
-process-time bound and can be under-counted; event-volume and language
-aggregates remain exact. Event timestamps are deliberately not used to expire
+process-time bound and can be under-counted; event-volume aggregates remain
+exact, and language aggregates remain exact except where per-minute compaction
+applies (below). Event timestamps are deliberately not used to expire
 the ledger because they are untrusted and previously allowed a source to erase
 the bound.
 
@@ -215,6 +218,16 @@ unique events: one post can contain more than one excluded candidate. Checkpoint
 restore retains per-minute top-K entries, so long-tail tag, URL/domain, language,
 and emoji rankings are approximate immediately after a restart; event and signal
 candidate totals remain exact.
+
+The same top-K truncation also applies in steady state, not only after a restart
+(LAB-1775). A minute bucket keeps every distinct key while it is inside the 5 m
+window and is then compacted in place to its top 20 tags, 20 URLs, 20 domains,
+10 emoji and 32 languages. So the **5 m window is exact**, while 1 h and 24 h
+long-tail rankings are approximate — bounded memory is what keeps the service
+inside its 512 MiB host at all. Truncation is frequency-ordered and only ever
+drops keys, so the counts that survive are exact, and `posts_per_minute`,
+`total_events_considered`, `total_signal_candidates` and every
+`excluded_count_by_reason` entry stay exact in all three windows.
 
 ## Recorded evaluation
 
