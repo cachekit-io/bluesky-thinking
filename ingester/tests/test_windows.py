@@ -538,14 +538,27 @@ def test_stats_reports_live_sizes():
     assert stats["counter_keys"] == 11
 
 
-def test_full_fidelity_horizon_clears_the_accepted_future_skew():
-    # Executable oracle for a cross-module coupling, not a restatement of a
-    # constant: _prune anchors the compaction floor on the minute being ADDED
+def test_compaction_can_never_reach_into_the_live_5m_window():
+    # Executable oracle for a cross-module coupling, derived rather than
+    # restated: _prune anchors the compaction floor on the minute being ADDED
     # (deliberately — a far-future stamp must never become a permanent retention
-    # anchor), so the horizon MUST clear the largest future skew ingest_raw will
-    # accept. Shrink either side of this and the next test fails for real.
+    # anchor), so the horizon has to clear the largest future skew ingest_raw
+    # accepts. Rather than assert the constants against each other, derive the
+    # worst reachable floor from the skew and check it against the oldest minute
+    # merged("5m") actually reads — the property that matters.
     assert _MAX_FUTURE_SKEW_MINUTES * 60 >= MAX_FUTURE_SKEW_SECONDS
-    assert WINDOW_MINUTES["5m"] + _MAX_FUTURE_SKEW_MINUTES <= _FULL_FIDELITY_MINUTES
+
+    # Sweep every sub-minute alignment: minute rounding, not just the raw
+    # seconds, decides how far ahead an accepted event's bucket can land.
+    ahead = max(
+        int((second + MAX_FUTURE_SKEW_SECONDS) // 60) - int(second // 60)
+        for second in range(60)  # wall-clock second within the current minute
+    )
+    worst_compact_floor = ahead - _FULL_FIDELITY_MINUTES  # relative to now_min
+    oldest_minute_in_5m = -WINDOW_MINUTES["5m"] + 1  # merged reads (now-5, now]
+    assert worst_compact_floor < oldest_minute_in_5m, (
+        f"compaction floor reaches now_min{worst_compact_floor:+d}, but the 5m window starts at now_min{oldest_minute_in_5m:+d}"
+    )
 
 
 def test_one_future_dated_post_cannot_truncate_the_live_5m_window():
