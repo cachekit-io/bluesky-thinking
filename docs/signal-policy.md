@@ -226,10 +226,19 @@ skew `ingest_raw` accepts — and is then compacted in place to its top 20 tags,
 20 URLs, 20 domains, 10 emoji and 32 languages. So the **5 m window is exact**,
 while 1 h and 24 h long-tail rankings are approximate — bounded memory is what
 keeps the service inside its 512 MiB host at all. Truncation is
-frequency-ordered and only ever drops keys, so the counts that survive are
-exact, and `posts_per_minute`, `total_events_considered`,
-`total_signal_candidates` and every `excluded_count_by_reason` entry stay exact
-in all three windows.
+frequency-ordered and only ever drops keys, never rewrites a count, and
+`posts_per_minute`, `total_events_considered`, `total_signal_candidates` and
+every `excluded_count_by_reason` entry stay exact in all three windows.
+
+Be precise about what that leaves, because "counts are exact" would overclaim:
+a surviving key's count is exact *within its minute*, but a 1 h or 24 h total is
+summed only over the minutes where that key made the top-K, so a published count
+is a **lower bound** on true occurrences. Measured against an uncompacted control
+on an hour of Zipf-distributed traffic: top-25 membership unchanged, top-10 order
+preserved, the six heaviest counts exact, rank 10 at 97.5 %, median 92 % across
+the top 25. A tag averaging under roughly one occurrence per minute never makes a
+minute's top-K and can be absent entirely. These aggregates are a trend
+**ranking**, not a census.
 
 One consequence is worth stating plainly rather than leaving for a reader to
 derive: `lang_mix` computes its shares over the languages a bucket **retains**,

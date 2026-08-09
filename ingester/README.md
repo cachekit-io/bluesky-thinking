@@ -92,9 +92,13 @@ Consequences worth knowing:
 - **`posts_per_minute` and the exclusion denominators are exact in every window.** Compaction
   never touches `n`, `signal_candidates` or `excluded`.
 - Truncation is **frequency-ordered**, not arrival-ordered, so it keeps what was actually
-  trending in that minute. Measured on a Zipf-distributed hour: the published top-25 is
-  unchanged, top-10 order and counts are identical, and 47–49 of the top 50 survive — what is
-  lost is the tail below roughly one occurrence per minute.
+  trending in that minute. Measured on a Zipf-distributed hour against an uncompacted control:
+  top-25 *membership* is unchanged and top-10 *ordering* is preserved. Counts are exact for the
+  heaviest tags and degrade gradually down the ranking — ranks 1–6 exact, rank 10 at 97.5 %,
+  median 92 % across the top 25, worst 55 %. 47 of the top 50 survive; a tag averaging under
+  about one occurrence per minute never makes a minute's top-K and can drop out entirely.
+  Trend *ranking* is what this preserves; per-key totals in the 1 h and 24 h windows are a
+  lower bound, not a census.
 - **`lang_mix` shares are renormalized over the languages a bucket retains.** Below 32 distinct
   languages per minute — every minute at observed rates, which carry 23–27 — that is a no-op;
   above it, 1 h and 24 h shares describe the retained set, not all posts. `total_posts` stays
