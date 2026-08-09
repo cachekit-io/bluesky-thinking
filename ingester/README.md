@@ -112,14 +112,32 @@ uv run python tools/soak_memory.py live --seconds 540      # RSS + cardinality v
 uv run python tools/soak_memory.py saturate --minutes 1440 # a full 24h window, synthetically filled
 ```
 
-At a full 1,440-bucket window and observed live cardinality that is **43.0 MiB steady / 49.1 MiB
+At a full 1,440-bucket window and observed live cardinality that is **41.6 MiB steady / 48.0 MiB
 peak** including the `merged()` transient, versus **438.5 MiB / 634.2 MiB** with compaction
 disabled (`--no-compaction`) — the latter over the 512 MiB limit on retained structure alone.
 
-Worst case, measured: a full compacted tail plus a 10-minute head saturated at the contribution
-ledger's own ceiling (20,000 accepted signals/minute) is **71.8 MiB** at the 24 h merge peak. The
-head needs no cap of its own — `MAX_SOURCE_LEDGER_ENTRIES` over `SOURCE_DEDUPE_SECONDS` already
-bounds distinct tag/link/domain/emoji keys per minute, and `test_windows.py` pins that coupling.
+Worst case, measured: a quiet tail then a burst into the uncompacted head, which is when the
+contribution ledger is empty and a single minute can draw on the whole of it —
+
+```bash
+uv run python tools/soak_memory.py saturate --minutes 1440 --per-bucket 200 --head-per-bucket 40000
+```
+
+— is **110.8 MiB steady / 140.9 MiB** at the 24 h merge peak, with the ledger refusing 1,000,000
+offered contributions. (An earlier pass published 71.8 MiB for this case. That number was low
+twice over: it counted one retained key per accepted contribution when a hashtag mints two, `tags`
+and `tag_labels`, and it treated the ledger's ~20,000/min *sustained* rate as a per-minute ceiling.)
+The head needs no cap of its own — `MAX_SOURCE_LEDGER_ENTRIES` over `SOURCE_DEDUPE_SECONDS` bounds
+what it can accept, and `test_windows.py` derives both the aged and the head budget from those
+constants (driving the head one through `add()`), so raising the ledger cap fails a test.
+
+**One axis is still unbounded, by precondition.** All of the above holds while event time advances
+with monotonic time — the firehose's contract, and what the measurement assumes. A feed that
+*stalls* event time while still delivering volume keeps one head bucket permanently inside the
+full-fidelity horizon, accumulating at roughly 27k keys/min with nothing to age it out.
+`ingest_raw` bounds event time from above but accepts any past timestamp, so this is reachable from
+a broken or hostile feed, not from a healthy Jetstream. Closing it needs a head admission cap with
+explicit at-cap semantics. `counter_keys` on `/health` climbing without bound is its signature.
 
 ## What it publishes
 

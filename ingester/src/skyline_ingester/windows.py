@@ -72,11 +72,40 @@ _MAX_CHECKPOINT_COUNT = 10_000_000
 #   frequency-ordered and only touches the 1h/24h long tail -- the same
 #   approximation snapshot() already ships for checkpoint restore.
 #
-#   The head needs no separate cap: distinct tag/link/domain/emoji keys per
-#   minute are already bounded by the global contribution ledger
-#   (MAX_SOURCE_LEDGER_ENTRIES over SOURCE_DEDUPE_SECONDS => <=20k/min), and
-#   langs/sent by the firehose's own post rate. test_windows.py pins that
-#   coupling so raising the ledger cap cannot silently reopen this.
+#   The head carries no separate cap; the global contribution ledger is its
+#   budget. State that precisely, because the first version of this comment did
+#   not and the arithmetic under it was wrong in two ways:
+#
+#     - Accepted contributions are NOT one-for-one with counter keys. An
+#       accepted hashtag mints TWO retained keys, tags and tag_labels, so the
+#       ledger's entry budget buys up to twice as many keys as "<=20k/min"
+#       implied. At measured rates tags + tag_labels are 56% of live keys.
+#     - MAX_SOURCE_LEDGER_ENTRIES over SOURCE_DEDUPE_SECONDS is a SUSTAINED
+#       rate (~20k accepted contributions/min), not a per-minute ceiling. After
+#       a quiet stretch the ledger is empty, so a single minute can draw on the
+#       whole 100k before refusals start.
+#
+#   Measured against that worst case rather than argued -- a quiet tail then a
+#   burst into the head (tools/soak_memory.py saturate --minutes 1440
+#   --per-bucket 200 --head-per-bucket 40000): 110.8 MiB steady, 140.9 MiB at
+#   the 24h merge peak, with the ledger refusing 1,000,000 offered
+#   contributions. Inside the 512 MiB plan with room to spare, but ~2x the
+#   figure the first pass published. test_windows.py derives both the aged and
+#   the head budget from these constants and drives the head one through add(),
+#   so raising the ledger cap or minting a new key family fails a test.
+#
+#   PRECONDITION, and the one axis still unbounded: all of the above holds while
+#   event time advances with monotonic time -- the firehose's own contract, and
+#   what the measurement above assumes. A feed that STALLS event time while
+#   still delivering volume (every event stamped the same minute) keeps one head
+#   bucket permanently inside the full-fidelity horizon, accumulating at ledger
+#   throughput with nothing to age it out: ~27k keys/min, unbounded. ingest_raw
+#   bounds event time from above but accepts any past timestamp, so this is
+#   reachable from a broken or hostile feed, not from a healthy Jetstream.
+#   _prune's retention cap bounds the bucket COUNT, not one bucket's key count,
+#   so it does not cover this. Closing it needs a head admission cap with
+#   explicit at-cap semantics -- a design decision with a panel gate on it, not
+#   something to slip into a remediation pass. Watch counter_keys on /health.
 #
 #   The horizon carries SLACK past the 5m window, and the slack is load-bearing.
 #   _prune anchors on the minute being ADDED, never on max(self._buckets) — a
@@ -159,6 +188,8 @@ class WindowStore:
         self._seen_expiry: list[tuple[float, bytes]] = []
         self._seen_source: dict[bytes, bytes] = {}
         self._seen_by_source: dict[bytes, dict[bytes, float]] = {}
+        # Events refused by _prune's retention cap; surfaced via stats().
+        self._stale_events = 0
         # Bumped by every add(); a merge only memoises its result if no add()
         # landed since it started, so a cleared memo can't be resurrected with
         # a pre-add() view for the rest of that second.
@@ -175,6 +206,13 @@ class WindowStore:
             if bucket is None:
                 bucket = self._buckets[minute] = Bucket()
                 self._prune(minute)
+                if self._buckets.get(minute) is not bucket:
+                    # _prune's retention CAP evicted the minute we just opened:
+                    # this event is older than anything the horizon can still
+                    # hold. Drop it explicitly instead of accumulating into a
+                    # Bucket that is no longer in the map and no query can read.
+                    self._stale_events += 1
+                    return
             bucket.n += 1
             bucket.excluded.update(feats.exclusions)
             bucket.signal_candidates += (
@@ -318,6 +356,33 @@ class WindowStore:
         compact_floor = newest_minute - _FULL_FIDELITY_MINUTES
         for minute in [m for m in self._buckets if m <= floor]:
             del self._buckets[minute]
+        # The age floor alone does NOT bound the bucket count, because it is
+        # anchored on the minute being added: an OLDER minute lowers it instead
+        # of being caught by it. ingest_raw bounds event time from above
+        # (MAX_FUTURE_SKEW_SECONDS) but from below only by time_us >= 0, so a
+        # descending run of stale timestamps minted one retained bucket per
+        # minute that no later floor could ever reach — and snapshot() copies
+        # every bucket into the checkpoint. Unbounded, on the one axis this
+        # module exists to bound.
+        #
+        # Cap the COUNT rather than trusting the timestamps. A persistent
+        # high-water mark would be poisonable (one far-future stamp permanently
+        # refusing every real event — test_prune_recovers_after_a_future_timestamp
+        # pins that recovery), and a wall-clock anchor would hand a container
+        # with a drifting clock the power to switch the bound off. A count cap is
+        # immune to both: it reads no timestamp at all.
+        #
+        # The limit is self._max + 1, matching restore()'s bucket_limit — the
+        # full window plus room for one stray future bucket — so a healthy
+        # contiguous stream never reaches it. Evicting the OLDEST minutes makes
+        # a stale event evict itself (its minute sorts below every retained one),
+        # so the refusal costs no real data; add() detects that case and counts
+        # it as stale rather than accumulating into a detached Bucket.
+        limit = self._max + 1
+        overflow = len(self._buckets) - limit
+        if overflow > 0:
+            for minute in sorted(self._buckets)[:overflow]:
+                del self._buckets[minute]
         # Same pass compacts what has aged out of the 5m window. Deliberately
         # stateless — no "already compacted" flag: a bucket that regrows (an
         # in-skew event landing in an aged minute, or a future-stamped event
@@ -425,6 +490,7 @@ class WindowStore:
         with self._lock:
             buckets = list(self._buckets.values())
             ledger_entries = len(self._seen)
+            stale_events = self._stale_events
         keys = sum(
             len(b.tags)
             + len(b.links)
@@ -436,7 +502,17 @@ class WindowStore:
             + len(b.sent)
             for b in buckets
         )
-        return {"buckets": len(buckets), "counter_keys": keys, "ledger_entries": ledger_entries}
+        # stale_events is the staleness floor's only voice: the drop happens
+        # under the ingest lock on a public path, so a silent counter is the
+        # difference between "the feed went quiet" and "every event is being
+        # refused as stale" (a poisoned watermark, or upstream replaying a
+        # backlog older than the 24h horizon).
+        return {
+            "buckets": len(buckets),
+            "counter_keys": keys,
+            "ledger_entries": ledger_entries,
+            "stale_events": stale_events,
+        }
 
     def build_value(self, operation: str, window: str, now: float, top_n: int = 50) -> dict:
         """The interop/v1 value for one (operation, window): a top-level map with string keys."""

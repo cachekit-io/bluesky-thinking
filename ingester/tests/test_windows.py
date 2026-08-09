@@ -7,10 +7,13 @@ from collections import Counter
 
 from skyline_ingester.extract import PostFeatures
 from skyline_ingester.jetstream import MAX_FUTURE_SKEW_SECONDS
-from skyline_ingester.policy import NORMALIZATION_VERSION
+from skyline_ingester.policy import EXCLUSION_REASONS, NORMALIZATION_VERSION
 from skyline_ingester.windows import (
     _COMPACT_LANGS,
     _FULL_FIDELITY_MINUTES,
+    _K_DOMAINS,
+    _K_EMOJI,
+    _K_LINKS,
     _K_TAGS,
     _MAX_FUTURE_SKEW_MINUTES,
     MAX_SOURCE_LEDGER_ENTRIES,
@@ -515,17 +518,51 @@ def test_compaction_drops_display_labels_to_canonical_never_to_a_wrong_one():
 
 
 def test_full_ledger_stops_new_counter_keys_from_being_minted(monkeypatch):
-    # The head of the window (the 5 uncompacted minutes) is bounded by the GLOBAL
+    # The head of the window (the uncompacted minutes) is bounded by the GLOBAL
     # contribution ledger, not by a second cap: at most MAX_SOURCE_LEDGER_ENTRIES
-    # accepted contributions per SOURCE_DEDUPE_SECONDS, and each one mints at
-    # most one counter key. Raising that constant without redoing the memory
-    # arithmetic reopens LAB-1775, so pin the behaviour rather than the number.
-    monkeypatch.setattr("skyline_ingester.windows.MAX_SOURCE_LEDGER_ENTRIES", 16)
+    # accepted contributions per SOURCE_DEDUPE_SECONDS. Raising that constant
+    # without redoing the memory arithmetic reopens LAB-1775, so pin the
+    # behaviour rather than the number.
+    #
+    # Count EVERY family the accepted contribution mints, not just tags: one
+    # accepted hashtag mints two retained keys (tags and tag_labels), so the
+    # ledger's entry budget is NOT a one-for-one key budget. Asserting on tags
+    # alone hid a 2x undercount in the memory arithmetic this test exists to
+    # protect — tags + tag_labels are 56% of live keys at measured rates.
+    ledger = 16
+    monkeypatch.setattr("skyline_ingester.windows.MAX_SOURCE_LEDGER_ENTRIES", ledger)
     store = WindowStore()
     for index in range(200):
         store.add(_post(NOW_MIN, tags=[f"t{index}"]), source_id=f"did:plc:{index}")
     with store._lock:
-        assert len(store._buckets[NOW_MIN].tags) == 16
+        bucket = store._buckets[NOW_MIN]
+        assert len(bucket.tags) == ledger
+        assert len(bucket.tag_labels) == ledger
+        # The whole retained cost of a full ledger, stated as one number: two
+        # key families per accepted tag, plus the single "en" lang key.
+        minted = len(bucket.tags) + len(bucket.tag_labels) + len(bucket.langs)
+        assert minted == 2 * ledger + 1
+
+
+def test_a_concentrated_ledger_mints_keys_in_every_eligible_family(monkeypatch):
+    # The sibling case: a real post carries a tag, a link and a domain, so one
+    # post spends THREE ledger entries and mints FOUR retained keys. A test that
+    # only ever offers hashtags measures a third of the per-post key cost and
+    # makes the head's budget look three times roomier than it is.
+    ledger = 30
+    monkeypatch.setattr("skyline_ingester.windows.MAX_SOURCE_LEDGER_ENTRIES", ledger)
+    store = WindowStore()
+    for index in range(200):
+        store.add(
+            _post(NOW_MIN, tags=[f"t{index}"], links=[f"https://e{index}.example.com/{index}"]),
+            source_id=f"did:plc:{index}",
+        )
+    with store._lock:
+        bucket = store._buckets[NOW_MIN]
+        accepted = len(bucket.tags) + len(bucket.links)
+        assert accepted == ledger, "the ledger bounds accepted CONTRIBUTIONS across families, not per family"
+        # Keys outrun ledger entries: tag_labels rides along on every tag.
+        assert len(bucket.tags) + len(bucket.tag_labels) + len(bucket.links) > ledger
 
 
 def test_stats_reports_live_sizes():
@@ -582,6 +619,49 @@ def test_one_future_dated_post_cannot_truncate_the_live_5m_window():
     assert len(hostile.merged("5m", now).tags) == baseline
 
 
+def test_descending_stale_timestamps_cannot_grow_the_bucket_map():
+    # The mirror image of the future-skew CRIT above, and the reason add() has a
+    # staleness floor at all. ingest_raw bounds event time from ABOVE
+    # (MAX_FUTURE_SKEW_SECONDS) but from below only by time_us >= 0, while
+    # _prune's retention floor is anchored on the minute being ADDED — so an
+    # OLDER minute lowered the floor instead of being caught by it. A descending
+    # run of stale timestamps therefore minted one retained bucket per minute
+    # that no later prune could ever reach, and snapshot() copies every bucket
+    # into the checkpoint: unbounded on exactly the axis this module bounds.
+    #
+    # Asserted as the invariant, not a count: every add() either leaves a
+    # retained bucket behind or is refused and counted, and the retained set
+    # never outgrows the horizon. Pre-fix this retained all 500.
+    total = 500
+    store = WindowStore(max_minutes=60)
+    store.add(_post(NOW_MIN, tags=["live"]), source_id="did:plc:live")
+    for step in range(1, total):
+        store.add(_post(NOW_MIN - step, tags=[f"s{step}"]), source_id=f"did:plc:s{step}")
+    limit = store._max + 1  # the window plus room for one stray future bucket
+    with store._lock:
+        retained = len(store._buckets)
+        oldest = min(store._buckets)
+    assert retained <= limit, f"{retained} buckets retained against a {store._max}-minute horizon"
+    # The stale run evicted itself, not the live minute it arrived behind.
+    assert oldest >= NOW_MIN - store._max
+    assert NOW_MIN in store._buckets
+    # Refusals are counted, never silent: a feed replaying past the horizon is
+    # otherwise indistinguishable from a feed that went quiet.
+    assert store.stats()["stale_events"] == total - retained
+
+
+def test_backfill_inside_the_horizon_is_still_accepted():
+    # Guards the staleness floor against over-rejecting: out-of-order events
+    # within the retention window are normal Jetstream behaviour, and dropping
+    # them would silently lose real posts to fix a hostile-input bug.
+    store = WindowStore(max_minutes=60)
+    store.add(_post(NOW_MIN, tags=["live"]), source_id="did:plc:live")
+    store.add(_post(NOW_MIN - 30, tags=["backfill"]), source_id="did:plc:backfill")
+    with store._lock:
+        assert NOW_MIN - 30 in store._buckets
+    assert store.stats()["stale_events"] == 0
+
+
 def test_checkpoint_round_trip_preserves_the_compaction_language_bound():
     # The live store and the checkpoint must agree on how many languages a
     # bucket keeps. They did not: live kept 32, a checkpoint round-trip silently
@@ -610,11 +690,30 @@ def test_a_full_24h_window_stays_inside_its_absolute_key_budget():
     # _K_TAGS; this fails if any per-family K is raised, if a new Bucket counter
     # family is added uncapped, or if compaction is disabled outright.
     #
-    # 200 keys/bucket x 1440 buckets x ~299 B/key (measured, tools/soak_memory.py)
-    # = ~82 MiB of retained counters, which leaves the 512 MiB Render plan room
-    # for the interpreter, the uncompacted head, and the merged() transient.
-    # Measured at this budget: 40 MiB steady, 55 MiB at the 24h merge peak.
-    budget_per_bucket = 200
+    # The per-bucket budget is DERIVED from the compaction constants rather than
+    # hand-picked, so raising any K moves the budget with it and the assertion
+    # keeps measuring the thing it claims to. Every family _compact_bucket
+    # truncates is listed; tag_labels keeps at most one spelling per surviving
+    # tag, and sent inherits langs' bound.
+    # Measured at this shape: 41.6 MiB steady, 48.0 MiB at the 24h merge peak.
+    budget_per_bucket = (
+        _K_TAGS  # tags
+        + _K_TAGS  # tag_labels: one surviving spelling per surviving tag
+        + _K_LINKS
+        + _K_DOMAINS
+        + _K_EMOJI
+        + _COMPACT_LANGS  # langs
+        + _COMPACT_LANGS  # sent, keyed by language
+        + len(EXCLUSION_REASONS)  # excluded is never truncated, but it is finite
+    )
+    # Deriving the budget would be tautological on its own — raise a K and the
+    # budget rises with it. So pin the DERIVED sum against the absolute number
+    # the 512 MiB arithmetic was actually done against (200 keys/bucket x 1440
+    # buckets x ~299 B/key = ~82 MiB of retained counters). Raising any K, or
+    # adding a key family, fails here rather than in a Render OOM alert.
+    assert budget_per_bucket <= 200, (
+        f"compaction constants now admit {budget_per_bucket} keys/bucket; redo the memory arithmetic before raising this"
+    )
     store = WindowStore()
     newest = NOW_MIN
     for offset in range(WINDOW_MINUTES["24h"]):
@@ -634,3 +733,37 @@ def test_a_full_24h_window_stays_inside_its_absolute_key_budget():
 
     keys = store.stats()["counter_keys"]
     assert keys <= budget_per_bucket * WINDOW_MINUTES["24h"], f"retained {keys} counter keys"
+
+
+def test_the_uncompacted_head_stays_inside_a_ledger_derived_key_budget(monkeypatch):
+    # The head keeps every distinct key, so its budget is not a free parameter —
+    # it is the global contribution ledger, and the arithmetic in windows.py
+    # rests on it. Derived from the constant and driven through add() rather than
+    # hand-built buckets, so the path that actually mints keys is the path under
+    # test: a ledger raise, or a new key family riding along on an accepted
+    # contribution, fails here instead of in a Render OOM alert.
+    #
+    # Two keys per accepted contribution, not one: an accepted hashtag mints its
+    # tags entry AND its tag_labels entry. That factor was missing from the
+    # original arithmetic.
+    ledger = 500
+    monkeypatch.setattr("skyline_ingester.windows.MAX_SOURCE_LEDGER_ENTRIES", ledger)
+    store = WindowStore()
+    for offset in range(_FULL_FIDELITY_MINUTES):
+        minute = NOW_MIN - offset
+        for index in range(400):
+            store.add(
+                _post(
+                    minute,
+                    tags=[f"t{offset}x{index}"],
+                    links=[f"https://e{index}.example.com/{offset}"],
+                ),
+                source_id=f"did:plc:{offset}x{index}",
+            )
+    with store._lock:
+        assert len(store._buckets) == _FULL_FIDELITY_MINUTES, "nothing should have compacted or been evicted"
+    # Per bucket the head also carries one lang key and, once the ledger starts
+    # refusing, the public exclusion counters — both finite and independent of load.
+    budget = 2 * ledger + _FULL_FIDELITY_MINUTES * (1 + len(EXCLUSION_REASONS))
+    keys = store.stats()["counter_keys"]
+    assert keys <= budget, f"head retained {keys} keys against a ledger-derived budget of {budget}"

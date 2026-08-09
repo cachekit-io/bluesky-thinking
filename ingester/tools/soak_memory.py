@@ -114,23 +114,35 @@ async def run_live(url: str, seconds: float, sample_interval: float) -> None:
 
     print(f"# live soak: {url} for {seconds:.0f}s, sampling every {sample_interval:.0f}s", flush=True)
     samples.append(report_sample(0.0, store, events))
-    async with websockets.connect(url) as ws:
-        while time.monotonic() < deadline:
-            try:
-                raw = await asyncio.wait_for(ws.recv(), timeout=max(1.0, deadline - time.monotonic()))
-            except (TimeoutError, websockets.WebSocketException) as exc:
-                # Jetstream drops long-lived subscribers routinely; a soak long
-                # enough to be useful is long enough to get dropped. Report on
-                # what was collected instead of losing the whole run to a
-                # traceback — reproduced at t=240s of a 360s soak.
-                print(f"# stream ended early ({type(exc).__name__}) — reporting on {events} events", flush=True)
+    # Jetstream drops long-lived subscribers routinely — reproduced at t=240s of
+    # a 360s soak — so a soak long enough to be useful is long enough to get
+    # dropped. Reconnect with bounded back-off instead of ending the run: the
+    # RSS/key regression needs the POST-warm-up samples, which are exactly the
+    # ones a first-drop exit throws away. Initial connect failures take the same
+    # path, so a flaky start degrades the sample count rather than the run.
+    backoff = 1.0
+    while time.monotonic() < deadline:
+        try:
+            async with websockets.connect(url) as ws:
+                backoff = 1.0
+                while time.monotonic() < deadline:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=max(1.0, deadline - time.monotonic()))
+                    ingest_raw(raw, store)
+                    events += 1
+                    now = time.monotonic()
+                    if now >= next_sample:
+                        samples.append(report_sample(now - started, store, events))
+                        next_sample = now + sample_interval
+        except (TimeoutError, websockets.WebSocketException, OSError) as exc:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 break
-            ingest_raw(raw, store)
-            events += 1
-            now = time.monotonic()
-            if now >= next_sample:
-                samples.append(report_sample(now - started, store, events))
-                next_sample = now + sample_interval
+            print(
+                f"# stream dropped ({type(exc).__name__}) at {events} events — reconnecting in {backoff:.0f}s",
+                flush=True,
+            )
+            await asyncio.sleep(min(backoff, remaining))
+            backoff = min(backoff * 2, 30.0)
 
     elapsed = time.monotonic() - started
     samples.append(report_sample(elapsed, store, events))
@@ -209,43 +221,82 @@ def synth_features(minute: int, index: int, ts: float) -> PostFeatures:
     )
 
 
-def run_saturate(minutes: int, per_bucket: int, *, compaction: bool = True) -> None:
+class _SimulatedClock:
+    """A monotonic clock that advances one minute per simulated minute.
+
+    WindowStore.add() stamps every contribution-ledger entry with
+    time.monotonic(). A synthetic fill runs thousands of simulated minutes per
+    real second, so against a REAL clock nothing in the ledger ever expires and
+    it saturates on contact — which is why this harness used to clear the ledger
+    outright once per simulated minute. That clear models a ONE-minute horizon:
+    five times more permissive than the production SOURCE_DEDUPE_SECONDS, so it
+    admitted workloads the real store refuses and the resulting saturation bound
+    was not a production-reachable number.
+
+    Advancing a fake clock instead lets the store's own _expire_seen enforce the
+    real horizon, so refusals happen here exactly where they happen in prod.
+    """
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+
+def run_saturate(minutes: int, per_bucket: int, *, compaction: bool = True, head_per_bucket: int = 0) -> None:
     if not compaction:
         # The pre-LAB-1775 shape, measured rather than extrapolated: push the
         # full-fidelity horizon past the whole window so nothing ever compacts.
         windows._FULL_FIDELITY_MINUTES = minutes + 1
-    print(f"# saturate: {minutes} buckets x {per_bucket} distinct posts/bucket (compaction={compaction})", flush=True)
+    print(f"# saturate: {minutes} buckets x {per_bucket} offered posts/bucket (compaction={compaction})", flush=True)
+    print(
+        "# each synthetic post offers 3 ledger-eligible signals (tag, url, domain); "
+        f"the ledger admits {windows.MAX_SOURCE_LEDGER_ENTRIES} over {windows.SOURCE_DEDUPE_SECONDS:.0f}s",
+        flush=True,
+    )
     store = WindowStore(max_minutes=minutes)
     base_minute = int(time.time() // 60) - minutes + 1
     baseline = rss_bytes()
-    for offset in range(minutes):
-        minute = base_minute + offset
-        ts = float(minute * 60)
-        for index in range(per_bucket):
-            # A distinct synthetic source per post: the 5-minute contribution
-            # ledger must not dedupe away the cardinality we are trying to build.
-            store.add(synth_features(minute, index, ts), source_id=f"did:plc:synthetic{minute}-{index}")
-        if offset % 240 == 0 or offset == minutes - 1:
-            total_keys, _ = live_key_counts(store)
-            print(
-                f"  bucket {offset + 1:5d}/{minutes} rss={rss_bytes() / MIB:7.1f}MiB keys={total_keys:9d}",
-                flush=True,
-            )
-        # The ledger's 5-minute horizon is wall-clock; a fast synthetic fill would
-        # otherwise saturate it and start refusing. Clearing per simulated minute
-        # models expiry; its own bounded footprint is reported separately below.
-        with store._lock:  # noqa: SLF001
-            store._seen.clear()  # noqa: SLF001
-            store._seen_expiry.clear()  # noqa: SLF001
-            store._seen_source.clear()  # noqa: SLF001
-            store._seen_by_source.clear()  # noqa: SLF001
+    clock = _SimulatedClock()
+    real_time = windows.time
+    windows.time = clock  # type: ignore[assignment]  # add() uses only .monotonic()
+    try:
+        # The worst case for the uncompacted head is a QUIET TAIL THEN A BURST:
+        # the tail leaves the ledger near-empty, so the head minutes can each
+        # draw on the full MAX_SOURCE_LEDGER_ENTRIES rather than on the
+        # steady-state rate. Offering the heavy load only to the head measures
+        # that directly instead of paying 1,440 buckets of it.
+        head_starts_at = minutes - windows._FULL_FIDELITY_MINUTES
+        for offset in range(minutes):
+            minute = base_minute + offset
+            ts = float(minute * 60)
+            clock.now = float(offset * 60)  # one simulated minute of ledger expiry
+            offered = head_per_bucket if (head_per_bucket and offset >= head_starts_at) else per_bucket
+            for index in range(offered):
+                # A distinct synthetic source per post: the per-source cap must not
+                # be what refuses the cardinality we are trying to build.
+                store.add(synth_features(minute, index, ts), source_id=f"did:plc:synthetic{minute}-{index}")
+            if offset % 240 == 0 or offset == minutes - 1:
+                total_keys, _ = live_key_counts(store)
+                print(
+                    f"  bucket {offset + 1:5d}/{minutes} rss={rss_bytes() / MIB:7.1f}MiB keys={total_keys:9d}",
+                    flush=True,
+                )
+    finally:
+        windows.time = real_time  # type: ignore[assignment]
 
     gc.collect()
     steady = rss_bytes()
     total_keys, per_family = live_key_counts(store)
+    with store._lock:  # noqa: SLF001
+        refused = sum(sum(b.excluded.values()) for b in store._buckets.values())  # noqa: SLF001
     print("\n# ---- saturate results ----")
     print(f"buckets                {minutes}")
+    print(f"offered_posts          {minutes * per_bucket}")
+    print(f"refused_contributions  {refused}  (ledger refusals, i.e. load the real store would not accept)")
     print(f"live_counter_keys      {total_keys}")
+    print(f"keys_per_bucket        {total_keys / max(1, minutes):.1f}  (achieved, not offered)")
     for family in FAMILIES:
         if per_family[family]:
             print(f"  {family:<12} {per_family[family]}")
@@ -253,11 +304,16 @@ def run_saturate(minutes: int, per_bucket: int, *, compaction: bool = True) -> N
     print(f"steady_rss_mib         {steady / MIB:.1f}")
     print(f"bytes_per_key          {(steady - baseline) / max(1, total_keys):.1f}")
 
+    # Baseline the merge transient against the high-water mark as it stood BEFORE
+    # merged() ran. peak_rss_bytes() is a process-lifetime maximum, so peak minus
+    # STEADY also charges merged() for whatever bucket construction had already
+    # peaked at — which is most of it on a 1,440-bucket fill.
+    pre_merge_peak = peak_rss_bytes()
     merged = store.merged("24h", time.time())
     peak = peak_rss_bytes()
     print(f"merged_24h_keys        {sum(len(getattr(merged, f)) for f in FAMILIES)}")
-    print(f"peak_rss_mib           {peak / MIB:.1f}  (includes the merged() transient copy)")
-    print(f"merge_transient_mib    {(peak - steady) / MIB:.1f}")
+    print(f"peak_rss_mib           {peak / MIB:.1f}  (process lifetime, includes the merged() transient copy)")
+    print(f"merge_transient_mib    {(peak - pre_merge_peak) / MIB:.1f}  (high-water increase attributable to merged())")
     del merged
 
 
@@ -274,12 +330,23 @@ def main() -> None:
     sat.add_argument("--minutes", type=int, default=WINDOW_MINUTES["24h"])
     sat.add_argument("--per-bucket", type=int, default=200)
     sat.add_argument("--no-compaction", action="store_true", help="measure the pre-LAB-1775 shape")
+    sat.add_argument(
+        "--head-per-bucket",
+        type=int,
+        default=0,
+        help="offer this many posts/bucket to the uncompacted head only (worst case: quiet tail, then a burst)",
+    )
 
     args = parser.parse_args()
     if args.mode == "live":
         asyncio.run(run_live(subscribe_url(args.url), args.seconds, args.sample_interval))
     else:
-        run_saturate(args.minutes, args.per_bucket, compaction=not args.no_compaction)
+        run_saturate(
+            args.minutes,
+            args.per_bucket,
+            compaction=not args.no_compaction,
+            head_per_bucket=args.head_per_bucket,
+        )
 
 
 if __name__ == "__main__":
