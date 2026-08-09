@@ -645,17 +645,18 @@ def test_descending_stale_timestamps_cannot_grow_the_bucket_map():
     store.add(_post(NOW_MIN, tags=["live"]), source_id="did:plc:live")
     for step in range(1, total):
         store.add(_post(NOW_MIN - step, tags=[f"s{step}"]), source_id=f"did:plc:s{step}")
-    limit = store._max + 1  # the window plus room for one stray future bucket
+    # The window, plus the future-skew slack ingest_raw can legitimately fill.
+    limit = store._max + _MAX_FUTURE_SKEW_MINUTES + 1
     with store._lock:
         retained = len(store._buckets)
         oldest = min(store._buckets)
-    assert retained <= limit, f"{retained} buckets retained against a {store._max}-minute horizon"
+    assert retained <= limit, f"{retained} buckets retained against a {limit}-bucket cap"
     # The stale run evicted itself, not the live minute it arrived behind.
-    assert oldest >= NOW_MIN - store._max
+    assert oldest >= NOW_MIN - limit
     assert NOW_MIN in store._buckets
-    # Refusals are counted, never silent: a feed replaying past the horizon is
+    # Evictions are counted, never silent: a feed replaying past the horizon is
     # otherwise indistinguishable from a feed that went quiet.
-    assert store.stats()["stale_events"] == total - retained
+    assert store.stats()["evicted_buckets"] == total - retained
 
 
 def test_backfill_inside_the_horizon_is_still_accepted():
@@ -667,7 +668,7 @@ def test_backfill_inside_the_horizon_is_still_accepted():
     store.add(_post(NOW_MIN - 30, tags=["backfill"]), source_id="did:plc:backfill")
     with store._lock:
         assert NOW_MIN - 30 in store._buckets
-    assert store.stats()["stale_events"] == 0
+    assert store.stats()["evicted_buckets"] == 0
 
 
 def test_checkpoint_round_trip_preserves_the_compaction_language_bound():

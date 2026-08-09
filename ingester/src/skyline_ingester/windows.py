@@ -188,8 +188,10 @@ class WindowStore:
         self._seen_expiry: list[tuple[float, bytes]] = []
         self._seen_source: dict[bytes, bytes] = {}
         self._seen_by_source: dict[bytes, dict[bytes, float]] = {}
-        # Events refused by _prune's retention cap; surfaced via stats().
-        self._stale_events = 0
+        # Buckets dropped by _prune's retention cap (not by the age floor);
+        # surfaced via stats(). Counts buckets, not events — one eviction can
+        # take a minute that held many.
+        self._evicted_buckets = 0
         # Bumped by every add(); a merge only memoises its result if no add()
         # landed since it started, so a cleared memo can't be resurrected with
         # a pre-add() view for the rest of that second.
@@ -211,7 +213,7 @@ class WindowStore:
                     # this event is older than anything the horizon can still
                     # hold. Drop it explicitly instead of accumulating into a
                     # Bucket that is no longer in the map and no query can read.
-                    self._stale_events += 1
+                    # _prune already counted the eviction.
                     return
             bucket.n += 1
             bucket.excluded.update(feats.exclusions)
@@ -372,17 +374,27 @@ class WindowStore:
         # with a drifting clock the power to switch the bound off. A count cap is
         # immune to both: it reads no timestamp at all.
         #
-        # The limit is self._max + 1, matching restore()'s bucket_limit — the
-        # full window plus room for one stray future bucket — so a healthy
-        # contiguous stream never reaches it. Evicting the OLDEST minutes makes
-        # a stale event evict itself (its minute sorts below every retained one),
-        # so the refusal costs no real data; add() detects that case and counts
-        # it as stale rather than accumulating into a detached Bucket.
-        limit = self._max + 1
+        # Size the reserve for the WHOLE future-skew window, not one bucket.
+        # ingest_raw accepts events up to MAX_FUTURE_SKEW_SECONDS ahead, i.e.
+        # _MAX_FUTURE_SKEW_MINUTES distinct future minutes, and the age floor is
+        # anchored on the minute being added so it never evicts them. At
+        # self._max + 1 a full window plus an ordinary skew burst overflowed by
+        # the width of that burst, and the eviction below takes the OLDEST
+        # minutes — so healthy Jetstream clock skew silently dropped real,
+        # still-queryable minutes off the tail of the 24h window. The horizon
+        # already reserves this exact slack for compaction; the cap has to
+        # reserve it too or the two disagree about what "in window" means.
+        limit = self._max + _MAX_FUTURE_SKEW_MINUTES + 1
         overflow = len(self._buckets) - limit
         if overflow > 0:
+            # Evicting the oldest makes a stale event evict itself: its minute
+            # sorts below every retained one, so the refusal costs no real data.
+            # Count every eviction, not just that self-eviction — add() can only
+            # see the case where the bucket it just opened was the one taken, and
+            # an eviction it cannot see is exactly the silent loss to avoid.
             for minute in sorted(self._buckets)[:overflow]:
                 del self._buckets[minute]
+                self._evicted_buckets += 1
         # Same pass compacts what has aged out of the 5m window. Deliberately
         # stateless — no "already compacted" flag: a bucket that regrows (an
         # in-skew event landing in an aged minute, or a future-stamped event
@@ -490,7 +502,7 @@ class WindowStore:
         with self._lock:
             buckets = list(self._buckets.values())
             ledger_entries = len(self._seen)
-            stale_events = self._stale_events
+            evicted_buckets = self._evicted_buckets
         keys = sum(
             len(b.tags)
             + len(b.links)
@@ -502,16 +514,16 @@ class WindowStore:
             + len(b.sent)
             for b in buckets
         )
-        # stale_events is the staleness floor's only voice: the drop happens
-        # under the ingest lock on a public path, so a silent counter is the
-        # difference between "the feed went quiet" and "every event is being
-        # refused as stale" (a poisoned watermark, or upstream replaying a
-        # backlog older than the 24h horizon).
+        # evicted_buckets is the retention cap's only voice. The age floor
+        # dropping a bucket is routine; the CAP dropping one means the store saw
+        # more distinct minutes than the horizon can hold — upstream replaying a
+        # backlog older than 24h, or timestamps walking backwards. Nonzero and
+        # climbing is the signal; silent is indistinguishable from a quiet feed.
         return {
             "buckets": len(buckets),
             "counter_keys": keys,
             "ledger_entries": ledger_entries,
-            "stale_events": stale_events,
+            "evicted_buckets": evicted_buckets,
         }
 
     def build_value(self, operation: str, window: str, now: float, top_n: int = 50) -> dict:
