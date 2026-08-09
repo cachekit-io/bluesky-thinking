@@ -392,7 +392,11 @@ class WindowStore:
             # Count every eviction, not just that self-eviction — add() can only
             # see the case where the bucket it just opened was the one taken, and
             # an eviction it cannot see is exactly the silent loss to avoid.
-            for minute in sorted(self._buckets)[:overflow]:
+            # nsmallest, not sorted()[:overflow]: a descending stale stream calls
+            # _prune once per event with overflow == 1, under the ingest lock, so
+            # paying O(n log n) to find one minute would put a full sort of the
+            # bucket map on the hot path of the exact abuse this cap exists for.
+            for minute in heapq.nsmallest(overflow, self._buckets):
                 del self._buckets[minute]
                 self._evicted_buckets += 1
         # Same pass compacts what has aged out of the 5m window. Deliberately

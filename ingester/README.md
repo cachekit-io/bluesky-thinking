@@ -127,17 +127,20 @@ uv run python tools/soak_memory.py saturate --minutes 1440 --per-bucket 200 --he
 offered contributions. (An earlier pass published 71.8 MiB for this case. That number was low
 twice over: it counted one retained key per accepted contribution when a hashtag mints two, `tags`
 and `tag_labels`, and it treated the ledger's ~20,000/min *sustained* rate as a per-minute ceiling.)
-The head needs no cap of its own — `MAX_SOURCE_LEDGER_ENTRIES` over `SOURCE_DEDUPE_SECONDS` bounds
-what it can accept, and `test_windows.py` derives both the aged and the head budget from those
-constants (driving the head one through `add()`), so raising the ledger cap fails a test.
+**While event time advances**, `MAX_SOURCE_LEDGER_ENTRIES` over `SOURCE_DEDUPE_SECONDS` bounds what
+the head can accept, so it needs no cap of its own; `test_windows.py` derives both the aged and the
+head budget from those constants (driving the head one through `add()`), so raising the ledger cap
+fails a test. That precondition is the firehose's own contract and what the measurement above
+assumes — it is not enforced.
 
-**One axis is still unbounded, by precondition.** All of the above holds while event time advances
-with monotonic time — the firehose's contract, and what the measurement assumes. A feed that
-*stalls* event time while still delivering volume keeps one head bucket permanently inside the
-full-fidelity horizon, accumulating at roughly 27k keys/min with nothing to age it out.
-`ingest_raw` bounds event time from above but accepts any past timestamp, so this is reachable from
-a broken or hostile feed, not from a healthy Jetstream. Closing it needs a head admission cap with
-explicit at-cap semantics. `counter_keys` on `/health` climbing without bound is its signature.
+**One axis is still unbounded.** A feed that *stalls* event time while still delivering volume keeps
+one head bucket permanently inside the full-fidelity horizon: ledger entries expire on monotonic
+time and free capacity for new keys, while nothing ages the bucket out. It accumulates at roughly
+27k keys/min, without bound. `ingest_raw` bounds event time from above but accepts any past
+timestamp, so this is reachable from a broken or hostile feed, not from a healthy Jetstream. The
+bucket-count cap does not help — it bounds how many buckets exist, not how many keys one head
+bucket accumulates. Closing it needs a head admission cap with explicit at-cap semantics.
+`counter_keys` on `/health` climbing without bound is its signature.
 
 ## What it publishes
 
