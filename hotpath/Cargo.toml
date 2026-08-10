@@ -26,9 +26,9 @@ serde = { version = "1", features = ["derive"] }
 hex = "0.4"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-worker = "0.4"
+worker = "0.8"
 serde_json = "1"
-base64 = "0.22"
+base64 = "0.23"
 # Pin the bindgen ABI to the pre-installed CLI (docs/architecture.md build pins).
 wasm-bindgen = "=0.2.126"
 # `workers, cachekitio` give the cache route WorkersCachekitIO (LAB-1492
