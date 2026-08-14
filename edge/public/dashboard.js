@@ -235,12 +235,15 @@ export function renderHistoryMarkup(body, range) {
   if (
     !isAggregatePayload(body) ||
     !isAggregatePayload(body.coverage) ||
-    !Array.isArray(body.points)
+    !Array.isArray(body.points) ||
+    !isNumber(body.period_seconds) ||
+    typeof body.tier !== 'string'
   ) {
     return `${title}<p class="error">The history request failed. Please try again shortly.</p>`;
   }
   const { coverage } = body;
-  const period = isNumber(body.period_seconds) ? body.period_seconds : 3600;
+  const period = body.period_seconds;
+  const tier = body.tier;
   const from = isNumber(coverage.from) ? coverage.from : 0;
   const to = isNumber(coverage.to) ? coverage.to : 0;
   const expected = isNumber(coverage.expected_points) ? coverage.expected_points : 0;
@@ -280,7 +283,7 @@ export function renderHistoryMarkup(body, range) {
   }
 
   const coverageLine =
-    `${fmt(present)} of ${fmt(expected)} ${period === 3600 ? 'hourly' : 'daily'} points in range` +
+    `${fmt(present)} of ${fmt(expected)} ${tier} points in range` +
     (present < expected ? ' — missing points are gaps in collection, not zero activity.' : '.');
   const versions = Array.isArray(body.normalization_versions) ? body.normalization_versions : [];
   const versionNote =

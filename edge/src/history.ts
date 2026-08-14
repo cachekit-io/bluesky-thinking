@@ -25,7 +25,7 @@ import { NAMESPACE, OPERATIONS, isOperation, json, jsonSafe, type Operation } fr
 /** Ranked lists are stored — and served — at this depth. */
 export const STORED_TOP_N = 20;
 
-export interface TierSpec {
+interface TierSpec {
   periodSeconds: number;
   /** The rolling window this tier snapshots at each bucket boundary. */
   sourceWindow: '1h' | '24h';
@@ -79,11 +79,18 @@ export const MAX_PAYLOAD_BYTES = 32_768;
  */
 export const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 
-export const RANGES: Record<'7d' | '30d', { seconds: number; tier: Tier }> = {
+/**
+ * TTL for caching an INCOMPLETE series (newest expected bucket absent).
+ * Long enough to bound D1 recompute while capture is late or down, short
+ * enough that a point landing moments later is picked up within a minute.
+ */
+export const INCOMPLETE_RESPONSE_TTL_SECONDS = 60;
+
+const RANGES: Record<'7d' | '30d', { seconds: number; tier: Tier }> = {
   '7d': { seconds: 7 * 86400, tier: 'hourly' },
   '30d': { seconds: 30 * 86400, tier: 'daily' },
 };
-export type HistoryRange = keyof typeof RANGES;
+type HistoryRange = keyof typeof RANGES;
 
 /**
  * Structural slice of the D1 API (the repo doesn't use workers-types).
@@ -99,7 +106,7 @@ export interface D1Database {
   prepare(sql: string): D1PreparedStatement;
 }
 
-export interface CaptureCounts {
+interface CaptureCounts {
   captured: number;
   duplicate: number;
   missing: number;
@@ -126,26 +133,43 @@ function asFinite(value: unknown): number | null {
 }
 
 /**
+ * Rebuild a {name: count} record with values coerced to finite numbers and
+ * key names capped at 64 chars; anything else is dropped. Counts-by-name is
+ * these fields' contract, and enforcing it value-level at write time is what
+ * makes the "no post text ever reaches storage" promise a property of the
+ * code rather than trust in the operator-writable source cache (panel MAJ,
+ * LAB-1935).
+ */
+function numericRecord(record: Record<string, unknown>): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const [key, raw] of Object.entries(record)) {
+    const count = asFinite(raw);
+    if (count !== null) out[key.slice(0, 64)] = count;
+  }
+  return out;
+}
+
+/**
  * Allowlist + trim one live aggregate into its history payload. Returns
  * null when the operation's own required shape is absent — a malformed or
  * hostile cache entry becomes a counted gap, never a stored row. Only keys
- * named here can ever reach storage.
+ * named here can ever reach storage, and record-valued fields are rebuilt
+ * value-level, never copied wholesale.
  */
 export function trimPayload(
   operation: Operation,
   value: Record<string, unknown>,
 ): Record<string, unknown> | null {
   const out: Record<string, unknown> = {};
-  for (const key of [
-    'window',
-    'total_posts',
-    'total_events_considered',
-    'total_signal_candidates',
-  ]) {
-    if (key in value) out[key] = value[key];
+  // `window` is compared strictly against the tier's source window before
+  // capture ever calls this, so the stored value is one of two literals.
+  if ('window' in value) out.window = value.window;
+  for (const key of ['total_posts', 'total_events_considered', 'total_signal_candidates']) {
+    const total = asFinite(value[key]);
+    if (total !== null) out[key] = total;
   }
   if (isRecord(value.excluded_count_by_reason)) {
-    out.excluded_count_by_reason = value.excluded_count_by_reason;
+    out.excluded_count_by_reason = numericRecord(value.excluded_count_by_reason);
   }
   const top = (list: unknown): unknown[] | null =>
     Array.isArray(list) ? list.slice(0, STORED_TOP_N) : null;
@@ -167,7 +191,7 @@ export function trimPayload(
     }
     case 'lang_mix': {
       if (!isRecord(value.langs)) return null;
-      out.langs = value.langs;
+      out.langs = numericRecord(value.langs);
       return out;
     }
     case 'posts_per_minute': {
@@ -259,7 +283,11 @@ async function captureTier(
         continue;
       }
       const payload = JSON.stringify(trimmed, jsonSafe);
-      if (payload.length > MAX_PAYLOAD_BYTES) {
+      // Byte length, not string length: .length counts UTF-16 code units,
+      // and emoji / non-Latin hashtags are multi-byte by construction, so
+      // counting units would let the real ceiling drift to ~3× the
+      // documented cap (panel MAJ, LAB-1935).
+      if (new TextEncoder().encode(payload).length > MAX_PAYLOAD_BYTES) {
         counts.invalid += 1;
         console.error('history_gap', { tier, operation, bucketTs, reason: 'payload_too_large' });
         continue;
@@ -435,12 +463,21 @@ function isValidCachedEnvelope(
  * the live endpoints may be perfectly healthy — and vice versa.
  */
 async function historyStatus(db: D1Database, nowMs: number): Promise<Response> {
-  const { results } = await db
-    .prepare(
-      `SELECT tier, COUNT(*) AS rows, MIN(bucket_ts) AS first_bucket, MAX(bucket_ts) AS latest_bucket
-       FROM snapshots GROUP BY tier`,
-    )
-    .all();
+  let results: Record<string, unknown>[];
+  try {
+    ({ results } = await db
+      .prepare(
+        `SELECT tier, COUNT(*) AS rows, MIN(bucket_ts) AS first_bucket, MAX(bucket_ts) AS latest_bucket
+         FROM snapshots GROUP BY tier`,
+      )
+      .all());
+  } catch (err) {
+    // Same failure shape as the range path: the endpoint documented as
+    // "capture health" must name its own outage, not fall through to the
+    // Worker's generic edge_unhandled 500 (panel MAJ, LAB-1935).
+    console.error('history_status_failed', { err: String(err) });
+    return json(500, { error: 'history_unavailable', detail: 'history store query failed' });
+  }
   const nowSec = Math.floor(nowMs / 1000);
   const tiers: Record<string, unknown> = {};
   let startedAt: number | null = null;
@@ -503,7 +540,9 @@ export async function handleHistoryApi(url: URL, deps: HistoryDeps): Promise<Res
   // old one; within a bucket the whole planet shares one D1 computation.
   // Key cardinality is closed: 5 operations × 2 ranges × one bucket.
   const cacheKey = `${NAMESPACE}:history_response:${segment}:${range}:${toBucket}`;
-  let source: 'cachekit' | 'd1' | 'd1-fallback' = 'd1';
+  // 'cachekit' is not a member: the hit branch returns early with a literal
+  // header, so this variable only ever names the two D1-computed paths.
+  let source: 'd1' | 'd1-fallback' = 'd1';
   if (deps.backend) {
     try {
       const cached = await deps.backend.get(cacheKey);
@@ -619,20 +658,25 @@ export async function handleHistoryApi(url: URL, deps: HistoryDeps): Promise<Res
   const encoded = JSON.stringify(body, jsonSafe);
   const encodedBytes = new TextEncoder().encode(encoded);
 
-  // Cache only a series whose newest expected bucket is present. If the
-  // capture for toBucket hasn't landed yet (late cron tick, slow backend),
-  // caching now would freeze the incomplete series for a full period —
-  // hourly for 7d, a whole DAY for 30d — even though the row arrives
-  // moments later. An incomplete series still serves; it just stays
-  // recomputed (bounded by the 15 s POP cache) until the point exists.
+  // TTL depends on completeness. A series whose newest expected bucket is
+  // present is exact for its bucket and cached for the full period. An
+  // incomplete one (late tick, dead capture) must not be frozen that long —
+  // the missing row may land moments later — but it must still be cached
+  // BRIEFLY: never caching it means the response cache is defeated in
+  // exactly the state where every request pays full D1, and capture-down is
+  // when that recompute load is self-sustaining (panel CRIT, LAB-1935).
   // The write also honours the read path's size cap: storing a response the
   // read side would reject poisons the key into a permanent reject-
   // recompute-rewrite loop, so an over-limit response stays uncached.
-  const newestPresent = points.length > 0 && points[points.length - 1]?.bucket_ts === toBucket;
-  if (deps.backend && source === 'd1' && newestPresent) {
+  const newestPresent = points.at(-1)?.bucket_ts === toBucket;
+  if (deps.backend && source === 'd1') {
     if (encodedBytes.length <= MAX_RESPONSE_BYTES) {
       try {
-        await deps.backend.set(cacheKey, encodedBytes, period);
+        await deps.backend.set(
+          cacheKey,
+          encodedBytes,
+          newestPresent ? period : INCOMPLETE_RESPONSE_TTL_SECONDS,
+        );
       } catch (err) {
         console.error('history_cache_write_failed', { key: cacheKey, err: String(err) });
       }
@@ -650,7 +694,24 @@ export async function handleHistoryApi(url: URL, deps: HistoryDeps): Promise<Res
   });
 }
 
+/**
+ * History start = the earliest bucket across tiers, one indexed seek per
+ * tier. A bare `MIN(bucket_ts)` over the table has no index with bucket_ts
+ * leading (the PK starts at operation, the secondary index at tier), so it
+ * walks every row — linear in table size and billed per row read, which at
+ * steady state (~6,200 rows) turns each uncached range request into ~37×
+ * its documented read budget (panel CRIT, LAB-1935). Binding tier lets
+ * SQLite satisfy MIN straight off the (tier, bucket_ts) index.
+ */
 async function firstBucket(db: D1Database): Promise<number | null> {
-  const { results } = await db.prepare('SELECT MIN(bucket_ts) AS first FROM snapshots').all();
-  return asFinite(results[0]?.first);
+  let first: number | null = null;
+  for (const tier of TIERS) {
+    const { results } = await db
+      .prepare('SELECT MIN(bucket_ts) AS first FROM snapshots WHERE tier = ?')
+      .bind(tier)
+      .all();
+    const value = asFinite(results[0]?.first);
+    if (value !== null && (first === null || value < first)) first = value;
+  }
+  return first;
 }

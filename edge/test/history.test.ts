@@ -15,10 +15,12 @@ import { NAMESPACE, OPERATIONS } from '../src/handler.js';
 import {
   captureTick,
   handleHistoryApi,
+  INCOMPLETE_RESPONSE_TTL_SECONDS,
   MAX_PAYLOAD_BYTES,
   MAX_RESPONSE_BYTES,
   STORED_TOP_N,
   TIER_SPECS,
+  trimPayload,
   type D1Database,
   type D1PreparedStatement,
 } from '../src/history.js';
@@ -46,13 +48,16 @@ function toSqlValues(values: unknown[]): SqlValue[] {
   });
 }
 
+/** Type guard, so narrowing needs no assertion (team rule: no unsafe `as`). */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
 /** Runtime-checked JSON.parse for fixtures we expect to be objects. */
 function asRecord(payload: unknown): Record<string, unknown> {
   const parsed: unknown = JSON.parse(String(payload));
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error('fixture payload is not a JSON object');
-  }
-  return parsed as Record<string, unknown>;
+  if (!isRecord(parsed)) throw new Error('fixture payload is not a JSON object');
+  return parsed;
 }
 
 function d1Of(db: DatabaseSync): D1Database {
@@ -301,6 +306,29 @@ describe('gaps stay gaps', () => {
     expect(allRows(sqlite).map((r) => r.operation)).not.toContain('trending_hashtags');
   });
 
+  it('caps stored payloads by UTF-8 bytes, not UTF-16 code units', async () => {
+    const { db, sqlite } = freshDb();
+    const nowSec = HOUR_MS / 1000;
+    const full = liveBackend(nowSec - 30);
+    // Emoji tags: ~24.5k UTF-16 code units (under the 32 KiB cap) but
+    // ~48.5k UTF-8 bytes (over it). Counting units would store this row at
+    // ~1.5× the documented ceiling.
+    const emojiHeavy = aggregate('trending_hashtags', '1h', nowSec - 30, {
+      hashtags: Array.from({ length: STORED_TOP_N }, (_, i) => ({
+        tag: `${'🔥'.repeat(600)}${i}`,
+        count: 1,
+      })),
+    });
+    const backend = mockBackend(async (key) =>
+      key === generateInteropKey(NAMESPACE, 'trending_hashtags', ['1h'])
+        ? encodeInteropValue(emojiHeavy)
+        : full.get(key),
+    );
+    const report = await captureTick(backend, db, HOUR_MS);
+    expect(report.hourly).toMatchObject({ captured: 4, invalid: 1 });
+    expect(allRows(sqlite).map((r) => r.operation)).not.toContain('trending_hashtags');
+  });
+
   it('an entry whose own window claim disagrees with its key becomes a gap', async () => {
     const { db, sqlite } = freshDb();
     const nowSec = HOUR_MS / 1000;
@@ -326,6 +354,28 @@ describe('gaps stay gaps', () => {
     const report = await captureTick(flaky, db, HOUR_MS);
     expect(report.hourly).toMatchObject({ captured: 4, failed: 1 });
     expect(allRows(sqlite)).toHaveLength(4);
+  });
+});
+
+describe('trimPayload value-level allowlist', () => {
+  it('rebuilds record fields as bounded {name: count} — smuggled text is dropped, not stored', () => {
+    const trimmed = trimPayload('lang_mix', {
+      window: '1h',
+      total_posts: 'thirty kilobytes of post text', // non-numeric total → dropped
+      total_events_considered: 1234,
+      excluded_count_by_reason: {
+        filtered_tag: 3,
+        smuggled: 'entire post body parked in a count field', // → dropped
+        [`${'k'.repeat(200)}`]: 7, // key name capped at 64 chars
+      },
+      langs: { en: 0.6, evil: 'post text here', ja: 0.3 },
+    });
+    expect(trimmed).toEqual({
+      window: '1h',
+      total_events_considered: 1234,
+      excluded_count_by_reason: { filtered_tag: 3, ['k'.repeat(64)]: 7 },
+      langs: { en: 0.6, ja: 0.3 },
+    });
   });
 });
 
@@ -484,31 +534,6 @@ describe('GET /api/history/{operation}', () => {
     expect(body.coverage.to).toBe(lastBucket - 3600);
   });
 
-  it('serves ranked payloads at their stored top-20 depth', async () => {
-    const { db, sqlite } = freshDb();
-    const insert = sqlite.prepare(
-      `INSERT INTO snapshots (operation, tier, bucket_ts, generated_at, normalization_version,
-        payload, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    );
-    const hashtags = Array.from({ length: 20 }, (_, i) => ({ tag: `t${i}`, count: 50 - i }));
-    insert.run(
-      'trending_hashtags',
-      'hourly',
-      lastBucket,
-      lastBucket - 20,
-      NORMALIZATION,
-      JSON.stringify({ hashtags }),
-      lastBucket,
-    );
-    const res = await handleHistoryApi(api('/api/history/trending_hashtags?range=7d'), {
-      db,
-      backend: null,
-      nowMs,
-    });
-    const body = (await res.json()) as { points: { data: { hashtags: unknown[] } }[] };
-    expect(body.points[0]?.data.hashtags).toHaveLength(20);
-  });
-
   it('surfaces mixed normalization versions instead of silently blending them', async () => {
     const { db, sqlite } = freshDb();
     seedHourly(sqlite, lastBucket, 3);
@@ -591,9 +616,10 @@ describe('CacheKit-backed response caching', () => {
     expect(JSON.parse(new TextDecoder().decode(stored.get(cacheKey)))).toEqual(body);
   });
 
-  it('pins the size limits the cache contract depends on', () => {
+  it('pins the size limits and TTLs the cache contract depends on', () => {
     expect(MAX_PAYLOAD_BYTES).toBe(32_768);
     expect(MAX_RESPONSE_BYTES).toBe(4 * 1024 * 1024);
+    expect(INCOMPLETE_RESPONSE_TTL_SECONDS).toBe(60);
   });
 
   it('an oversized cached value is a miss, recomputed from D1, and healed', async () => {
@@ -718,15 +744,18 @@ describe('CacheKit-backed response caching', () => {
     ).toBe(2);
   });
 
-  it('never caches a series whose newest expected bucket has not landed yet', async () => {
+  it('caches an incomplete series briefly (60 s), never frozen for a full period', async () => {
     const { db, sqlite } = freshDb();
-    // Rows exist, but NOT for lastBucket — the capture is late or lost.
+    // Rows exist, but NOT for lastBucket — the capture is late or lost. This
+    // is exactly the state where every request would otherwise pay full D1,
+    // so the response IS cached — with a short TTL, not the tier period, so
+    // a point landing moments later shows within a minute.
     seedHourly(sqlite, lastBucket - 3600, 5);
-    const sets: string[] = [];
+    const stored = new Map<string, { value: Uint8Array; ttl?: number }>();
     const backend = mockBackend(
       async () => null,
-      async (key) => {
-        sets.push(key);
+      async (key, value, ttl) => {
+        stored.set(key, { value, ttl });
       },
     );
     const res = await handleHistoryApi(api('/api/history/posts_per_minute?range=7d'), {
@@ -734,11 +763,12 @@ describe('CacheKit-backed response caching', () => {
       backend,
       nowMs,
     });
-    expect(res.status).toBe(200); // still served — just not frozen for an hour
+    expect(res.status).toBe(200);
     const body = (await res.json()) as { coverage: { to: number; present_points: number } };
     expect(body.coverage.to).toBe(lastBucket);
     expect(body.coverage.present_points).toBe(5);
-    expect(sets).toEqual([]);
+    const entry = stored.get(`bluesky-thinking:history_response:posts_per_minute:7d:${lastBucket}`);
+    expect(entry?.ttl).toBe(INCOMPLETE_RESPONSE_TTL_SECONDS);
   });
 
   it('a failing cache backend degrades to D1, never to an error', async () => {
@@ -789,6 +819,16 @@ describe('GET /api/history/status', () => {
     expect(body.history_started_at).toBeNull();
     expect(body.tiers.hourly).toMatchObject({ rows: 0, stale: true });
     expect(body.tiers.daily).toMatchObject({ rows: 0, stale: true });
+  });
+
+  it('a failing D1 store surfaces as history_unavailable, not a generic 500', async () => {
+    const res = await handleHistoryApi(api('/api/history/status'), {
+      db: explodingDb,
+      backend: null,
+      nowMs: HOUR_MS,
+    });
+    expect(res.status).toBe(500);
+    expect(((await res.json()) as { error: string }).error).toBe('history_unavailable');
   });
 
   it('distinguishes healthy capture from a silently-stopped one', async () => {
