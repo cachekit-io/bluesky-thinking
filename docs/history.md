@@ -71,28 +71,41 @@ One row per (operation, tier, bucket) in the `snapshots` table
 version, stored per row and surfaced per point so comparisons across a policy
 change are explicit, never silent), and `payload` — the aggregate JSON rebuilt
 through an **allowlist** (window, totals, exclusion counts, ranked lists
-trimmed to top-20). The allowlist is enforced at the value level, not just by
-key name, and it is uniform across every field shape:
+trimmed to top-20). Value-level enforcement applies to **every** field shape —
+no field is copied wholesale — though the failure policy differs by shape:
 
+- `window` is stored only when it is literally `1h` or `24h`.
 - Totals are coerced to finite numbers.
 - The count-by-name records (`excluded_count_by_reason`, `langs`) are rebuilt
-  as `{name: count}` with non-numeric values dropped and key names capped at
-  64 chars.
+  as `{name: count}`: non-numeric values dropped, keys matched against the
+  field's own vocabulary (`lowercase_with_underscores` reason names; BCP-47
+  language tags plus `other`), at most 64 keys. A bad key is **dropped** — the
+  remaining distribution is still correct.
 - **Ranked-list elements are rebuilt too**, not copied: each element yields
-  only its allowlisted label (`tag`/`uri`/`domain`/`emoji`, plus the
-  decorative `display` for tags) truncated to 512 chars, and a finite
-  `count`. An element that is not a record, or that lacks its label or count,
-  gaps the whole snapshot — a ranked list with elements silently dropped
-  would misstate the ranking it claims to be.
+  only its allowlisted identity label (`tag`/`uri`/`domain`/`emoji`, plus the
+  decorative `display` for tags) and a finite `count`. A bad identity label
+  **gaps the whole snapshot** rather than dropping the element, because a
+  ranked list with elements silently removed misstates the ranking it claims
+  to be. A bad `display` is dropped on its own — it cannot move the ranking.
+
+Lengths are the publisher's own caps, not edge-side inventions (`tag` and
+`emoji` 64, `domain` 253, `uri` 2048 — ingester `policy.py`/`extract.py`), so
+no legitimate aggregate is ever reshaped, and `uri` must additionally parse as
+`http(s)`. Over-cap values are **rejected, never truncated**: cutting an
+identity field forges a different one — two distinct long links sharing a
+prefix would collapse to the same stored URI with their counts unmerged, and
+the row would hold a URL that resolves nowhere.
 
 The source cache is operator-writable, so "aggregate-only" is a property of
 the write path, not trust in the writer: an unknown key on a list element —
 nested objects, post text parked under a spare field — cannot survive the
-rebuild, and this is pinned by a capture test that injects one. A payload over
-32 KiB (measured in UTF-8 bytes, since emoji and non-Latin tags are
-multi-byte by construction) is rejected as a gap. Payload-shape versioning is
-the migration history itself — a `schema_version` column ships with the
-migration that first needs one, not before.
+rebuild, and a capture test injects one to prove it. A payload over 32 KiB
+(measured in UTF-8 bytes, since emoji and non-Latin text are multi-byte by
+construction) is rejected as a gap; with the per-label caps in place the only
+input that still reaches that ceiling is a top-20 of near-maximal URIs
+(20 × 2048 ≈ 41 KB), which gaps rather than storing an over-budget row.
+Payload-shape versioning is the migration history itself — a `schema_version`
+column ships with the migration that first needs one, not before.
 
 The staleness guard is **symmetric**: a bucket label tolerates `generated_at`
 skew of up to one source TTL on either side. Older means the entry should
@@ -141,6 +154,12 @@ cachekit|d1|d1-fallback` says which path served. Two honesty rules apply:
   treated as a miss, recomputed from D1, and overwritten — never relayed into
   the POP cache. The 4 MiB cap is enforced on the write side too, so an
   over-limit response is served uncached rather than poisoning its own key.
+  **Point payloads are re-validated, not just the envelope**: this cache is
+  the only short-circuit past the capture allowlist and it lives in the same
+  operator-writable store, so a forgery that satisfied every structural check
+  could otherwise carry post text that never passed capture. Each point's
+  `data` must survive `trimPayload` unchanged (key order aside) or the entry
+  is a miss. A write-side gate the read side can walk around is decorative.
 - **Completeness sets the TTL**: a series whose newest expected bucket is
   present is exact for its bucket and cached for the full tier period. An
   incomplete series (late tick, dead capture) is cached for **60 s** — long
@@ -160,9 +179,13 @@ and `/api/stats` behave byte-for-byte as before.
 
 A history row contains exactly what the public `/api/{operation}` endpoints
 already serve — normalized ranked values, totals, exclusion counts — trimmed
-to top-20 and filtered through an allowlist. **No post text, no author DID, no
-record key, no raw event payload** — those never reach the edge in the first
-place (the ingester's aggregates are already DID-free, see signal-policy.md).
+to top-20 and filtered through an allowlist. Values are never rewritten to fit
+(an over-cap or off-vocabulary value is dropped or gaps the snapshot), so
+"exactly what the endpoints serve" stays literally true rather than
+approximately. **No post text, no author DID, no record key, no raw event
+payload** — those never reach the edge in the first place (the ingester's
+aggregates are already DID-free, see signal-policy.md), and the write path
+enforces it independently rather than trusting that.
 The `@cache.secure` sentiment cache is excluded from history entirely: it is
 zero-knowledge ciphertext, and persisting any derivative would cross the
 boundary LAB-744 established. What history changes is **time**: a trending tag
@@ -194,7 +217,7 @@ read/day. Cloudflare docs, verified 2026-08-14.
 | :--------------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -----------------------------: |
 | Rows written/day       | 120 hourly + 5 daily + ≤125 retention deletes ≈ 250 _logical_ rows — but D1 bills index maintenance, and `snapshots` carries two indexes (the composite-PK `sqlite_autoindex_snapshots_1` + `idx_snapshots_tier_bucket`), so each row costs 3 `rows_written` ≈ **750** |                          ~133× |
 | Rows read/day          | ≤170/query (≤168 range rows + 2 indexed `MIN` seeks — the history-start lookup is bound per tier so it seeks the `(tier, bucket_ts)` index instead of scanning the table); response reuse ≥1h complete / 60 s incomplete; even 10k uncached queries/day ≈ 1.7M         | ~3× worst-case, ~10³× expected |
-| Storage                | 4,200 hourly + 2,000 daily = 6,200 rows. Typical row ~6 KiB (top-20 trim) ≈ **≤40 MiB** steady state; every row at the 32 KiB hard cap ≈ **≤194 MiB** worst case                                                                                                       |     ~26× at the worst-case cap |
+| Storage                | 4,200 hourly + 2,000 daily = 6,200 rows. Typical row ~6 KiB (top-20 trim) ≈ **~40 MiB** steady state; every row at the 32 KiB hard cap ≈ **~194 MiB** worst case. Payload bytes only — the two indexes and SQLite overflow pages sit on top of that                    |     ~25× at the worst-case cap |
 | Cron slots (5/account) | **0 new** — rides the existing keep-alive schedule                                                                                                                                                                                                                     |                              — |
 | CachekitIO ops         | 5 GETs/hour capture + ≤10 response-cache entries/bucket                                                                                                                                                                                                                |        dogfood, our own tenant |
 

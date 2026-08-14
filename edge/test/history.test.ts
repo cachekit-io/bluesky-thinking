@@ -16,8 +16,8 @@ import {
   captureTick,
   handleHistoryApi,
   INCOMPLETE_RESPONSE_TTL_SECONDS,
-  MAX_FIELD_CHARS,
   MAX_PAYLOAD_BYTES,
+  MAX_RECORD_KEYS,
   MAX_RESPONSE_BYTES,
   STORED_TOP_N,
   TIER_SPECS,
@@ -129,7 +129,12 @@ function aggregate(
       base.hashtags = ranked('tag');
       break;
     case 'trending_links':
-      base.links = ranked('uri');
+      // Real http(s) URLs, matching the publisher's normalize_link output —
+      // the edge validates the `uri` scheme, so `uri-0` would be a gap.
+      base.links = Array.from({ length: 30 }, (_, i) => ({
+        uri: `https://example.com/${i}`,
+        count: 100 - i,
+      }));
       base.domains = ranked('domain');
       break;
     case 'lang_mix':
@@ -289,50 +294,51 @@ describe('gaps stay gaps', () => {
     const { db, sqlite } = freshDb();
     const nowSec = HOUR_MS / 1000;
     const full = liveBackend(nowSec - 30);
-    // Ranked lists are now bounded by top-20 × MAX_FIELD_CHARS, so an ASCII
-    // over-cap payload is only reachable through a count-by-name record —
-    // those have no key-COUNT bound, only a 64-char cap per key. 800 keys
-    // ≈ 60 KB trimmed, so the byte cap itself must reject it.
-    const huge = aggregate('lang_mix', '1h', nowSec - 30, {
-      langs: Object.fromEntries(
-        Array.from({ length: 800 }, (_, i) => [`${'l'.repeat(60)}${i}`, 0.001]),
-      ),
+    // Per-label caps and MAX_RECORD_KEYS bound every other field tightly, so
+    // the row cap's one remaining reachable path is a top-20 of maximal URIs:
+    // the publisher permits 2,048-char URLs, and 20 of them is ~41 KB. This
+    // is legitimate-but-pathological input — real URLs are ~100 chars — and
+    // the honest outcome is a gap, not a silently over-budget row.
+    const huge = aggregate('trending_links', '1h', nowSec - 30, {
+      links: Array.from({ length: STORED_TOP_N }, (_, i) => ({
+        uri: `https://example.com/${'p'.repeat(2000)}${i}`,
+        count: 100 - i,
+      })),
     });
     const oversized = mockBackend(async (key) =>
-      key === generateInteropKey(NAMESPACE, 'lang_mix', ['1h'])
+      key === generateInteropKey(NAMESPACE, 'trending_links', ['1h'])
         ? encodeInteropValue(huge)
         : full.get(key),
     );
     const report = await captureTick(oversized, db, HOUR_MS);
     expect(report.hourly).toMatchObject({ captured: 4, invalid: 1 });
-    expect(allRows(sqlite).map((r) => r.operation)).not.toContain('lang_mix');
+    expect(allRows(sqlite).map((r) => r.operation)).not.toContain('trending_links');
   });
 
   it('caps stored payloads by UTF-8 bytes, not UTF-16 code units', async () => {
     const { db, sqlite } = freshDb();
     const nowSec = HOUR_MS / 1000;
     const full = liveBackend(nowSec - 30);
-    // Each field truncates to MAX_FIELD_CHARS = 512 UTF-16 units = 256 whole
-    // emoji = 1024 UTF-8 bytes. Across 20 elements × 2 string fields that is
-    // ~20.5k code units (UNDER the 32 KiB cap) but ~41k UTF-8 bytes (OVER
-    // it) — so counting units instead of bytes would store this row at ~1.25×
-    // the documented ceiling. The per-field cap bounds the field, not the row;
-    // multi-byte text is exactly where the row cap still has to bind.
-    const emojiHeavy = aggregate('trending_hashtags', '1h', nowSec - 30, {
-      hashtags: Array.from({ length: STORED_TOP_N }, (_, i) => ({
-        tag: '🔥'.repeat(400),
-        display: '🔥'.repeat(400),
-        count: i,
+    // 20 URIs with a 1,000-char CJK path. Each is 1,020 UTF-16 units (inside
+    // the publisher's 2,048 cap, so every element is legitimately KEPT — the
+    // label cap cannot be what rejects this row) but ~3 bytes per char in
+    // UTF-8: ~20.4k code units total, UNDER the 32 KiB cap, against ~61k
+    // UTF-8 bytes, well OVER it. Counting units would store this at ~1.9× the
+    // documented ceiling.
+    const cjkHeavy = aggregate('trending_links', '1h', nowSec - 30, {
+      links: Array.from({ length: STORED_TOP_N }, (_, i) => ({
+        uri: `https://example.com/${'あ'.repeat(1000)}${i}`,
+        count: 100 - i,
       })),
     });
     const backend = mockBackend(async (key) =>
-      key === generateInteropKey(NAMESPACE, 'trending_hashtags', ['1h'])
-        ? encodeInteropValue(emojiHeavy)
+      key === generateInteropKey(NAMESPACE, 'trending_links', ['1h'])
+        ? encodeInteropValue(cjkHeavy)
         : full.get(key),
     );
     const report = await captureTick(backend, db, HOUR_MS);
     expect(report.hourly).toMatchObject({ captured: 4, invalid: 1 });
-    expect(allRows(sqlite).map((r) => r.operation)).not.toContain('trending_hashtags');
+    expect(allRows(sqlite).map((r) => r.operation)).not.toContain('trending_links');
   });
 
   it('an entry whose own window claim disagrees with its key becomes a gap', async () => {
@@ -371,17 +377,53 @@ describe('trimPayload value-level allowlist', () => {
       total_events_considered: 1234,
       excluded_count_by_reason: {
         filtered_tag: 3,
-        smuggled: 'entire post body parked in a count field', // → dropped
-        [`${'k'.repeat(200)}`]: 7, // key name capped at 64 chars
+        smuggled: 'entire post body parked in a count field', // non-numeric → dropped
+        '<img onerror=1>': 4, // not a reason name → dropped
+        [`${'k'.repeat(200)}`]: 7, // over-long → dropped, NOT truncated
       },
       langs: { en: 0.6, evil: 'post text here', ja: 0.3 },
     });
     expect(trimmed).toEqual({
       window: '1h',
       total_events_considered: 1234,
-      excluded_count_by_reason: { filtered_tag: 3, ['k'.repeat(64)]: 7 },
+      excluded_count_by_reason: { filtered_tag: 3 },
       langs: { en: 0.6, ja: 0.3 },
     });
+  });
+
+  it('drops record keys that are not their field vocabulary — the LAB-1613 round-4 class', () => {
+    // A snapshot retains for up to 400 days what the live cache expired in an
+    // hour, so an unvalidated key name is strictly worse here than upstream.
+    const langs = trimPayload('lang_mix', {
+      langs: {
+        en: 0.5,
+        'pt-BR': 0.2,
+        other: 0.1,
+        '<script>alert(1)</script>': 0.9,
+        'not a language at all': 0.1,
+      },
+    });
+    expect(langs).toEqual({ langs: { en: 0.5, 'pt-BR': 0.2, other: 0.1 } });
+
+    // Key COUNT is bounded too — that was previously the byte cap's job alone.
+    // 400 valid 3-letter codes, so the pattern cannot be what trims them.
+    const codes = Array.from({ length: 400 }, (_, i) => [
+      `a${String.fromCharCode(97 + Math.floor(i / 26))}${String.fromCharCode(97 + (i % 26))}`,
+      0.001,
+    ]);
+    const many = trimPayload('lang_mix', { langs: Object.fromEntries(codes) });
+    const kept = many && isRecord(many.langs) ? Object.keys(many.langs) : [];
+    expect(kept).toHaveLength(MAX_RECORD_KEYS);
+  });
+
+  it('drops an over-long record key instead of truncating it into a collision', () => {
+    // Truncation made `k…aaa` and `k…bbb` the same 64-char key, and the second
+    // silently overwrote the first's count rather than summing it.
+    const base = 'r'.repeat(62);
+    const trimmed = trimPayload('lang_mix', {
+      langs: { en: 1, [`${base}aaa`]: 1, [`${base}bbb`]: 2 },
+    });
+    expect(trimmed).toEqual({ langs: { en: 1 } });
   });
 
   it('rebuilds ranked-list elements from allowlisted fields — unknown element keys cannot survive', () => {
@@ -397,29 +439,44 @@ describe('trimPayload value-level allowlist', () => {
           nested: { author_handle: 'alice.bsky.social', text: 'post body' },
           replies: [{ text: 'a reply' }],
         },
-        { tag: 'x'.repeat(900), count: 1 }, // field capped, element kept
-        { tag: 'nodisplay', count: 7 }, // decorative field absent → trimmed, not a gap
+        { tag: 'nodisplay', count: 7 }, // decorative absent → trimmed, not a gap
         { tag: 'baddisplay', display: { text: 'post' }, count: 5 }, // non-string → dropped
+        { tag: 'longdisplay', display: 'd'.repeat(900), count: 4 }, // over-cap → dropped
       ],
     });
     expect(trimmed).toEqual({
       window: '1h',
       hashtags: [
         { tag: 'bluesky', display: 'BlueSky', count: 42 },
-        { tag: 'x'.repeat(MAX_FIELD_CHARS), count: 1 },
         { tag: 'nodisplay', count: 7 },
         { tag: 'baddisplay', count: 5 },
+        { tag: 'longdisplay', count: 4 },
       ],
     });
   });
 
-  it('gaps the snapshot when a ranked element lacks its label or count', () => {
-    // Dropping the element instead would silently misstate the ranking, so a
-    // structurally broken list is a gap — the same rule as a bad envelope.
+  it('only stores `window` when it is one of the two literals', () => {
+    // trimPayload is exported; its contract cannot rely on one caller's guard.
+    expect(trimPayload('lang_mix', { window: { text: 'post body' }, langs: {} })).toEqual({
+      langs: {},
+    });
+    expect(trimPayload('lang_mix', { window: '24h', langs: {} })).toEqual({
+      window: '24h',
+      langs: {},
+    });
+  });
+
+  it('gaps the snapshot when a ranked element lacks or violates its identity field', () => {
     expect(trimPayload('trending_hashtags', { hashtags: [{ count: 5 }] })).toBeNull();
     expect(trimPayload('trending_hashtags', { hashtags: [{ tag: 'a' }] })).toBeNull();
     expect(trimPayload('trending_hashtags', { hashtags: ['just-a-string'] })).toBeNull();
+    expect(trimPayload('trending_hashtags', { hashtags: [{ tag: '', count: 1 }] })).toBeNull();
     expect(trimPayload('top_emoji', { emoji: [{ emoji: '🔥', count: 'lots' }] })).toBeNull();
+    // An over-cap identity field is a gap, NOT a truncated value: cutting it
+    // would forge a different tag/URI and collapse two rankings into one.
+    expect(
+      trimPayload('trending_hashtags', { hashtags: [{ tag: 'x'.repeat(65), count: 1 }] }),
+    ).toBeNull();
     // The legitimate shapes still pass, for each list-bearing operation.
     expect(
       trimPayload('trending_links', { links: [{ uri: 'https://a/b', count: 2 }], domains: [] }),
@@ -427,6 +484,19 @@ describe('trimPayload value-level allowlist', () => {
     expect(trimPayload('top_emoji', { emoji: [{ emoji: '🔥', count: 9 }] })).toEqual({
       emoji: [{ emoji: '🔥', count: 9 }],
     });
+    // A URI at the publisher's own 2048-char bound is legitimate and kept.
+    const longUri = `https://example.com/${'p'.repeat(2000)}`;
+    expect(
+      trimPayload('trending_links', { links: [{ uri: longUri, count: 1 }], domains: [] }),
+    ).toEqual({ links: [{ uri: longUri, count: 1 }], domains: [] });
+  });
+
+  it('gaps a link whose URI is not http(s) — no javascript:/data: reaches storage', () => {
+    // /api/history/trending_links is public JSON; a third-party renderer must
+    // not receive a scheme our own dashboard only avoids by checking at render.
+    for (const uri of ['javascript:alert(1)', 'data:text/html,<script>1</script>', 'not a url']) {
+      expect(trimPayload('trending_links', { links: [{ uri, count: 1 }], domains: [] })).toBeNull();
+    }
   });
 });
 
@@ -705,6 +775,52 @@ describe('CacheKit-backed response caching', () => {
     expect(MAX_PAYLOAD_BYTES).toBe(32_768);
     expect(MAX_RESPONSE_BYTES).toBe(4 * 1024 * 1024);
     expect(INCOMPLETE_RESPONSE_TTL_SECONDS).toBe(60);
+  });
+
+  it('a structurally valid envelope carrying post text in point.data is a miss', async () => {
+    // The response cache lives in the same operator-writable store the capture
+    // allowlist defends against, and it is the only short-circuit past that
+    // allowlist. A forgery that satisfies every envelope check but smuggles
+    // post text through points[].data must not be relayed, or the write-side
+    // gate is decorative.
+    const { db, sqlite } = freshDb();
+    seedHourly(sqlite, lastBucket, 6);
+    const cacheKey = `bluesky-thinking:history_response:posts_per_minute:7d:${lastBucket}`;
+    const stored = new Map<string, Uint8Array>();
+
+    // Build the REAL response, then poison one point's data in place so every
+    // coverage/ordering/structure check still passes.
+    const genuine = await handleHistoryApi(api('/api/history/posts_per_minute?range=7d'), {
+      db,
+      backend: null,
+      nowMs,
+    });
+    const forged = (await genuine.json()) as {
+      points: { data: Record<string, unknown> }[];
+    };
+    const poisoned = forged.points[0];
+    if (!poisoned) throw new Error('fixture: expected a seeded point to poison');
+    poisoned.data.exfil = 'the entire body of a post, plus did:plc:victim';
+    stored.set(cacheKey, new TextEncoder().encode(JSON.stringify(forged)));
+
+    const backend = mockBackend(
+      async (key) => stored.get(key) ?? null,
+      async (key, value) => {
+        stored.set(key, value);
+      },
+    );
+    const res = await handleHistoryApi(api('/api/history/posts_per_minute?range=7d'), {
+      db,
+      backend,
+      nowMs,
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('x-history-source')).toBe('d1'); // recomputed, not relayed
+    const served = await res.text();
+    expect(served).not.toContain('exfil');
+    expect(served).not.toContain('did:plc:victim');
+    // ...and the poisoned key was healed with the clean recomputation.
+    expect(new TextDecoder().decode(stored.get(cacheKey))).not.toContain('exfil');
   });
 
   it('an oversized cached value is a miss, recomputed from D1, and healed', async () => {

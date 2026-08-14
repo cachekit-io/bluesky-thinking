@@ -70,13 +70,48 @@ const CAPTURE_GRACE_SECONDS = 120;
 export const MAX_PAYLOAD_BYTES = 32_768;
 
 /**
- * Per-field character cap for the allowlisted string fields of a ranked-list
- * element. Sized for the longest legitimate one — a link URI; tags, DNS
- * names and emoji sit far inside it. This bounds a single field, not the row
- * (MAX_PAYLOAD_BYTES does that), so a hostile value is truncated rather than
- * allowed to spend the whole row budget on one string.
+ * Per-label length caps, mirroring the publisher's OWN contract rather than
+ * inventing an edge-side number: `MAX_TAG_LENGTH` 64 and `MAX_URL_LENGTH`
+ * 2048 (ingester policy.py), `MAX_EMOJI_LENGTH` 64 (extract.py), 253 for a
+ * DNS name. The edge is therefore exactly as strict as the thing that
+ * publishes the values, so no legitimate aggregate is ever reshaped.
+ *
+ * An over-cap label is REJECTED (the snapshot gaps), never truncated.
+ * Truncating an identity field silently forges a new one: two distinct
+ * 671-char links sharing a prefix would both store as the same cut URI, one
+ * ranked list would carry a duplicate key with its counts unmerged, and the
+ * row would claim to be "exactly what the public endpoint serves" while
+ * holding a URL that resolves nowhere. Rejecting is honest; a gap is a
+ * documented outcome, a fabricated value is not.
  */
-export const MAX_FIELD_CHARS = 512;
+export const LABEL_MAX_CHARS: Record<string, number> = {
+  tag: 64,
+  display: 64,
+  uri: 2048,
+  domain: 253,
+  emoji: 64,
+};
+
+/**
+ * Cap on how many keys a count-by-name record may contribute. The publisher
+ * emits ~25 languages and draws exclusion reasons from a 29-member closed
+ * vocabulary, so this is slack, not a constraint — but without it the ONLY
+ * bound on those fields was MAX_PAYLOAD_BYTES, which made a ~32 KiB
+ * free-text channel the byte cap's job to catch rather than the allowlist's.
+ */
+export const MAX_RECORD_KEYS = 64;
+
+/**
+ * Exclusion-reason names are the publisher's closed vocabulary, every one
+ * lowercase_with_underscores (ingester policy.py EXCLUSION_REASONS). This is
+ * a syntactic rule rather than a copy of those 29 strings on purpose: a
+ * duplicated list drifts the moment either side adds a reason, and LAB-1693
+ * already ruled that enumeration cannot converge for this codebase.
+ */
+const REASON_KEY_RE = /^[a-z][a-z0-9_]{0,63}$/;
+
+/** BCP-47 primary language, plus the publisher's literal `other` bucket. */
+const LANG_KEY_RE = /^(?:other|[a-z]{2,3}(?:-[A-Za-z0-9]{2,8})*)$/;
 
 /**
  * Hard cap on a cached response — enforced on BOTH sides of the cache. The
@@ -142,44 +177,105 @@ function asFinite(value: unknown): number | null {
 }
 
 /**
- * Rebuild a {name: count} record with values coerced to finite numbers and
- * key names capped at 64 chars; anything else is dropped. Counts-by-name is
- * these fields' contract, and enforcing it value-level at write time is what
- * makes the "no post text ever reaches storage" promise a property of the
- * code rather than trust in the operator-writable source cache (panel MAJ,
- * LAB-1935).
+ * Structural JSON identity, insensitive to key order. Key order carries no
+ * meaning in a stored payload, and a row written by a different version of
+ * trimPayload may well have used another one, so comparing raw
+ * `JSON.stringify` output would report a difference where there is none.
  */
-function numericRecord(record: Record<string, unknown>): Record<string, number> {
+function canonicalJson(value: unknown): string {
+  const sorted = (input: unknown): unknown => {
+    if (Array.isArray(input)) return input.map(sorted);
+    if (!isRecord(input)) return input;
+    return Object.fromEntries(
+      Object.keys(input)
+        .sort()
+        .map((key) => [key, sorted(input[key])]),
+    );
+  };
+  return JSON.stringify(sorted(value), jsonSafe);
+}
+
+/**
+ * Rebuild a {name: count} record: values coerced to finite numbers, keys
+ * matched against the field's own vocabulary, at most MAX_RECORD_KEYS of
+ * them. Anything else is dropped. Counts-by-name is these fields' contract,
+ * and enforcing it value-level at write time is what makes the "no post text
+ * ever reaches storage" promise a property of the code rather than trust in
+ * the operator-writable source cache (panel MAJ, LAB-1935).
+ *
+ * The key PATTERN is the part that took two goes. Capping key length alone
+ * left the LAB-1613 round-4 finding open on the edge — `langs` and
+ * `excluded_count_by_reason` were the only counters reaching storage with no
+ * key validator, so `{'<script>alert(1)</script>': 0.9}` was retained
+ * verbatim — and history made it worse than the original: the live cache
+ * expired that in an hour, a snapshot keeps it for up to 400 days. The
+ * ingester validates these same two counters on its own restore path
+ * (windows.py key_validator=), so this is parity with the publisher, not a
+ * new invention.
+ *
+ * An over-long or non-matching key is DROPPED, never truncated, for the same
+ * reason topList rejects rather than cuts: `k+'aaa'` and `k+'bbb'` truncated
+ * to 64 chars collide, and the second silently overwrites the first's count
+ * instead of summing it. A dropped key is a visible absence; a merged one is
+ * a wrong number.
+ */
+function numericRecord(
+  record: Record<string, unknown>,
+  keyPattern: RegExp,
+): Record<string, number> {
   const out: Record<string, number> = {};
+  let kept = 0;
   for (const [key, raw] of Object.entries(record)) {
+    if (kept >= MAX_RECORD_KEYS) break;
     const count = asFinite(raw);
-    if (count !== null) out[key.slice(0, 64)] = count;
+    if (count === null || !keyPattern.test(key)) continue;
+    out[key] = count;
+    kept += 1;
   }
   return out;
 }
 
 /**
- * Rebuild one ranked list from an allowlisted element shape: `label` (a
- * required string, truncated) + `count` (a required finite number) + any
- * `extra` decorative labels, copied only when present AND a string.
- *
- * The whole list is rejected — gapping the snapshot — when an element is not
- * a record or is missing its label or count, because a ranked list with
- * elements silently dropped would misstate the ranking it claims to be.
- * A malformed *decorative* field is dropped instead: it cannot change the
- * ranking, so it is not worth a gap.
+ * Is this a legitimate value for an allowlisted ranked-list label? Length
+ * against the publisher's own cap, and for `uri` the scheme too: a poisoned
+ * cache entry could otherwise park `javascript:`/`data:` under the key that
+ * `/api/history/trending_links` serves to third-party renderers. Our own
+ * dashboard protocol-checks before linking, but the stored row is public
+ * data and cannot rely on one consumer being careful.
+ */
+function isValidLabel(field: string, value: unknown): value is string {
+  if (typeof value !== 'string' || value.length === 0) return false;
+  if (value.length > (LABEL_MAX_CHARS[field] ?? 64)) return false;
+  if (field !== 'uri') return true;
+  try {
+    const { protocol } = new URL(value);
+    return protocol === 'http:' || protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Rebuild one ranked list from an allowlisted element shape: `label` (the
+ * identity field — required, validated) + `count` (required, finite) + any
+ * `decorative` labels, kept only when present and valid.
  *
  * Rebuilding rather than slicing is the point. `list.slice()` copied elements
  * wholesale, so any extra key an operator-writable cache put on an element —
  * nested objects, post text under an unknown field — was persisted verbatim
- * under the byte cap. That made "no post text ever reaches storage" true of
- * the record-valued fields only, while the docs and this module claimed it of
- * the whole payload. Now it is uniform: unknown element keys cannot survive.
+ * under the byte cap, making "no post text ever reaches storage" true of the
+ * record-valued fields only while the docs claimed it of the whole payload.
+ *
+ * Two deliberately different failure policies, hence the parameter names:
+ * a bad *identity* field or count rejects the WHOLE list (the snapshot gaps),
+ * because a ranking with elements silently removed misstates itself; a bad
+ * *decorative* field is dropped on its own, because it cannot move the
+ * ranking and is not worth losing the bucket over.
  */
 function topList(
   list: unknown,
   label: string,
-  extra: readonly string[] = [],
+  decorative: readonly string[] = [],
 ): Record<string, unknown>[] | null {
   if (!Array.isArray(list)) return null;
   const out: Record<string, unknown>[] = [];
@@ -187,11 +283,11 @@ function topList(
     if (!isRecord(element)) return null;
     const name = element[label];
     const count = asFinite(element.count);
-    if (typeof name !== 'string' || count === null) return null;
-    const rebuilt: Record<string, unknown> = { [label]: name.slice(0, MAX_FIELD_CHARS), count };
-    for (const field of extra) {
+    if (count === null || !isValidLabel(label, name)) return null;
+    const rebuilt: Record<string, unknown> = { [label]: name, count };
+    for (const field of decorative) {
       const value = element[field];
-      if (typeof value === 'string') rebuilt[field] = value.slice(0, MAX_FIELD_CHARS);
+      if (isValidLabel(field, value)) rebuilt[field] = value;
     }
     out.push(rebuilt);
   }
@@ -210,15 +306,18 @@ export function trimPayload(
   value: Record<string, unknown>,
 ): Record<string, unknown> | null {
   const out: Record<string, unknown> = {};
-  // `window` is compared strictly against the tier's source window before
-  // capture ever calls this, so the stored value is one of two literals.
-  if ('window' in value) out.window = value.window;
+  // Capture strict-compares `window` against the tier's source window before
+  // it ever calls this, but trimPayload is exported and its contract is "only
+  // keys named here can ever reach storage" — so it checks the literal itself
+  // rather than inheriting safety from one caller. `in` also walks the
+  // prototype chain, the hazard this module already avoids on the read side.
+  if (value.window === '1h' || value.window === '24h') out.window = value.window;
   for (const key of ['total_posts', 'total_events_considered', 'total_signal_candidates']) {
     const total = asFinite(value[key]);
     if (total !== null) out[key] = total;
   }
   if (isRecord(value.excluded_count_by_reason)) {
-    out.excluded_count_by_reason = numericRecord(value.excluded_count_by_reason);
+    out.excluded_count_by_reason = numericRecord(value.excluded_count_by_reason, REASON_KEY_RE);
   }
   switch (operation) {
     case 'trending_hashtags': {
@@ -239,7 +338,7 @@ export function trimPayload(
     }
     case 'lang_mix': {
       if (!isRecord(value.langs)) return null;
-      out.langs = numericRecord(value.langs);
+      out.langs = numericRecord(value.langs, LANG_KEY_RE);
       return out;
     }
     case 'posts_per_minute': {
@@ -466,8 +565,19 @@ function asSnapshotRow(row: Record<string, unknown>): SnapshotRow | null {
  * strictly ascending inside (from, to], each structurally sound. The cache
  * key already encodes those dimensions, so a mismatch means the backend
  * value was tampered with (it is operator-writable) — a parseable forgery
- * must not reach the caller or the POP cache. Payload *contents* are not
- * re-validated here; capture's allowlist is the write-side gate for those.
+ * must not reach the caller or the POP cache.
+ *
+ * Payload contents ARE re-validated, because otherwise they need not have
+ * passed capture at all. The response cache lives in the same
+ * operator-writable store the write-side allowlist defends against, and this
+ * is its only reader's short-circuit — so "capture's allowlist is the
+ * write-side gate" only holds if the read side cannot be used to walk around
+ * it. `trimPayload` is idempotent over anything capture wrote, so re-running
+ * it must be a no-op; a payload that changes under it is not one capture
+ * would have stored. The comparison is key-order-insensitive so a
+ * differently-ordered but identical payload is not a false miss, and a false
+ * miss would anyway be safe and self-healing: MISS, recompute from D1,
+ * overwrite the bad value.
  */
 function isValidCachedEnvelope(
   value: unknown,
@@ -500,6 +610,9 @@ function isValidCachedEnvelope(
     const ts = asFinite(point.bucket_ts);
     if (ts === null || ts <= previous || ts > toBucket) return false;
     previous = ts;
+    if (canonicalJson(trimPayload(operation, point.data)) !== canonicalJson(point.data)) {
+      return false;
+    }
   }
   return true;
 }
@@ -753,13 +866,15 @@ export async function handleHistoryApi(url: URL, deps: HistoryDeps): Promise<Res
  * its documented read budget (panel CRIT, LAB-1935). Binding tier lets
  * SQLite satisfy MIN straight off the (tier, bucket_ts) index.
  *
- * Folding the two seeks into one `GROUP BY tier` was measured and rejected:
- * on the real migration at 6,200 rows it plans as `SCAN … USING COVERING
- * INDEX` (0.32 ms) against `SEARCH … (tier=?)` (0.016 ms) for the bound
- * form, because SQLite's MIN/MAX index optimisation does not apply through
- * GROUP BY. That would reintroduce the full-index walk the panel's CRIT
- * finding removed, trading a bounded 2-query fan-out for an unbounded scan.
- * The seek count is fixed at TIERS.length, so it cannot grow with the data.
+ * Folding the two seeks into one `GROUP BY tier` was measured and rejected,
+ * and the reason is D1's read BILLING, not latency: on the real migration it
+ * plans as `SCAN … USING COVERING INDEX` where the bound form plans as
+ * `SEARCH … (tier=?)`, because SQLite's MIN/MAX index optimisation does not
+ * apply through GROUP BY. A scan reads every index row — ~6,200 at steady
+ * state, against a documented ~170/query and only a ~3× worst-case margin on
+ * the 5M rows/day tier — so it reintroduces exactly the amplification the
+ * panel's CRIT finding removed, to save one round trip. The seek count is
+ * fixed at TIERS.length and cannot grow with the data.
  */
 async function firstBucket(db: D1Database): Promise<number | null> {
   const mins = await Promise.all(
