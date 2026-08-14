@@ -13,6 +13,12 @@ Anything not locked here is a Stage-2 implementation choice.
 | Dashboard | static HTML/JS | — | Cloudflare Workers Assets |
 | Cache backend | CachekitIO | `api.dev.cachekit.io` | ours (dogfood) |
 | Data source | Bluesky Jetstream | public WebSocket | e.g. `wss://jetstream2.us-east.bsky.network/subscribe` |
+| Snapshot history store | Cloudflare D1 (`skyline-history`) | SQLite | Cloudflare, bound to the edge Worker — see [`history.md`](history.md) (LAB-1616) |
+
+Aggregate-snapshot **history** (hourly/daily tiers, `/api/history/*`) is a
+post-Stage-5 addition captured entirely on the edge — the ingester and the
+locked interop contract above are untouched. Design decision, budgets, and the
+privacy/retention/deletion/restore contract: [`history.md`](history.md).
 
 ## Locked key convention
 

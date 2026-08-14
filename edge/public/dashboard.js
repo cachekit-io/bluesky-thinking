@@ -221,6 +221,90 @@ export function renderCardMarkup(title, state, selectedWindow) {
   return `<h2>${esc(title)} <span class="badge ${badge}">${esc(state.cache)}</span></h2><p class="meta">${meta}</p>${hotpath}${content}`;
 }
 
+/**
+ * Render the history panel (LAB-1616). One series, so no legend — the title
+ * names it. Present buckets are amber bars; an absent bucket renders NO bar:
+ * a gap in collection is a visible hole, never interpolated and never zero.
+ * The coverage line states when history began and how complete the range is.
+ *
+ * @param {unknown} body parsed /api/history/posts_per_minute response
+ * @param {string} range
+ */
+export function renderHistoryMarkup(body, range) {
+  const title = `<h2>Posts per minute — ${esc(range)} history</h2>`;
+  if (
+    !isAggregatePayload(body) ||
+    !isAggregatePayload(body.coverage) ||
+    !Array.isArray(body.points)
+  ) {
+    return `${title}<p class="error">The history request failed. Please try again shortly.</p>`;
+  }
+  const { coverage } = body;
+  const period = isNumber(body.period_seconds) ? body.period_seconds : 3600;
+  const from = isNumber(coverage.from) ? coverage.from : 0;
+  const to = isNumber(coverage.to) ? coverage.to : 0;
+  const expected = isNumber(coverage.expected_points) ? coverage.expected_points : 0;
+  const present = isNumber(coverage.present_points) ? coverage.present_points : 0;
+  const startedAt = coverage.history_started_at;
+
+  const since = isNumber(startedAt)
+    ? `History since ${new Date(startedAt * 1000).toISOString().slice(0, 16).replace('T', ' ')} UTC — forward-only, nothing is backfilled.`
+    : 'No history captured yet — collection is forward-only and starts with the first snapshot after deploy.';
+
+  if (present === 0) {
+    return `${title}<p class="empty">${esc(since)}</p>`;
+  }
+
+  /** @type {Map<number, number>} */
+  const byBucket = new Map();
+  for (const point of body.points) {
+    if (!isAggregatePayload(point) || !isAggregatePayload(point.data)) continue;
+    if (isNumber(point.bucket_ts) && isNumber(point.data.ppm)) {
+      byBucket.set(point.bucket_ts, Math.max(0, point.data.ppm));
+    }
+  }
+  const max = Math.max(...byBucket.values(), 1);
+
+  const WIDTH = 1000;
+  const HEIGHT = 120;
+  const slot = WIDTH / expected;
+  const bar = Math.max(1, slot * 0.75);
+  let bars = '';
+  for (let i = 0; i < expected; i += 1) {
+    const bucket = from + (i + 1) * period;
+    const value = byBucket.get(bucket);
+    if (value === undefined) continue; // a gap stays a gap
+    const height = Math.max(1, (value / max) * (HEIGHT - 2));
+    const label = `${new Date(bucket * 1000).toISOString().slice(0, 16).replace('T', ' ')} UTC — ${fmt(value)} posts/min`;
+    bars += `<rect x="${(i * slot + (slot - bar) / 2).toFixed(2)}" y="${(HEIGHT - height).toFixed(2)}" width="${bar.toFixed(2)}" height="${height.toFixed(2)}" fill="var(--accent)"><title>${esc(label)}</title></rect>`;
+  }
+
+  const coverageLine =
+    `${fmt(present)} of ${fmt(expected)} ${period === 3600 ? 'hourly' : 'daily'} points in range` +
+    (present < expected ? ' — missing points are gaps in collection, not zero activity.' : '.');
+  const versions = Array.isArray(body.normalization_versions) ? body.normalization_versions : [];
+  const versionNote =
+    versions.length > 1
+      ? `<p class="warning">This range spans ${versions.length} normalization versions (${esc(versions.join(', '))}); counts are not directly comparable across the change.</p>`
+      : '';
+
+  const tableRows = [...byBucket.entries()]
+    .map(
+      ([bucket, value]) =>
+        `<tr><td>${esc(new Date(bucket * 1000).toISOString().slice(0, 16).replace('T', ' '))} UTC</td><td>${fmt(value)}</td></tr>`,
+    )
+    .join('');
+
+  return (
+    `${title}<p class="meta">peak ${fmt(max)} posts/min · ${esc(coverageLine)}</p>` +
+    `<svg class="history-chart" viewBox="0 0 ${WIDTH} ${HEIGHT}" preserveAspectRatio="none" role="img" aria-label="Posts per minute over the last ${esc(range)}; ${fmt(present)} of ${fmt(expected)} points present">${bars}</svg>` +
+    `<p class="meta history-axis"><span>${esc(new Date((from + period) * 1000).toISOString().slice(0, 10))}</span><span>${esc(new Date(to * 1000).toISOString().slice(0, 10))}</span></p>` +
+    versionNote +
+    `<p class="meta">${esc(since)}</p>` +
+    `<details class="history-table"><summary>Data table</summary><table><thead><tr><th>Bucket (end)</th><th>Posts/min</th></tr></thead><tbody>${tableRows}</tbody></table></details>`
+  );
+}
+
 /** @param {string} search */
 export function windowFromSearch(search) {
   const selected = new URLSearchParams(search).get('window');
@@ -236,6 +320,7 @@ function setWindowInUrl(selectedWindow) {
 
 function initDashboard() {
   let currentWindow = windowFromSearch(window.location.search);
+  let currentRange = '7d';
   let refreshVersion = 0;
   const grid = document.getElementById('grid');
   const tiles = document.getElementById('tiles');
@@ -344,6 +429,22 @@ function initDashboard() {
     }
   }
 
+  /** @param {number} version */
+  async function loadHistory(version) {
+    const card = document.getElementById('history');
+    if (!card) return;
+    const range = currentRange;
+    try {
+      const response = await fetch(`/api/history/posts_per_minute?range=${range}`);
+      const body = await response.json();
+      if (version !== refreshVersion) return;
+      card.innerHTML = renderHistoryMarkup(response.ok ? body : null, range);
+    } catch (error) {
+      console.error('skyline dashboard: history failed', error);
+      if (version === refreshVersion) card.innerHTML = renderHistoryMarkup(null, range);
+    }
+  }
+
   function refresh() {
     const version = ++refreshVersion;
     const selectedWindow = currentWindow;
@@ -356,6 +457,7 @@ function initDashboard() {
       const card = document.getElementById(`card-${operation}`);
       if (card) loadOperation(card, operation, title, selectedWindow, version);
     }
+    loadHistory(version);
   }
 
   windowControl.addEventListener('click', (event) => {
@@ -366,6 +468,23 @@ function initDashboard() {
     selectWindow(next);
     refresh();
   });
+
+  const rangeControl = document.querySelector('.ranges');
+  if (rangeControl) {
+    rangeControl.addEventListener('click', (event) => {
+      if (!(event.target instanceof Element)) return;
+      const button = event.target.closest('button[data-range]');
+      const next = button instanceof HTMLButtonElement ? button.dataset.range : undefined;
+      if (!next) return;
+      currentRange = next;
+      for (const other of rangeControl.querySelectorAll('button[data-range]'))
+        other.setAttribute('aria-pressed', String(other.getAttribute('data-range') === next));
+      // Full refresh, not a bare loadHistory: bumping the version cancels
+      // any in-flight fetch for the previous range, so a slow 7d response
+      // can never overwrite the panel after the switch to 30d.
+      refresh();
+    });
+  }
 
   selectWindow(currentWindow);
   refresh();
