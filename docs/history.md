@@ -183,9 +183,17 @@ to top-20 and filtered through an allowlist. Values are never rewritten to fit
 (an over-cap or off-vocabulary value is dropped or gaps the snapshot), so
 "exactly what the endpoints serve" stays literally true rather than
 approximately. **No post text, no author DID, no record key, no raw event
-payload** — those never reach the edge in the first place (the ingester's
-aggregates are already DID-free, see signal-policy.md), and the write path
-enforces it independently rather than trusting that.
+payload ever reaches the persisted history payload.**
+
+Note the precise claim, because the loose version of it is what this design
+keeps having to correct: the ingester's aggregates are DID-free by
+construction (signal-policy.md), so that material is not _supposed_ to be on
+the edge — but the source cache the Worker reads is operator-writable, so
+arbitrary fields demonstrably **can** arrive at the edge's input. What the
+allowlist guarantees is that they cannot survive the write into D1. "Never
+reaches storage" is a property of the write path; "never reaches the edge" is
+only a property of a well-behaved publisher, and the whole point of the
+allowlist is to not depend on that.
 The `@cache.secure` sentiment cache is excluded from history entirely: it is
 zero-knowledge ciphertext, and persisting any derivative would cross the
 boundary LAB-744 established. What history changes is **time**: a trending tag
