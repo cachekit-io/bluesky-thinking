@@ -2,11 +2,12 @@
 
 import logging
 
+from skyline_ingester.extract import PostFeatures
 from skyline_ingester.policy import NORMALIZATION_VERSION
 from skyline_ingester.publisher import Publisher
-from skyline_ingester.windows import SNAPSHOT_VERSION, WindowStore
+from skyline_ingester.windows import SNAPSHOT_VERSION, WINDOW_MINUTES, WindowStore
 
-from .conftest import FIXTURE_TOTALS, MASTER_KEY, NOW
+from .conftest import FIXTURE_TOTALS, MASTER_KEY, NOW, NOW_MIN
 
 
 def _snapshot(buckets):
@@ -265,3 +266,105 @@ def test_restore_rejects_overlong_emoji_keys():
     merged = store.merged("5m", NOW)
     assert merged.emoji == {}
     assert merged.excluded["checkpoint_invalid_emoji"] == 1
+
+
+# --- Hour-coarsening (LAB-1933): aged minutes fold into hour units at snapshot time ---
+
+
+def _minute_post(minute: int, *, tags=(), lang="en") -> PostFeatures:
+    return PostFeatures(
+        ts=minute * 60.0,
+        lang=lang,
+        hashtags=list(tags),
+        links=[],
+        emoji=[],
+        sentiment=None,
+        hashtag_labels={tag: tag for tag in tags},
+    )
+
+
+def _day_store(span_minutes: int = WINDOW_MINUTES["24h"]) -> WindowStore:
+    """One bucket per retained minute over `span_minutes`, distinct source per event.
+
+    At the full 24h span the newest add prunes the oldest minute (the age floor
+    is `newest - max`), so the store retains span buckets, not span + 1.
+    """
+    store = WindowStore()
+    for offset in range(span_minutes, -1, -1):
+        minute = NOW_MIN - offset
+        store.add(_minute_post(minute, tags=(f"t{minute % 7}",)), source_id=f"did:plc:{offset}")
+    return store
+
+
+def test_snapshot_coarsens_aged_buckets_to_hour_units():
+    # THE bound this ticket delivers: a full 24h window serializes as ~85 units
+    # (last hour minute-keyed + one unit per aged hour), not ~1,441 — the size
+    # cut that fits the checkpoint inside Render's 5 GB/month egress allowance.
+    store = _day_store()
+    snap = store.snapshot(NOW)
+    minutes = [minute for minute, _d in snap["buckets"]]
+    coarse_floor = NOW_MIN - WINDOW_MINUTES["1h"]
+    fresh = [m for m in minutes if m > coarse_floor]
+    coarse = [m for m in minutes if m <= coarse_floor]
+    assert len(fresh) == WINDOW_MINUTES["1h"]  # the live hour stays minute-keyed
+    # Retained span starts one past the age floor: the newest add pruned the
+    # oldest minute (see _day_store), so the range must not include it.
+    expected_hours = {m // 60 for m in range(NOW_MIN - WINDOW_MINUTES["24h"] + 1, coarse_floor + 1)}
+    assert len(coarse) == len(expected_hours) <= 25
+    assert all(m % 60 == 0 for m in coarse), "hour units must be keyed at the hour floor"
+    assert len(minutes) == len(set(minutes)), "hour keys must not collide with fresh minutes"
+
+
+def test_coarsened_round_trip_preserves_window_totals_exactly():
+    # Aggregates only ever SUM buckets, so folding an hour into one unit keyed
+    # inside the window changes no 24h total; 5m/1h restore minute-exact. The
+    # store spans 23h so every hour floor is in-window — the full-24h tail
+    # (whose oldest hour has partially slid out) is pinned by the
+    # expires-early-never-late test below, not smoothed over here.
+    span = WINDOW_MINUTES["24h"] - 60
+    store = _day_store(span)
+    # Mint a real exclusion in the AGED region so the excluded assert below is
+    # non-vacuous: the same source repeating a tag inside the dedupe horizon
+    # yields duplicate_source_tag, which must survive the hour fold.
+    for _repeat in range(2):
+        store.add(_minute_post(NOW_MIN - 100, tags=("dup",)), source_id="did:plc:dup")
+    before = store.merged("24h", NOW)
+    assert before.excluded == {"duplicate_source_tag": 1}
+    snap = store.snapshot(NOW)
+
+    restored = WindowStore()
+    assert restored.restore(snap, NOW) == len(snap["buckets"])
+    after = restored.merged("24h", NOW)
+    assert after.n == before.n == span + 3
+    assert after.signal_candidates == before.signal_candidates
+    assert after.excluded == before.excluded
+    assert after.tags == before.tags  # 7 distinct tags, all inside every top-K
+    for window in ("5m", "1h"):
+        assert restored.merged(window, NOW).n == store.merged(window, NOW).n
+
+    # Re-checkpointing a restored store is stable: hour units re-fold into the
+    # same hour, so a restart chain cannot drift the checkpoint shape or size.
+    snap2 = restored.snapshot(NOW)
+    assert [m for m, _d in snap2["buckets"]] == [m for m, _d in snap["buckets"]]
+
+
+def test_coarsened_restore_expires_the_tail_early_never_late():
+    # The recovery-semantics tradeoff, pinned: an hour unit is keyed at the hour
+    # FLOOR, so after a restore the 24h trailing edge drops events up to 59 min
+    # early — and never serves an event older than 24h as in-window.
+    hour = NOW_MIN // 60 - 3
+    event_min = hour * 60 + 59  # aged (>1h old at NOW), last minute of its hour
+    store = WindowStore()
+    store.add(_minute_post(event_min, tags=("edge",)), source_id="did:plc:edge")
+    snap = store.snapshot(NOW)
+    assert [m for m, _d in snap["buckets"]] == [hour * 60]
+
+    restored = WindowStore()
+    assert restored.restore(snap, NOW) == 1
+    window = WINDOW_MINUTES["24h"]
+    # Inside the hour-step bound the event is still served...
+    assert restored.merged("24h", (event_min + window - 60) * 60.0).tags["edge"] == 1
+    # ...up to 59 min early it may be gone (here: 40 min before its true expiry)...
+    assert "edge" not in restored.merged("24h", (event_min + window - 40) * 60.0).tags
+    # ...and once truly out of window it can never reappear.
+    assert "edge" not in restored.merged("24h", (event_min + window + 1) * 60.0).tags
