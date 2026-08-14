@@ -15,6 +15,8 @@ import { NAMESPACE, OPERATIONS } from '../src/handler.js';
 import {
   captureTick,
   handleHistoryApi,
+  MAX_PAYLOAD_BYTES,
+  MAX_RESPONSE_BYTES,
   STORED_TOP_N,
   TIER_SPECS,
   type D1Database,
@@ -28,11 +30,36 @@ const MIGRATION = readFileSync(
 
 type SqlValue = null | number | bigint | string | Uint8Array;
 
+/** Runtime-checked narrowing so the shim never smuggles an unbindable value. */
+function toSqlValues(values: unknown[]): SqlValue[] {
+  return values.map((value) => {
+    if (
+      value === null ||
+      typeof value === 'number' ||
+      typeof value === 'bigint' ||
+      typeof value === 'string' ||
+      value instanceof Uint8Array
+    ) {
+      return value;
+    }
+    throw new Error(`unbindable SQL value of type ${typeof value}`);
+  });
+}
+
+/** Runtime-checked JSON.parse for fixtures we expect to be objects. */
+function asRecord(payload: unknown): Record<string, unknown> {
+  const parsed: unknown = JSON.parse(String(payload));
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('fixture payload is not a JSON object');
+  }
+  return parsed as Record<string, unknown>;
+}
+
 function d1Of(db: DatabaseSync): D1Database {
   return {
     prepare(sql: string) {
       const make = (args: SqlValue[]): D1PreparedStatement => ({
-        bind: (...values: unknown[]) => make(values as SqlValue[]),
+        bind: (...values: unknown[]) => make(toSqlValues(values)),
         all: async () => ({
           results: db
             .prepare(sql)
@@ -162,9 +189,7 @@ describe('captureTick boundaries', () => {
       expect(row.bucket_ts).toBe(nowSec);
       expect(row.normalization_version).toBe(NORMALIZATION);
     }
-    const tags = JSON.parse(
-      String(rows.find((r) => r.operation === 'trending_hashtags')?.payload),
-    ) as Record<string, unknown>;
+    const tags = asRecord(rows.find((r) => r.operation === 'trending_hashtags')?.payload);
     // Stored depth is bounded: top-20 of the live top-50, allowlisted keys only.
     expect((tags.hashtags as unknown[]).length).toBe(STORED_TOP_N);
     expect(tags.generated_at).toBeUndefined();
@@ -250,6 +275,28 @@ describe('gaps stay gaps', () => {
         : full.get(key),
     );
     const report = await captureTick(poisoned, db, HOUR_MS);
+    expect(report.hourly).toMatchObject({ captured: 4, invalid: 1 });
+    expect(allRows(sqlite).map((r) => r.operation)).not.toContain('trending_hashtags');
+  });
+
+  it('an aggregate whose trimmed payload exceeds the cap becomes a gap, not a row', async () => {
+    const { db, sqlite } = freshDb();
+    const nowSec = HOUR_MS / 1000;
+    const full = liveBackend(nowSec - 30);
+    // 20 entries × ~2 KB tags ≈ 40 KB trimmed — over MAX_PAYLOAD_BYTES even
+    // after the top-20 slice, so the cap itself must reject it.
+    const huge = aggregate('trending_hashtags', '1h', nowSec - 30, {
+      hashtags: Array.from({ length: STORED_TOP_N }, (_, i) => ({
+        tag: `${'x'.repeat(2000)}${i}`,
+        count: 1,
+      })),
+    });
+    const oversized = mockBackend(async (key) =>
+      key === generateInteropKey(NAMESPACE, 'trending_hashtags', ['1h'])
+        ? encodeInteropValue(huge)
+        : full.get(key),
+    );
+    const report = await captureTick(oversized, db, HOUR_MS);
     expect(report.hourly).toMatchObject({ captured: 4, invalid: 1 });
     expect(allRows(sqlite).map((r) => r.operation)).not.toContain('trending_hashtags');
   });
@@ -542,6 +589,117 @@ describe('CacheKit-backed response caching', () => {
     expect(body.coverage.present_points).toBe(6);
     // The bad value was overwritten with the recomputed response (healed).
     expect(JSON.parse(new TextDecoder().decode(stored.get(cacheKey)))).toEqual(body);
+  });
+
+  it('pins the size limits the cache contract depends on', () => {
+    expect(MAX_PAYLOAD_BYTES).toBe(32_768);
+    expect(MAX_RESPONSE_BYTES).toBe(4 * 1024 * 1024);
+  });
+
+  it('an oversized cached value is a miss, recomputed from D1, and healed', async () => {
+    const { db, sqlite } = freshDb();
+    seedHourly(sqlite, lastBucket, 3);
+    const cacheKey = `bluesky-thinking:history_response:posts_per_minute:7d:${lastBucket}`;
+    const stored = new Map<string, Uint8Array>();
+    stored.set(cacheKey, new Uint8Array(MAX_RESPONSE_BYTES + 1));
+    const backend = mockBackend(
+      async (key) => stored.get(key) ?? null,
+      async (key, value) => {
+        stored.set(key, value);
+      },
+    );
+    const res = await handleHistoryApi(api('/api/history/posts_per_minute?range=7d'), {
+      db,
+      backend,
+      nowMs,
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('x-history-source')).toBe('d1'); // never relayed
+    const body = (await res.json()) as { coverage: { present_points: number } };
+    expect(body.coverage.present_points).toBe(3);
+    expect(JSON.parse(new TextDecoder().decode(stored.get(cacheKey)))).toEqual(body);
+  });
+
+  it('a parseable but mismatched cached envelope is a miss, recomputed, and healed', async () => {
+    const { db, sqlite } = freshDb();
+    seedHourly(sqlite, lastBucket, 4);
+    const cacheKey = `bluesky-thinking:history_response:posts_per_minute:7d:${lastBucket}`;
+    // A structurally plausible response — for the WRONG operation with empty
+    // coverage — planted under the ppm key by a hostile operator. It parses,
+    // it is size-bounded, and it must still never be relayed.
+    const forged = {
+      operation: 'top_emoji',
+      range: '7d',
+      tier: 'hourly',
+      period_seconds: 3600,
+      normalization_versions: [],
+      coverage: {
+        from: lastBucket - 7 * 86400,
+        to: lastBucket,
+        expected_points: 168,
+        present_points: 0,
+        history_started_at: null,
+      },
+      points: [],
+    };
+    const stored = new Map<string, Uint8Array>();
+    stored.set(cacheKey, new TextEncoder().encode(JSON.stringify(forged)));
+    const backend = mockBackend(
+      async (key) => stored.get(key) ?? null,
+      async (key, value) => {
+        stored.set(key, value);
+      },
+    );
+    const res = await handleHistoryApi(api('/api/history/posts_per_minute?range=7d'), {
+      db,
+      backend,
+      nowMs,
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('x-history-source')).toBe('d1'); // never relayed
+    const body = (await res.json()) as { operation: string; coverage: { present_points: number } };
+    expect(body.operation).toBe('posts_per_minute');
+    expect(body.coverage.present_points).toBe(4);
+    expect(JSON.parse(new TextDecoder().decode(stored.get(cacheKey)))).toEqual(body);
+  });
+
+  it('never writes a response the read side would reject (cap enforced on both ends)', async () => {
+    const { db, sqlite } = freshDb();
+    // 168 legitimate rows, each just under the per-row payload cap — the
+    // assembled 7d response (~5.2 MB) exceeds MAX_RESPONSE_BYTES.
+    const insert = sqlite.prepare(
+      `INSERT INTO snapshots (operation, tier, bucket_ts, generated_at, normalization_version,
+        payload, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    );
+    const blob = 'x'.repeat(31_000);
+    for (let i = 0; i < 168; i += 1) {
+      const bucket = lastBucket - i * 3600;
+      insert.run(
+        'posts_per_minute',
+        'hourly',
+        bucket,
+        bucket - 20,
+        NORMALIZATION,
+        JSON.stringify({ window: '1h', ppm: i, blob }),
+        bucket,
+      );
+    }
+    const sets: string[] = [];
+    const backend = mockBackend(
+      async () => null,
+      async (key) => {
+        sets.push(key);
+      },
+    );
+    const res = await handleHistoryApi(api('/api/history/posts_per_minute?range=7d'), {
+      db,
+      backend,
+      nowMs,
+    });
+    expect(res.status).toBe(200); // still served, just never frozen
+    const body = (await res.json()) as { coverage: { present_points: number } };
+    expect(body.coverage.present_points).toBe(168);
+    expect(sets).toEqual([]);
   });
 
   it('an empty cached value is a miss, not an empty 200', async () => {

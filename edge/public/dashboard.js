@@ -435,7 +435,11 @@ function initDashboard() {
     if (!card) return;
     const range = currentRange;
     try {
-      const response = await fetch(`/api/history/posts_per_minute?range=${range}`);
+      // no-store: bypass the browser cache — freshness is governed by the
+      // edge POP cache (15 s) and the per-bucket CacheKit layer, not here.
+      const response = await fetch(`/api/history/posts_per_minute?range=${range}`, {
+        cache: 'no-store',
+      });
       const body = await response.json();
       if (version !== refreshVersion) return;
       card.innerHTML = renderHistoryMarkup(response.ok ? body : null, range);

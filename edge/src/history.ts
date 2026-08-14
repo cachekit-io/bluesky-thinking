@@ -55,6 +55,8 @@ export const TIER_SPECS: Record<'hourly' | 'daily', TierSpec> = {
   },
 };
 export type Tier = keyof typeof TIER_SPECS;
+/** Both tiers, typed at declaration so iteration needs no key-cast. */
+const TIERS: readonly Tier[] = ['hourly', 'daily'];
 
 /**
  * Range queries never include the bucket whose capture may still be in
@@ -65,15 +67,17 @@ export type Tier = keyof typeof TIER_SPECS;
 const CAPTURE_GRACE_SECONDS = 120;
 
 /** Hard cap on a stored row's payload; a hostile aggregate becomes a gap. */
-const MAX_PAYLOAD_BYTES = 32_768;
+export const MAX_PAYLOAD_BYTES = 32_768;
 
 /**
- * Hard cap on a cached response we are willing to relay. The backend is
- * operator-writable, so cached bytes get the same distrust as any other
- * backend read — an oversized or unparseable value is treated as a miss
- * and recomputed from D1 (which also heals the poisoned key on re-set).
+ * Hard cap on a cached response — enforced on BOTH sides of the cache. The
+ * backend is operator-writable, so cached bytes get the same distrust as
+ * every other backend read: an oversized or unparseable value is treated as
+ * a miss and recomputed from D1 (which also heals the poisoned key on
+ * re-set). The write side enforces the same bound so an over-limit response
+ * can never poison its own key into permanent reject-recompute-rewrite.
  */
-const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
+export const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 
 export const RANGES: Record<'7d' | '30d', { seconds: number; tier: Tier }> = {
   '7d': { seconds: 7 * 86400, tier: 'hourly' },
@@ -179,6 +183,11 @@ export function trimPayload(
       return out;
     }
   }
+  // The switch is exhaustive over Operation — proven at compile time by the
+  // `satisfies never` below — so this only fires for an untyped runtime
+  // caller, and an unknown operation becomes a gap like any other bad input.
+  operation satisfies never;
+  return null;
 }
 
 const INSERT_SQL = `INSERT OR IGNORE INTO snapshots
@@ -351,6 +360,75 @@ interface SnapshotRow {
 }
 
 /**
+ * Runtime guard for a D1 row (D1 types results as loose records). The schema
+ * makes violations impossible in practice; a row that fails anyway is the
+ * same corruption class as an unparseable payload and gets the same
+ * treatment — a logged gap, never a crash or a fabricated point.
+ */
+function asSnapshotRow(row: Record<string, unknown>): SnapshotRow | null {
+  const bucket_ts = asFinite(row.bucket_ts);
+  const generated_at = asFinite(row.generated_at);
+  if (
+    bucket_ts === null ||
+    generated_at === null ||
+    typeof row.normalization_version !== 'string' ||
+    typeof row.payload !== 'string'
+  ) {
+    return null;
+  }
+  return {
+    bucket_ts,
+    generated_at,
+    normalization_version: row.normalization_version,
+    payload: row.payload,
+  };
+}
+
+/**
+ * A cached response is relayed ONLY if it is the response this request would
+ * have computed: same operation, range, tier and coverage bounds, points
+ * strictly ascending inside (from, to], each structurally sound. The cache
+ * key already encodes those dimensions, so a mismatch means the backend
+ * value was tampered with (it is operator-writable) — a parseable forgery
+ * must not reach the caller or the POP cache. Payload *contents* are not
+ * re-validated here; capture's allowlist is the write-side gate for those.
+ */
+function isValidCachedEnvelope(
+  value: unknown,
+  operation: Operation,
+  range: HistoryRange,
+  fromBucket: number,
+  toBucket: number,
+  expected: number,
+): boolean {
+  if (!isRecord(value)) return false;
+  const { tier } = RANGES[range];
+  if (value.operation !== operation || value.range !== range || value.tier !== tier) return false;
+  if (value.period_seconds !== TIER_SPECS[tier].periodSeconds) return false;
+  const coverage = value.coverage;
+  if (
+    !isRecord(coverage) ||
+    coverage.from !== fromBucket ||
+    coverage.to !== toBucket ||
+    coverage.expected_points !== expected
+  ) {
+    return false;
+  }
+  const points = value.points;
+  if (!Array.isArray(points) || points.length > expected) return false;
+  if (coverage.present_points !== points.length) return false;
+  let previous = fromBucket;
+  for (const point of points) {
+    if (!isRecord(point) || !isRecord(point.data)) return false;
+    if (typeof point.normalization_version !== 'string') return false;
+    const ts = asFinite(point.bucket_ts);
+    if (ts === null || ts <= previous || ts > toBucket) return false;
+    previous = ts;
+  }
+  return true;
+}
+
+/**
  * GET /api/history/status — capture health, derived from the data itself
  * (no bookkeeping table to drift). `stale: true` on a tier means the
  * newest bucket is older than two periods: capture is failing even though
@@ -366,7 +444,7 @@ async function historyStatus(db: D1Database, nowMs: number): Promise<Response> {
   const nowSec = Math.floor(nowMs / 1000);
   const tiers: Record<string, unknown> = {};
   let startedAt: number | null = null;
-  for (const tier of Object.keys(TIER_SPECS) as Tier[]) {
+  for (const tier of TIERS) {
     const row = results.find((r) => r.tier === tier);
     const first = row ? asFinite(row.first_bucket) : null;
     const latest = row ? asFinite(row.latest_bucket) : null;
@@ -431,27 +509,45 @@ export async function handleHistoryApi(url: URL, deps: HistoryDeps): Promise<Res
       const cached = await deps.backend.get(cacheKey);
       // The backend is operator-writable, so a cached response earns the
       // same distrust as any other backend read (the live path integrity-
-      // checks; capture allowlists and caps). Anything empty, oversized, or
-      // unparseable is a MISS: we recompute from D1 — the source of truth —
-      // and the re-set below overwrites the bad value instead of relaying
-      // it into the POP cache.
+      // checks; capture allowlists and caps). Anything empty, oversized,
+      // unparseable, or parseable-but-not-THIS-response (envelope mismatch)
+      // is a MISS: we recompute from D1 — the source of truth — and the
+      // re-set below overwrites the bad value instead of relaying it into
+      // the POP cache.
       if (cached && cached.length > 0 && cached.length <= MAX_RESPONSE_BYTES) {
         try {
-          JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(cached));
-          // Copy pins the generic to Uint8Array<ArrayBuffer>, which BodyInit
-          // accepts (backend.get returns Uint8Array<ArrayBufferLike>).
-          return new Response(new Uint8Array(cached), {
-            status: 200,
-            headers: {
-              'content-type': 'application/json; charset=utf-8',
-              'x-history-source': 'cachekit',
-            },
+          const parsed: unknown = JSON.parse(
+            new TextDecoder('utf-8', { fatal: true }).decode(cached),
+          );
+          if (isValidCachedEnvelope(parsed, segment, range, fromBucket, toBucket, expected)) {
+            // Copy pins the generic to Uint8Array<ArrayBuffer>, which BodyInit
+            // accepts (backend.get returns Uint8Array<ArrayBufferLike>).
+            return new Response(new Uint8Array(cached), {
+              status: 200,
+              headers: {
+                'content-type': 'application/json; charset=utf-8',
+                'x-history-source': 'cachekit',
+              },
+            });
+          }
+          console.error('history_cache_invalid', {
+            key: cacheKey,
+            bytes: cached.length,
+            reason: 'envelope_mismatch',
           });
         } catch {
-          console.error('history_cache_invalid', { key: cacheKey, bytes: cached.length });
+          console.error('history_cache_invalid', {
+            key: cacheKey,
+            bytes: cached.length,
+            reason: 'unparseable',
+          });
         }
       } else if (cached) {
-        console.error('history_cache_invalid', { key: cacheKey, bytes: cached.length });
+        console.error('history_cache_invalid', {
+          key: cacheKey,
+          bytes: cached.length,
+          reason: 'size',
+        });
       }
     } catch (err) {
       source = 'd1-fallback';
@@ -470,7 +566,12 @@ export async function handleHistoryApi(url: URL, deps: HistoryDeps): Promise<Res
       )
       .bind(segment, tier, fromBucket, toBucket, expected)
       .all();
-    rows = listed.results as unknown as SnapshotRow[];
+    rows = [];
+    for (const raw of listed.results) {
+      const row = asSnapshotRow(raw);
+      if (row) rows.push(row);
+      else console.error('history_row_invalid', { operation: segment, row_keys: Object.keys(raw) });
+    }
     startedAt = await firstBucket(deps.db);
   } catch (err) {
     console.error('history_query_failed', { operation: segment, range, err: String(err) });
@@ -516,6 +617,7 @@ export async function handleHistoryApi(url: URL, deps: HistoryDeps): Promise<Res
     points,
   };
   const encoded = JSON.stringify(body, jsonSafe);
+  const encodedBytes = new TextEncoder().encode(encoded);
 
   // Cache only a series whose newest expected bucket is present. If the
   // capture for toBucket hasn't landed yet (late cron tick, slow backend),
@@ -523,12 +625,23 @@ export async function handleHistoryApi(url: URL, deps: HistoryDeps): Promise<Res
   // hourly for 7d, a whole DAY for 30d — even though the row arrives
   // moments later. An incomplete series still serves; it just stays
   // recomputed (bounded by the 15 s POP cache) until the point exists.
+  // The write also honours the read path's size cap: storing a response the
+  // read side would reject poisons the key into a permanent reject-
+  // recompute-rewrite loop, so an over-limit response stays uncached.
   const newestPresent = points.length > 0 && points[points.length - 1]?.bucket_ts === toBucket;
   if (deps.backend && source === 'd1' && newestPresent) {
-    try {
-      await deps.backend.set(cacheKey, new TextEncoder().encode(encoded), period);
-    } catch (err) {
-      console.error('history_cache_write_failed', { key: cacheKey, err: String(err) });
+    if (encodedBytes.length <= MAX_RESPONSE_BYTES) {
+      try {
+        await deps.backend.set(cacheKey, encodedBytes, period);
+      } catch (err) {
+        console.error('history_cache_write_failed', { key: cacheKey, err: String(err) });
+      }
+    } else {
+      console.error('history_cache_write_skipped', {
+        key: cacheKey,
+        bytes: encodedBytes.length,
+        reason: 'response_too_large',
+      });
     }
   }
   return new Response(encoded, {

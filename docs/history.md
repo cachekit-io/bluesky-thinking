@@ -117,9 +117,12 @@ bucket the planet shares one D1 computation; `x-history-source:
 cachekit|d1|d1-fallback` says which path served. Two honesty rules apply:
 
 - **Cached bytes are distrusted like any other backend read** (the backend is
-  operator-writable): empty, oversized (>4 MiB), or unparseable values are
+  operator-writable): empty, oversized (>4 MiB), unparseable, or
+  envelope-mismatched values — a parseable response whose operation, range,
+  tier, coverage bounds, or point structure disagree with the request — are
   treated as a miss, recomputed from D1, and overwritten — never relayed into
-  the POP cache.
+  the POP cache. The 4 MiB cap is enforced on the write side too, so an
+  over-limit response is served uncached rather than poisoning its own key.
 - **Only a complete series is cached**: if the newest expected bucket hasn't
   landed yet (late tick), the response still serves but is not frozen into
   CachekitIO for a period — recomputation stays bounded by the 15 s POP cache
