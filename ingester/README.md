@@ -193,11 +193,26 @@ hour's first minute, so a full 24 h window serializes as ~85 units instead of ~1
 default cadence stretched from 120 s to 300 s. Measured with the audit's soak methodology (600 s
 live Jetstream through the real pipeline; wire bytes are what `CachekitIOBackend` PUTs, LZ4 ratio
 ×0.682 measured on real soak data, within 0.6 % of the audit's ×0.686): **~159 KB/write ×
-288 writes/day ≈ 46 MB/day**, for ~**2.6 GB/month total ingester egress** — ~48 % of the 5 GB
-cap, and ~3.2 GB/month even at a zero-compression ceiling. (The audit projected ~2.4 GB/month;
-the delta is firehose volume at measurement time, not shape.) The TTL stays 26 h: the checkpoint
-still covers a full 24 h window and must outlive it plus restart slack — the cadence change
-doesn't alter that.
+288 writes/day ≈ 46 MB/day ≈ ~1.4 GB/month of checkpoint egress**, down from ~49 GB/month.
+
+Total egress is that plus the aggregate-publish path, which this change does not touch (the
+15 s `publish_tick_seconds` tick, ~5,760 uncompressed-msgpack writes/day). That component was
+not re-measured here; the audit put the checkpoint at ~97 % of a ~50 GB/month total, which
+leaves **~1.2–1.5 GB/month** for everything else. So:
+
+| Egress component | Per month | Source |
+| :--- | :--- | :--- |
+| Checkpoint (after this change) | ~1.4 GB | measured, this PR |
+| Aggregate publish + overhead | ~1.2–1.5 GB | audit residual, unchanged by this PR |
+| **Total** | **~2.6–2.9 GB** | **~52–58 % of the 5 GB cap, ~1.7–1.9× headroom** |
+
+At a zero-compression ceiling the checkpoint term becomes ~2.0 GB/month, for ~3.2–3.5 GB/month
+total — still inside the cap. Honest delta against the audit's ~2.4 GB/month projection for the
+total: firehose volume at measurement time ran ~10 % heavier than the audit's, and the residual
+above is a derived range rather than a fresh measurement. Re-measuring the publish path is the
+obvious next tightening if the cap ever gets close. The TTL stays 26 h: the checkpoint still
+covers a full 24 h window and must outlive it plus restart slack — the cadence change doesn't
+alter that.
 
 Recovery semantics after the restructure, stated precisely:
 
