@@ -16,6 +16,7 @@ import {
   captureTick,
   handleHistoryApi,
   INCOMPLETE_RESPONSE_TTL_SECONDS,
+  MAX_FIELD_CHARS,
   MAX_PAYLOAD_BYTES,
   MAX_RESPONSE_BYTES,
   STORED_TOP_N,
@@ -288,35 +289,40 @@ describe('gaps stay gaps', () => {
     const { db, sqlite } = freshDb();
     const nowSec = HOUR_MS / 1000;
     const full = liveBackend(nowSec - 30);
-    // 20 entries × ~2 KB tags ≈ 40 KB trimmed — over MAX_PAYLOAD_BYTES even
-    // after the top-20 slice, so the cap itself must reject it.
-    const huge = aggregate('trending_hashtags', '1h', nowSec - 30, {
-      hashtags: Array.from({ length: STORED_TOP_N }, (_, i) => ({
-        tag: `${'x'.repeat(2000)}${i}`,
-        count: 1,
-      })),
+    // Ranked lists are now bounded by top-20 × MAX_FIELD_CHARS, so an ASCII
+    // over-cap payload is only reachable through a count-by-name record —
+    // those have no key-COUNT bound, only a 64-char cap per key. 800 keys
+    // ≈ 60 KB trimmed, so the byte cap itself must reject it.
+    const huge = aggregate('lang_mix', '1h', nowSec - 30, {
+      langs: Object.fromEntries(
+        Array.from({ length: 800 }, (_, i) => [`${'l'.repeat(60)}${i}`, 0.001]),
+      ),
     });
     const oversized = mockBackend(async (key) =>
-      key === generateInteropKey(NAMESPACE, 'trending_hashtags', ['1h'])
+      key === generateInteropKey(NAMESPACE, 'lang_mix', ['1h'])
         ? encodeInteropValue(huge)
         : full.get(key),
     );
     const report = await captureTick(oversized, db, HOUR_MS);
     expect(report.hourly).toMatchObject({ captured: 4, invalid: 1 });
-    expect(allRows(sqlite).map((r) => r.operation)).not.toContain('trending_hashtags');
+    expect(allRows(sqlite).map((r) => r.operation)).not.toContain('lang_mix');
   });
 
   it('caps stored payloads by UTF-8 bytes, not UTF-16 code units', async () => {
     const { db, sqlite } = freshDb();
     const nowSec = HOUR_MS / 1000;
     const full = liveBackend(nowSec - 30);
-    // Emoji tags: ~24.5k UTF-16 code units (under the 32 KiB cap) but
-    // ~48.5k UTF-8 bytes (over it). Counting units would store this row at
-    // ~1.5× the documented ceiling.
+    // Each field truncates to MAX_FIELD_CHARS = 512 UTF-16 units = 256 whole
+    // emoji = 1024 UTF-8 bytes. Across 20 elements × 2 string fields that is
+    // ~20.5k code units (UNDER the 32 KiB cap) but ~41k UTF-8 bytes (OVER
+    // it) — so counting units instead of bytes would store this row at ~1.25×
+    // the documented ceiling. The per-field cap bounds the field, not the row;
+    // multi-byte text is exactly where the row cap still has to bind.
     const emojiHeavy = aggregate('trending_hashtags', '1h', nowSec - 30, {
       hashtags: Array.from({ length: STORED_TOP_N }, (_, i) => ({
-        tag: `${'🔥'.repeat(600)}${i}`,
-        count: 1,
+        tag: '🔥'.repeat(400),
+        display: '🔥'.repeat(400),
+        count: i,
       })),
     });
     const backend = mockBackend(async (key) =>
@@ -376,6 +382,85 @@ describe('trimPayload value-level allowlist', () => {
       excluded_count_by_reason: { filtered_tag: 3, ['k'.repeat(64)]: 7 },
       langs: { en: 0.6, ja: 0.3 },
     });
+  });
+
+  it('rebuilds ranked-list elements from allowlisted fields — unknown element keys cannot survive', () => {
+    const trimmed = trimPayload('trending_hashtags', {
+      window: '1h',
+      hashtags: [
+        {
+          tag: 'bluesky',
+          display: 'BlueSky',
+          count: 42,
+          // Every one of these rode through the old `list.slice()` verbatim.
+          note: 'the entire text of somebody‘s post',
+          nested: { author_handle: 'alice.bsky.social', text: 'post body' },
+          replies: [{ text: 'a reply' }],
+        },
+        { tag: 'x'.repeat(900), count: 1 }, // field capped, element kept
+        { tag: 'nodisplay', count: 7 }, // decorative field absent → trimmed, not a gap
+        { tag: 'baddisplay', display: { text: 'post' }, count: 5 }, // non-string → dropped
+      ],
+    });
+    expect(trimmed).toEqual({
+      window: '1h',
+      hashtags: [
+        { tag: 'bluesky', display: 'BlueSky', count: 42 },
+        { tag: 'x'.repeat(MAX_FIELD_CHARS), count: 1 },
+        { tag: 'nodisplay', count: 7 },
+        { tag: 'baddisplay', count: 5 },
+      ],
+    });
+  });
+
+  it('gaps the snapshot when a ranked element lacks its label or count', () => {
+    // Dropping the element instead would silently misstate the ranking, so a
+    // structurally broken list is a gap — the same rule as a bad envelope.
+    expect(trimPayload('trending_hashtags', { hashtags: [{ count: 5 }] })).toBeNull();
+    expect(trimPayload('trending_hashtags', { hashtags: [{ tag: 'a' }] })).toBeNull();
+    expect(trimPayload('trending_hashtags', { hashtags: ['just-a-string'] })).toBeNull();
+    expect(trimPayload('top_emoji', { emoji: [{ emoji: '🔥', count: 'lots' }] })).toBeNull();
+    // The legitimate shapes still pass, for each list-bearing operation.
+    expect(
+      trimPayload('trending_links', { links: [{ uri: 'https://a/b', count: 2 }], domains: [] }),
+    ).toEqual({ links: [{ uri: 'https://a/b', count: 2 }], domains: [] });
+    expect(trimPayload('top_emoji', { emoji: [{ emoji: '🔥', count: 9 }] })).toEqual({
+      emoji: [{ emoji: '🔥', count: 9 }],
+    });
+  });
+});
+
+describe('capture never retains text-bearing fields (CodeRabbit, PR #19)', () => {
+  it('a nested text field injected into a ranked element is absent from the D1 row', async () => {
+    const { db, sqlite } = freshDb();
+    const nowSec = HOUR_MS / 1000;
+    const POST_TEXT = 'the-entire-body-of-a-post-that-must-never-be-persisted';
+
+    // The source cache is operator-writable, so this is the threat model, not
+    // a hypothetical: a hostile aggregate under a legitimate interop key.
+    const hostile = encodeInteropValue(
+      aggregate('trending_hashtags', '1h', nowSec - 30, {
+        hashtags: [
+          { tag: 'trending', display: 'Trending', count: 10, exfil: POST_TEXT },
+          { tag: 'other', count: 9, nested: { text: POST_TEXT } },
+        ],
+      }),
+    );
+    const clean = liveBackend(nowSec - 30);
+    const backend = mockBackend(async (key) =>
+      key === generateInteropKey(NAMESPACE, 'trending_hashtags', ['1h']) ? hostile : clean.get(key),
+    );
+
+    const report = await captureTick(backend, db, HOUR_MS);
+    expect(report.hourly).toMatchObject({ captured: 5, invalid: 0 });
+
+    const row = allRows(sqlite).find((r) => r.operation === 'trending_hashtags');
+    // The strongest assertion available: the text is nowhere in the stored row.
+    expect(String(row?.payload)).not.toContain(POST_TEXT);
+    expect(asRecord(row?.payload).hashtags).toEqual([
+      { tag: 'trending', display: 'Trending', count: 10 },
+      { tag: 'other', count: 9 },
+    ]);
   });
 });
 

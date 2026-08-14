@@ -70,6 +70,15 @@ const CAPTURE_GRACE_SECONDS = 120;
 export const MAX_PAYLOAD_BYTES = 32_768;
 
 /**
+ * Per-field character cap for the allowlisted string fields of a ranked-list
+ * element. Sized for the longest legitimate one — a link URI; tags, DNS
+ * names and emoji sit far inside it. This bounds a single field, not the row
+ * (MAX_PAYLOAD_BYTES does that), so a hostile value is truncated rather than
+ * allowed to spend the whole row budget on one string.
+ */
+export const MAX_FIELD_CHARS = 512;
+
+/**
  * Hard cap on a cached response — enforced on BOTH sides of the cache. The
  * backend is operator-writable, so cached bytes get the same distrust as
  * every other backend read: an oversized or unparseable value is treated as
@@ -150,11 +159,51 @@ function numericRecord(record: Record<string, unknown>): Record<string, number> 
 }
 
 /**
+ * Rebuild one ranked list from an allowlisted element shape: `label` (a
+ * required string, truncated) + `count` (a required finite number) + any
+ * `extra` decorative labels, copied only when present AND a string.
+ *
+ * The whole list is rejected — gapping the snapshot — when an element is not
+ * a record or is missing its label or count, because a ranked list with
+ * elements silently dropped would misstate the ranking it claims to be.
+ * A malformed *decorative* field is dropped instead: it cannot change the
+ * ranking, so it is not worth a gap.
+ *
+ * Rebuilding rather than slicing is the point. `list.slice()` copied elements
+ * wholesale, so any extra key an operator-writable cache put on an element —
+ * nested objects, post text under an unknown field — was persisted verbatim
+ * under the byte cap. That made "no post text ever reaches storage" true of
+ * the record-valued fields only, while the docs and this module claimed it of
+ * the whole payload. Now it is uniform: unknown element keys cannot survive.
+ */
+function topList(
+  list: unknown,
+  label: string,
+  extra: readonly string[] = [],
+): Record<string, unknown>[] | null {
+  if (!Array.isArray(list)) return null;
+  const out: Record<string, unknown>[] = [];
+  for (const element of list.slice(0, STORED_TOP_N)) {
+    if (!isRecord(element)) return null;
+    const name = element[label];
+    const count = asFinite(element.count);
+    if (typeof name !== 'string' || count === null) return null;
+    const rebuilt: Record<string, unknown> = { [label]: name.slice(0, MAX_FIELD_CHARS), count };
+    for (const field of extra) {
+      const value = element[field];
+      if (typeof value === 'string') rebuilt[field] = value.slice(0, MAX_FIELD_CHARS);
+    }
+    out.push(rebuilt);
+  }
+  return out;
+}
+
+/**
  * Allowlist + trim one live aggregate into its history payload. Returns
  * null when the operation's own required shape is absent — a malformed or
  * hostile cache entry becomes a counted gap, never a stored row. Only keys
- * named here can ever reach storage, and record-valued fields are rebuilt
- * value-level, never copied wholesale.
+ * named here can ever reach storage, and both record-valued fields and
+ * ranked-list elements are rebuilt value-level, never copied wholesale.
  */
 export function trimPayload(
   operation: Operation,
@@ -171,19 +220,18 @@ export function trimPayload(
   if (isRecord(value.excluded_count_by_reason)) {
     out.excluded_count_by_reason = numericRecord(value.excluded_count_by_reason);
   }
-  const top = (list: unknown): unknown[] | null =>
-    Array.isArray(list) ? list.slice(0, STORED_TOP_N) : null;
-
   switch (operation) {
     case 'trending_hashtags': {
-      const hashtags = top(value.hashtags);
+      // `display` is the tag's presentation casing (LAB-1613) — decorative,
+      // so absence trims it rather than gapping the whole ranking.
+      const hashtags = topList(value.hashtags, 'tag', ['display']);
       if (!hashtags) return null;
       out.hashtags = hashtags;
       return out;
     }
     case 'trending_links': {
-      const links = top(value.links);
-      const domains = top(value.domains);
+      const links = topList(value.links, 'uri');
+      const domains = topList(value.domains, 'domain');
       if (!links || !domains) return null;
       out.links = links;
       out.domains = domains;
@@ -201,7 +249,7 @@ export function trimPayload(
       return out;
     }
     case 'top_emoji': {
-      const emoji = top(value.emoji);
+      const emoji = topList(value.emoji, 'emoji');
       if (!emoji) return null;
       out.emoji = emoji;
       return out;
@@ -696,22 +744,33 @@ export async function handleHistoryApi(url: URL, deps: HistoryDeps): Promise<Res
 
 /**
  * History start = the earliest bucket across tiers, one indexed seek per
- * tier. A bare `MIN(bucket_ts)` over the table has no index with bucket_ts
+ * tier, both issued concurrently.
+ *
+ * A bare `MIN(bucket_ts)` over the table has no index with bucket_ts
  * leading (the PK starts at operation, the secondary index at tier), so it
  * walks every row — linear in table size and billed per row read, which at
  * steady state (~6,200 rows) turns each uncached range request into ~37×
  * its documented read budget (panel CRIT, LAB-1935). Binding tier lets
  * SQLite satisfy MIN straight off the (tier, bucket_ts) index.
+ *
+ * Folding the two seeks into one `GROUP BY tier` was measured and rejected:
+ * on the real migration at 6,200 rows it plans as `SCAN … USING COVERING
+ * INDEX` (0.32 ms) against `SEARCH … (tier=?)` (0.016 ms) for the bound
+ * form, because SQLite's MIN/MAX index optimisation does not apply through
+ * GROUP BY. That would reintroduce the full-index walk the panel's CRIT
+ * finding removed, trading a bounded 2-query fan-out for an unbounded scan.
+ * The seek count is fixed at TIERS.length, so it cannot grow with the data.
  */
 async function firstBucket(db: D1Database): Promise<number | null> {
-  let first: number | null = null;
-  for (const tier of TIERS) {
-    const { results } = await db
-      .prepare('SELECT MIN(bucket_ts) AS first FROM snapshots WHERE tier = ?')
-      .bind(tier)
-      .all();
-    const value = asFinite(results[0]?.first);
-    if (value !== null && (first === null || value < first)) first = value;
-  }
-  return first;
+  const mins = await Promise.all(
+    TIERS.map(async (tier) => {
+      const { results } = await db
+        .prepare('SELECT MIN(bucket_ts) AS first FROM snapshots WHERE tier = ?')
+        .bind(tier)
+        .all();
+      return asFinite(results[0]?.first);
+    }),
+  );
+  const present = mins.filter((value): value is number => value !== null);
+  return present.length === 0 ? null : Math.min(...present);
 }

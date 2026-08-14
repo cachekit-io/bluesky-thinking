@@ -35,7 +35,7 @@ rejected on measured grounds, not taste:
 
 | Candidate               | Verdict                                                                                                                                                                                                            |
 | :---------------------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Cloudflare D1**       | **Chosen.** Native Workers binding, SQL range queries, migrations, Time Travel restore, free tier ~1000× our budget (below).                                                                                       |
+| **Cloudflare D1**       | **Chosen.** Native Workers binding, SQL range queries, migrations, Time Travel restore, and every free-tier limit clears our budget with room to spare — the tightest margin is ~3× on worst-case reads (below).   |
 | Workers KV              | No range queries — a 7d chart is 168 point-reads or a hand-rolled index. Wrong shape.                                                                                                                              |
 | R2 objects              | Range query = manifest + N GETs, retention = lifecycle rules per tier. More moving parts for the same rows.                                                                                                        |
 | Render Postgres         | Free instances expire after 30 days, and writes from Render add the exact egress LAB-1894 says we cannot afford.                                                                                                   |
@@ -72,14 +72,27 @@ version, stored per row and surfaced per point so comparisons across a policy
 change are explicit, never silent), and `payload` — the aggregate JSON rebuilt
 through an **allowlist** (window, totals, exclusion counts, ranked lists
 trimmed to top-20). The allowlist is enforced at the value level, not just by
-key name: totals are coerced to finite numbers and the count-by-name records
-(`excluded_count_by_reason`, `langs`) are rebuilt as `{name: count}` with
-non-numeric values dropped and key names capped at 64 chars — the source cache
-is operator-writable, so "aggregate-only" is a property of the write path, not
-trust in the writer. Unknown keys cannot reach storage; a payload over 32 KiB
-(measured in UTF-8 bytes) is rejected as a gap. Payload-shape versioning is the migration history
-itself — a `schema_version` column ships with the migration that first needs
-one, not before.
+key name, and it is uniform across every field shape:
+
+- Totals are coerced to finite numbers.
+- The count-by-name records (`excluded_count_by_reason`, `langs`) are rebuilt
+  as `{name: count}` with non-numeric values dropped and key names capped at
+  64 chars.
+- **Ranked-list elements are rebuilt too**, not copied: each element yields
+  only its allowlisted label (`tag`/`uri`/`domain`/`emoji`, plus the
+  decorative `display` for tags) truncated to 512 chars, and a finite
+  `count`. An element that is not a record, or that lacks its label or count,
+  gaps the whole snapshot — a ranked list with elements silently dropped
+  would misstate the ranking it claims to be.
+
+The source cache is operator-writable, so "aggregate-only" is a property of
+the write path, not trust in the writer: an unknown key on a list element —
+nested objects, post text parked under a spare field — cannot survive the
+rebuild, and this is pinned by a capture test that injects one. A payload over
+32 KiB (measured in UTF-8 bytes, since emoji and non-Latin tags are
+multi-byte by construction) is rejected as a gap. Payload-shape versioning is
+the migration history itself — a `schema_version` column ships with the
+migration that first needs one, not before.
 
 The staleness guard is **symmetric**: a bucket label tolerates `generated_at`
 skew of up to one source TTL on either side. Older means the entry should
@@ -132,8 +145,10 @@ cachekit|d1|d1-fallback` says which path served. Two honesty rules apply:
   present is exact for its bucket and cached for the full tier period. An
   incomplete series (late tick, dead capture) is cached for **60 s** — long
   enough that requests never pay full D1 per hit in exactly the state where
-  recompute load is self-sustaining, short enough that a point landing
-  moments later shows within a minute.
+  recompute load is self-sustaining, short enough that a point landing moments
+  later shows promptly. The two cache layers compose, so state the honest
+  bound: 60 s CacheKit TTL + the 15 s POP TTL below means a late point can
+  take up to **~75 s** to appear, not 60.
 
 D1 is the source of truth — any CachekitIO failure (or an unset
 `CACHEKIT_API_KEY`) falls through to plain D1 serving, the inverse of the
@@ -175,13 +190,13 @@ policy's safety filters.
 D1 free tier: 5 GB storage (account-wide), 100k rows written/day, 5M rows
 read/day. Cloudflare docs, verified 2026-08-14.
 
-| Budget                 | Skyline's use                                                                                                                                                                                                                                                  |                       Headroom |
-| :--------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -----------------------------: |
-| Rows written/day       | 120 hourly + 5 daily + ≤125 retention deletes ≈ **250**                                                                                                                                                                                                        |                          ~400× |
-| Rows read/day          | ≤170/query (≤168 range rows + 2 indexed `MIN` seeks — the history-start lookup is bound per tier so it seeks the `(tier, bucket_ts)` index instead of scanning the table); response reuse ≥1h complete / 60 s incomplete; even 10k uncached queries/day ≈ 1.7M | ~3× worst-case, ~10³× expected |
-| Storage                | rows ≤6 KiB (top-20 trim + 32 KiB hard cap); 4,200 hourly + 2,000 daily rows ≈ **≤40 MiB** steady state                                                                                                                                                        |   ~100× within Skyline's share |
-| Cron slots (5/account) | **0 new** — rides the existing keep-alive schedule                                                                                                                                                                                                             |                              — |
-| CachekitIO ops         | 5 GETs/hour capture + ≤10 response-cache entries/bucket                                                                                                                                                                                                        |        dogfood, our own tenant |
+| Budget                 | Skyline's use                                                                                                                                                                                                                                                          |                       Headroom |
+| :--------------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -----------------------------: |
+| Rows written/day       | 120 hourly + 5 daily + ≤125 retention deletes ≈ 250 _logical_ rows — but D1 bills index maintenance, and `snapshots` carries two indexes (the composite-PK `sqlite_autoindex_snapshots_1` + `idx_snapshots_tier_bucket`), so each row costs 3 `rows_written` ≈ **750** |                          ~133× |
+| Rows read/day          | ≤170/query (≤168 range rows + 2 indexed `MIN` seeks — the history-start lookup is bound per tier so it seeks the `(tier, bucket_ts)` index instead of scanning the table); response reuse ≥1h complete / 60 s incomplete; even 10k uncached queries/day ≈ 1.7M         | ~3× worst-case, ~10³× expected |
+| Storage                | 4,200 hourly + 2,000 daily = 6,200 rows. Typical row ~6 KiB (top-20 trim) ≈ **≤40 MiB** steady state; every row at the 32 KiB hard cap ≈ **≤194 MiB** worst case                                                                                                       |     ~26× at the worst-case cap |
+| Cron slots (5/account) | **0 new** — rides the existing keep-alive schedule                                                                                                                                                                                                                     |                              — |
+| CachekitIO ops         | 5 GETs/hour capture + ≤10 response-cache entries/bucket                                                                                                                                                                                                                |        dogfood, our own tenant |
 
 The 7d/30d row math: 7d = 168 hourly rows/operation (840 total), 30d = 30
 daily rows/operation (150 total) — both served whole in one bounded query.
