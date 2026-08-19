@@ -82,17 +82,11 @@ function rankedRows(items, nameKey, valueKey, { percent = false, links = false }
     .join('')}</ol>`;
 }
 
-/** @param {AggregatePayload} langs */
-function languageRows(langs) {
-  return rankedRows(
-    Object.entries(langs).map(([lang, share]) => ({
-      lang: lang === 'other' ? 'Other languages' : lang,
-      share,
-    })),
-    'lang',
-    'share',
-    { percent: true },
-  );
+/** @param {AggregatePayload} langs @param {number} [otherShare] long-tail residual, a sibling of `langs` (LAB-1632) */
+function languageRows(langs, otherShare) {
+  const rows = Object.entries(langs).map(([lang, share]) => ({ lang, share }));
+  if (typeof otherShare === 'number') rows.push({ lang: 'Other languages', share: otherShare });
+  return rankedRows(rows, 'lang', 'share', { percent: true });
 }
 
 /** @param {string} uri */
@@ -131,7 +125,7 @@ export function renderOperation(operation, data) {
     case 'lang_mix':
       if (!isAggregatePayload(data.langs)) return renderMalformed();
       return rankingOrEmpty(
-        languageRows(data.langs),
+        languageRows(data.langs, isNumber(data.other_share) ? data.other_share : undefined),
         'No language mix is available for this window yet.',
       );
     case 'top_emoji':

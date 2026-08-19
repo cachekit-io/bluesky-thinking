@@ -57,6 +57,21 @@ describe('Skyline dashboard payload renderers', () => {
     expect(renderOperation(operation, payload)).toContain(expected);
   });
 
+  it('renders a real "other" language token distinct from the long-tail other_share sibling (LAB-1632)', () => {
+    const markup = renderOperation('lang_mix', {
+      window: '5m',
+      generated_at,
+      total_posts: 1036,
+      langs: { other: 0.9652, en: 0.0097 },
+      other_share: 0.0029,
+    });
+    // both rows render: the real "other" token's share survives, and the
+    // synthetic residual appears as its own "Other languages" row.
+    expect(markup).toContain('96.5%');
+    expect(markup).toContain('0.3%');
+    expect(markup).toContain('Other languages');
+  });
+
   it('rejects missing or wrong-shape rankings instead of calling them empty', () => {
     expect(renderOperation('trending_hashtags', { hashtags: {} })).toContain(
       'unexpected payload shape',

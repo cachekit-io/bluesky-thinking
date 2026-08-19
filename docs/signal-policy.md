@@ -245,6 +245,10 @@ derive: `lang_mix` computes its shares over the languages a bucket **retains**,
 so once a minute carries more than 32 distinct languages the 1 h and 24 h shares
 describe the retained set rather than every post. At observed rates a minute
 carries 23–27, so the bound does not bite; `total_posts` is exact either way.
+Separately, when a window's real languages exceed the top-25 published rows,
+the long-tail share is carried in a top-level `other_share` field — a sibling
+of `langs`, never a key inside it — so it can never be confused with (or
+overwrite) a real `other`-tagged post's own share (LAB-1632).
 
 ## Recorded evaluation
 
