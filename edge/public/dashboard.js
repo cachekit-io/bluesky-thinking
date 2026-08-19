@@ -84,8 +84,14 @@ function rankedRows(items, nameKey, valueKey, { percent = false, links = false }
 
 /** @param {AggregatePayload} langs @param {number} [otherShare] long-tail residual, a sibling of `langs` (LAB-1632) */
 function languageRows(langs, otherShare) {
-  const rows = Object.entries(langs).map(([lang, share]) => ({ lang, share }));
-  if (typeof otherShare === 'number') rows.push({ lang: 'Other languages', share: otherShare });
+  const rows = Object.entries(langs).flatMap(([lang, share]) =>
+    isNumber(share) ? [{ lang, share }] : [],
+  );
+  if (typeof otherShare === 'number') {
+    // reserve one of rankedRows' ten displayed slots so the residual survives the top-ten cut (LAB-2077)
+    rows.sort((a, b) => b.share - a.share).splice(9);
+    rows.push({ lang: 'Other languages', share: otherShare });
+  }
   return rankedRows(rows, 'lang', 'share', { percent: true });
 }
 

@@ -72,6 +72,25 @@ describe('Skyline dashboard payload renderers', () => {
     expect(markup).toContain('Other languages');
   });
 
+  it('keeps the other_share row visible when ten real languages outrank it (LAB-2077)', () => {
+    const langs = Object.fromEntries(
+      ['en', 'ja', 'pt', 'de', 'es', 'fr', 'ko', 'nl', 'it', 'pl'].map((lang, i) => [
+        lang,
+        0.099 - i * 0.001,
+      ]),
+    );
+    const markup = renderOperation('lang_mix', {
+      window: '5m',
+      generated_at,
+      total_posts: 1036,
+      langs,
+      other_share: 0.0029,
+    });
+    // the residual claims the tenth slot, evicting the lowest-ranked real language.
+    expect(markup).toContain('Other languages');
+    expect(markup).not.toContain('>pl<');
+  });
+
   it('rejects missing or wrong-shape rankings instead of calling them empty', () => {
     expect(renderOperation('trending_hashtags', { hashtags: {} })).toContain(
       'unexpected payload shape',
