@@ -86,9 +86,11 @@ describe('Skyline dashboard payload renderers', () => {
       langs,
       other_share: 0.0029,
     });
-    // the residual claims the tenth slot, evicting the lowest-ranked real language.
+    // the residual claims the tenth slot; the evicted language's share (pl, 9.0%)
+    // folds into it so displayed shares never understate: 0.090 + 0.0029 → 9.3%.
     expect(markup).toContain('Other languages');
     expect(markup).not.toContain('>pl<');
+    expect(markup).toContain('9.3%');
   });
 
   it('rejects missing or wrong-shape rankings instead of calling them empty', () => {

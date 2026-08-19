@@ -50,6 +50,8 @@ function freshnessLabel(seconds) {
   return `${minutes} minute${minutes === 1 ? '' : 's'}`;
 }
 
+const MAX_ROWS = 10;
+
 /** @param {unknown[]} items @param {string} nameKey @param {string} valueKey @param {{ percent?: boolean, links?: boolean }} [options] */
 function rankedRows(items, nameKey, valueKey, { percent = false, links = false } = {}) {
   const rows = items
@@ -60,7 +62,7 @@ function rankedRows(items, nameKey, valueKey, { percent = false, links = false }
       return typeof name === 'string' && isNumber(value) ? [{ name, value }] : [];
     })
     .sort((a, b) => b.value - a.value)
-    .slice(0, 10);
+    .slice(0, MAX_ROWS);
   const firstRow = rows[0];
   if (!firstRow) return null;
 
@@ -87,9 +89,11 @@ function languageRows(langs, otherShare) {
   const rows = Object.entries(langs).flatMap(([lang, share]) =>
     isNumber(share) ? [{ lang, share }] : [],
   );
-  if (typeof otherShare === 'number') {
-    // reserve one of rankedRows' ten displayed slots so the residual survives the top-ten cut (LAB-2077)
-    rows.sort((a, b) => b.share - a.share).splice(9);
+  if (isNumber(otherShare)) {
+    // reserve one of rankedRows' MAX_ROWS slots so the residual survives the cut, and fold
+    // any evicted languages' shares into it — "Other languages" means everything not shown (LAB-2077)
+    rows.sort((a, b) => b.share - a.share);
+    for (const evicted of rows.splice(MAX_ROWS - 1)) otherShare += evicted.share;
     rows.push({ lang: 'Other languages', share: otherShare });
   }
   return rankedRows(rows, 'lang', 'share', { percent: true });
