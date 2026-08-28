@@ -77,7 +77,8 @@ against the providers' published limits, 2026-07-29.
 | Jetstream feed | Bluesky public infra | none (public, no auth) | 1 outbound WebSocket | $0 |
 | Python ingester | Render free **web service**¹ | **750 instance-hrs/month, workspace-wide.** A 31-day month is 744 h, so exactly **one** always-on free service fits, with ~6 h to spare — a second would exhaust the budget and suspend every free service in the workspace | one always-on service, kept warm by the CF cron ping | $0 |
 | Edge API + dashboard + Rust-WASM hot path | Cloudflare Workers free plan | **100k requests/day and 10 ms CPU per invocation, shared across both Workers** (`skyline-edge` incl. its cron, `skyline-hotpath`) | cached reads, ≪ limits; the hot path is reached by service binding (its subrequests don't hit the public URL) | $0 |
-| Keep-alive cron | Cloudflare cron trigger on `skyline-edge` | cron triggers are free; each firing counts as a request in the same 100k/day budget | ~144 pings/day (every 10 min) ≈ **4,464/month — 0.14 % of the daily request budget** | $0 |
+| Keep-alive cron | Cloudflare cron trigger on `skyline-edge` | cron triggers are free; each firing counts as a request in the same 100k/day budget; **5 cron expressions per account** — history capture rides this same schedule, adding none | ~144 pings/day (every 10 min) ≈ **4,464/month — 0.14 % of the daily request budget** | $0 |
+| Snapshot history store | Cloudflare D1 (`skyline-history`) | **100k rows written/day · 5M rows read/day · 5 GB storage (account-wide)** | ≈250 writes/day, ≤40 MiB steady state, reads bounded by CacheKit + POP response caching — budgets in [`docs/history.md`](docs/history.md) | $0 |
 | Cache backend | CachekitIO (ours) | n/a — dogfood | one demo tenant | $0² |
 | **Total** | | | | **$0/mo** |
 
@@ -118,6 +119,7 @@ CI, however, gates all three components on PR + push
 
 ```
 docs/architecture.md   — the Stage-1 architecture spec (locked contract)
+docs/history.md        — aggregate-snapshot history: design decision, budgets, privacy/retention (LAB-1616)
 edge/                  — Stage-2 TS edge API + dashboard: CF Worker serving the five aggregates (interop/v1 reads, X-Cache + hit-rate stats) + Workers Assets dashboard
 hotpath/               — Stage-2 Rust-WASM hot-path Worker (cachekit-rs 0.5 on CF Workers):
                          interop key derivation, xxHash3 payload verification, window-slice
