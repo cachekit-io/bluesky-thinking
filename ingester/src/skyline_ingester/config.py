@@ -21,7 +21,10 @@ class Settings(BaseSettings):
 
     jetstream_url: str = "wss://jetstream2.us-east.bsky.network/subscribe"
     publish_tick_seconds: float = 15.0
-    checkpoint_interval_seconds: float = 120.0
+    # 300 s (LAB-1933): with the hour-coarsened snapshot this is what fits the
+    # checkpoint inside Render's 5 GB/month outbound allowance (~46 MB/day at
+    # the measured ~159 KB wire size). Restart staleness bound: <= 5 min.
+    checkpoint_interval_seconds: float = 300.0
     top_n: int = 50
 
     @field_validator("cachekit_master_key")

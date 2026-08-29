@@ -33,7 +33,7 @@ provides that) — the SDK does not read this service's `.env` file:
 | `JETSTREAM_URL` | `wss://jetstream2.us-east.bsky.network/subscribe` | Jetstream endpoint. |
 | `PORT` | `8080` | `/health` listener port (Render injects this on deploy). |
 | `PUBLISH_TICK_SECONDS` | `15` | Publish-loop poll interval. |
-| `CHECKPOINT_INTERVAL_SECONDS` | `120` | Window-state checkpoint cadence. |
+| `CHECKPOINT_INTERVAL_SECONDS` | `300` | Window-state checkpoint cadence — also the restart staleness bound. 300 s is what fits the checkpoint inside Render's 5 GB/month egress allowance (see *Checkpointing*). |
 | `TOP_N` | `50` | Entries kept in trending lists. |
 
 ## Health endpoint (Stage 4, LAB-738)
@@ -183,6 +183,48 @@ Window state is checkpointed into CacheKit (auto-mode key, TTL 26 h) every
 window (the spec's Render-restart mitigation). Per-minute counters are truncated to their top-K
 entries in the snapshot — long-tail trending, language, and emoji counts are approximate after a
 restore; `posts_per_minute` and `total_signal_candidates` stay exact.
+
+The checkpoint is also the ingester's dominant **egress** path: LAB-1894 measured it at ~97 % of
+outbound bandwidth — ~2.3 MB wire × 720 writes/day ≈ 49 GB/month at per-minute snapshots on a
+120 s cadence, which is what exhausted Render's 5 GB/month free allowance and suspended the
+workspace (2026-08-13). Two changes fit it back inside (LAB-1933): buckets older than the 1 h
+window are **hour-coarsened** at snapshot time — each aged hour folds into one unit keyed at the
+hour's first minute, so a full 24 h window serializes as ~85 units instead of ~1,445 — and the
+default cadence stretched from 120 s to 300 s. Measured with the audit's soak methodology (600 s
+live Jetstream through the real pipeline; wire bytes are what `CachekitIOBackend` PUTs, LZ4 ratio
+×0.682 measured on real soak data, within 0.6 % of the audit's ×0.686): **~159 KB/write ×
+288 writes/day ≈ 46 MB/day ≈ ~1.4 GB/month of checkpoint egress**, down from ~49 GB/month.
+
+Total egress is that plus the aggregate-publish path, which this change does not touch (the
+15 s `publish_tick_seconds` tick, ~5,760 uncompressed-msgpack writes/day). That component was
+not re-measured here; the audit put the checkpoint at ~97 % of a ~50 GB/month total, which
+leaves **~1.2–1.5 GB/month** for everything else. So:
+
+| Egress component | Per month | Source |
+| :--- | :--- | :--- |
+| Checkpoint (after this change) | ~1.4 GB | measured, this PR |
+| Aggregate publish + overhead | ~1.2–1.5 GB | audit residual, unchanged by this PR |
+| **Total** | **~2.6–2.9 GB** | **~52–58 % of the 5 GB cap, ~1.7–1.9× headroom** |
+
+At a zero-compression ceiling the checkpoint term becomes ~2.0 GB/month, for ~3.2–3.5 GB/month
+total — still inside the cap. Honest delta against the audit's ~2.4 GB/month projection for the
+total: firehose volume at measurement time ran ~10 % heavier than the audit's, and the residual
+above is a derived range rather than a fresh measurement. Re-measuring the publish path is the
+obvious next tightening if the cap ever gets close. The TTL stays 26 h: the checkpoint still
+covers a full 24 h window and must outlive it plus restart slack — the cadence change doesn't
+alter that.
+
+Recovery semantics after the restructure, stated precisely:
+
+- **Restart staleness** is bounded by the cadence: at most 300 s of window state is lost.
+- **5 m and 1 h windows restore minute-exact** — the live hour stays minute-keyed.
+- **The 24 h trailing edge expires in hour steps after a restore.** An hour unit is keyed at its
+  hour *floor*, so up to 59 min of true tail events can drop early (≤ ~4 % of a 24 h count) — and
+  an event older than 24 h is never re-served as in-window. Early, never late.
+- **Totals stay exact within surviving units** (aggregates only ever sum buckets); per-key
+  fidelity is the same top-K approximation the checkpoint has always shipped, applied per aged
+  hour instead of per aged minute. The wire format is unchanged (still schema v2), so a new
+  binary restores an old fat checkpoint and vice versa across a deploy.
 
 The checkpoint is stored **unencrypted**, so it deliberately omits the per-language sentiment
 totals: those are the cleartext source of the `@cache.secure` value, and persisting them in the

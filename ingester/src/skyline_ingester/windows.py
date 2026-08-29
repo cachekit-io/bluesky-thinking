@@ -431,19 +431,7 @@ class WindowStore:
             gen = self._gen
         out = Bucket()
         for _minute, b in self._copy_range(lo, now_min):
-            out.n += b.n
-            out.signal_candidates += b.signal_candidates
-            out.tags.update(b.tags)
-            out.links.update(b.links)
-            out.domains.update(b.domains)
-            out.langs.update(b.langs)
-            out.emoji.update(b.emoji)
-            out.excluded.update(b.excluded)
-            out.tag_labels.update(b.tag_labels)
-            for lang, (s, c) in b.sent.items():
-                acc = out.sent.setdefault(lang, [0.0, 0])
-                acc[0] += s
-                acc[1] += c
+            _fold(out, b)
         with self._lock:
             # Memoise only if no add() landed since the merge started: add()
             # cleared the memo, and re-inserting this pre-add() view would serve
@@ -589,6 +577,19 @@ class WindowStore:
         language, and emoji counts are approximate after a restore; post and
         signal-candidate totals stay exact.
 
+        Buckets older than the 1h window are COARSENED (LAB-1933): each hour's
+        minutes fold into one unit keyed at the hour's first minute, so a full
+        24h window serializes as ~85 units instead of ~1,445 — the checkpoint
+        was ~97% of the ingester's outbound bandwidth and busted Render's 5 GB
+        free tier (LAB-1894). Aggregates only ever sum buckets, so live serving
+        is untouched; the cost appears only after a restore, where the 24h
+        window's trailing edge expires in hour steps. Keying at the hour FLOOR
+        makes that expiry early, never late: a restored 24h count can drop up
+        to 59 min of real tail events, but it never re-serves events older
+        than 24h as in-window. The 5m and 1h windows restore minute-exact.
+        The output is a valid unversioned-change v2 snapshot — restore() reads
+        coarse and legacy fat checkpoints identically.
+
         Per-language sentiment (`sent`) is deliberately NOT persisted: it is the
         cleartext source of the @cache.secure sentiment cache, and this checkpoint
         is stored unencrypted. Writing it here would let the backend reconstruct
@@ -602,12 +603,27 @@ class WindowStore:
         """
         # Same lock discipline as merged(): chunked copy-under-lock; the
         # most_common() sorts and dict building run outside.
-        copies = sorted(self._copy_range())
+        copies = self._copy_range()
+        # Anchor the fresh/coarse boundary on `now`, matching merged()'s window
+        # arithmetic — NOT on max(bucket minute), which one future-stamped
+        # event could drag forward and coarsen the live hour.
+        coarse_floor = int(now // 60) - WINDOW_MINUTES["1h"]
+        units: list[tuple[int, Bucket]] = []
+        hours: dict[int, Bucket] = {}
+        for minute, b in copies:
+            if minute > coarse_floor:
+                units.append((minute, b))
+            else:
+                _fold(hours.setdefault(minute // 60, Bucket()), b)
+        # Hour keys (hour*60 <= coarse_floor) can never collide with a fresh
+        # minute (> coarse_floor); restore() treats both as ordinary minutes.
+        units.extend((hour * 60, b) for hour, b in hours.items())
+        units.sort()
         return {
             "v": SNAPSHOT_VERSION,
             "normalization_version": NORMALIZATION_VERSION,
             "saved_at": int(now),
-            "buckets": [[minute, _checkpoint_bucket(b)] for minute, b in copies],
+            "buckets": [[minute, _checkpoint_bucket(b)] for minute, b in units],
         }
 
     def restore(self, snap: dict, now: float) -> int:
@@ -796,6 +812,28 @@ def _tag_label_index(labels: Counter[tuple[str, str]], *, wanted: set[str]) -> d
         if canonical in wanted:
             output.setdefault(canonical, Counter())[display] += count
     return output
+
+
+def _fold(out: Bucket, b: Bucket) -> None:
+    """Accumulate one bucket into `out` — the single definition of a bucket sum.
+
+    merged() and snapshot()'s hour-coarsening both use it, so a window query and
+    a checkpoint hour unit can never disagree about what adding buckets means.
+    `out` must be caller-private (a fresh accumulator), never a stored bucket.
+    """
+    out.n += b.n
+    out.signal_candidates += b.signal_candidates
+    out.tags.update(b.tags)
+    out.links.update(b.links)
+    out.domains.update(b.domains)
+    out.langs.update(b.langs)
+    out.emoji.update(b.emoji)
+    out.excluded.update(b.excluded)
+    out.tag_labels.update(b.tag_labels)
+    for lang, (s, c) in b.sent.items():
+        acc = out.sent.setdefault(lang, [0.0, 0])
+        acc[0] += s
+        acc[1] += c
 
 
 def _truncate(counter: Counter, keep: int) -> bool:
