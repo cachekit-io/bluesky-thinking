@@ -113,18 +113,24 @@ export function resetStats(): void {
 
 // Values a Python writer may exceed 2^53 on decode to BigInt; JSON.stringify
 // rejects BigInt, so stringify those (safe-range ints are already number).
-function jsonSafe(_key: string, value: unknown): unknown {
+// Exported for history.ts, which persists the same decoded payloads.
+export function jsonSafe(_key: string, value: unknown): unknown {
   return typeof value === 'bigint' ? value.toString() : value;
 }
 
-function json(status: number, body: unknown, headers: Record<string, string> = {}): Response {
+export function json(
+  status: number,
+  body: unknown,
+  headers: Record<string, string> = {},
+): Response {
   return new Response(JSON.stringify(body, jsonSafe), {
     status,
     headers: { 'content-type': 'application/json; charset=utf-8', ...headers },
   });
 }
 
-function isOperation(value: string): value is Operation {
+// Exported for history.ts, which validates the same operation segment.
+export function isOperation(value: string): value is Operation {
   return (OPERATIONS as readonly string[]).includes(value);
 }
 

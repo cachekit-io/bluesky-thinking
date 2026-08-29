@@ -17,11 +17,16 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import resource
+import sys
 import time
 from collections.abc import Callable
 from contextlib import suppress
 
+from skyline_ingester.windows import WindowStore
+
 logger = logging.getLogger(__name__)
+
 
 _REASONS = {200: "OK", 404: "Not Found", 405: "Method Not Allowed", 503: "Service Unavailable"}
 # One deadline for the whole exchange (read + respond). Per-line timeouts
@@ -33,6 +38,34 @@ _EXCHANGE_DEADLINE_SECONDS = 10.0
 # ValueError past it); this also bounds per-connection buffer memory.
 _MAX_LINE_BYTES = 8192
 _MAX_HEADER_LINES = 100
+_MIB = 1024 * 1024
+
+
+def _peak_rss_mib() -> float:
+    """High-water resident set.
+
+    ru_maxrss is KiB on Linux and BYTES on macOS. Branch on the platform, not on
+    the magnitude: a magnitude test only picks the bytes branch above its
+    threshold, so any plausible threshold misreports one platform by 1024x for
+    ordinary process sizes.
+    """
+    raw = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return round((raw if sys.platform == "darwin" else raw * 1024) / _MIB, 1)
+
+
+def _rss_mib() -> float | None:
+    """Current resident set, or None off Linux.
+
+    getrusage only offers the high-water mark, which never comes back down —
+    useless for "is it climbing right now", which is the question an OOM
+    post-mortem actually asks. /proc/self/statm is the stdlib-only way to the
+    live number; both are reported so neither question needs the dashboard.
+    """
+    try:
+        with open("/proc/self/statm") as handle:
+            return round(int(handle.read().split()[1]) * resource.getpagesize() / _MIB, 1)
+    except (OSError, IndexError, ValueError):
+        return None
 
 
 class HealthState:
@@ -42,11 +75,15 @@ class HealthState:
     plain attributes need no locking.
     """
 
-    def __init__(self, now_fn: Callable[[], float] = time.time) -> None:
+    def __init__(self, now_fn: Callable[[], float] = time.time, store: WindowStore | None = None) -> None:
         self._now = now_fn
+        # Read-only, for reporting sizes. None in tests and in any caller that
+        # only needs liveness; the payload then simply omits the size fields.
+        self._store = store
         self.started_at = now_fn()
         self.jetstream_connected = False
         self.events_seen = 0
+        self.events_missing_source = 0
         self.last_event_at: float | None = None
         self.last_publish_at: float | None = None
 
@@ -57,6 +94,10 @@ class HealthState:
     def published(self) -> None:
         self.last_publish_at = self._now()
 
+    def missing_source(self) -> int:
+        self.events_missing_source += 1
+        return self.events_missing_source
+
     def snapshot(self) -> tuple[int, dict]:
         """(HTTP status, body) for /health — 503 whenever Jetstream is down."""
         now = self._now()
@@ -65,14 +106,25 @@ class HealthState:
             return None if t is None else round(now - t, 1)
 
         status = 200 if self.jetstream_connected else 503
-        return status, {
+        body: dict = {
             "status": "ok" if status == 200 else "degraded",
             "jetstream_connected": self.jetstream_connected,
             "events_seen": self.events_seen,
+            "events_missing_source": self.events_missing_source,
             "last_event_age_seconds": age(self.last_event_at),
             "last_publish_age_seconds": age(self.last_publish_at),
             "uptime_seconds": round(now - self.started_at, 1),
         }
+        # Additive only (LAB-1775 AC-6): Render's health check and the edge
+        # keep-alive cron read the status code, never the body. These make an
+        # OOM recurrence diagnosable from the public endpoint alone — memory
+        # growth and its cause (bucket/key counts) in one payload — without
+        # Render dashboard access, which no agent has.
+        body["rss_mib"] = _rss_mib()
+        body["rss_peak_mib"] = _peak_rss_mib()
+        if self._store is not None:
+            body.update(self._store.stats())
+        return status, body
 
 
 async def _exchange(state: HealthState, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:

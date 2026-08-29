@@ -1,0 +1,269 @@
+# Skyline public signal policy
+
+Skyline's public trend lists are normalized, source-bounded, and safety-filtered
+before publication. This policy is deterministic and versioned as
+`skyline-normalization-v1`; every aggregate identifies the version that produced
+it.
+
+The policy improves a public network pulse. It is not account reputation,
+individual moderation, a claim that every unfiltered result is safe, or an
+attempt to classify people.
+
+## Hashtags
+
+For ranking, each candidate is:
+
+1. normalized with Unicode NFKC (so compatibility forms such as full-width
+   Latin characters share a key);
+2. case-folded with Unicode `casefold()` and NFKC-normalized again for an
+   idempotent canonical key;
+3. limited to 64 characters in both display and canonical form, and one
+   complete token of Unicode word characters,
+   with hyphens allowed only between word-character groups.
+
+For text fallback, `#` must begin at a non-word/non-`#` boundary. Whitespace
+and punctuation other than an internal hyphen end the token. A facet is already
+supposed to carry one bare tag, so a facet containing whitespace, surrounding
+`#`, or other punctuation is rejected rather than truncated.
+
+The existing public `tag` field remains the case-folded ranking key. The
+additive `display` field is the most frequent NFKC-normalized spelling seen in
+the selected window, with a lexical tie-break. Display case is therefore
+preserved without changing the meaning of `tag` or splitting the count.
+
+Work per post is bounded before normalization: at most 4,096 raw text characters
+are NFKC-normalized and the normalized result is capped again at 4,096 characters;
+at most 64 declared facet features are examined, then at most 32 hashtag candidates
+and 16 link candidates are normalized. Other feature types and declarations
+beyond the 64-feature examination ceiling do not enter the signal denominator.
+Genuine tag/link declarations examined beyond their family cap are reported as
+`candidate_limit_tag` or `candidate_limit_url`. If supplied tag facets produce
+no usable tag, the same bounded text fallback is still applied. Repeated rejected
+spellings within one post count once per normalized token, whether they came from
+facets or text. Emoji are one signal per distinct emoji per post: at most 16
+distinct emoji per post are accepted into the ranking, each distinct emoji
+beyond that cap is charged `candidate_limit_emoji` exactly once, and every
+repeat of an already-seen emoji is reported per occurrence as
+`duplicate_in_event_emoji` — so each emoji occurrence contributes exactly one
+decision to the denominator, mirroring tags and links. Emoji contributions
+pass through the same rolling source bound as every other signal family.
+Live and restored emoji keys are limited to 64 code points; overlong ZWJ chains
+are omitted rather than becoming oversized public keys.
+
+The following canonical tags are explicitly excluded:
+`adult`, `follow4follow`, `followforfollow`, `nsfw`, `porn`, `porno`,
+`spam`, and `xxx`. Matches are exact, never substrings.
+
+## Links and domains
+
+Only syntactically valid `http` and `https` URLs are candidates. Canonical URLs:
+
+- lowercase and IDNA-encode the host before every host-safety check;
+- canonicalize global IP literals and apply the public-safety host rules below
+  after IDNA;
+- remove a trailing host dot and the default port (80 for HTTP, 443 for HTTPS);
+- insert `/` when the input URL has an empty path, otherwise preserve the path
+  and meaningful query components byte-for-byte;
+- remove the fragment;
+- remove only the reviewed attribution parameters below.
+
+The stripped parameter names are:
+`dclid`, `fbclid`, `gclid`, `gbraid`, `igshid`, `mc_cid`, `mc_eid`,
+`msclkid`, `utm_campaign`, `utm_content`, `utm_id`, `utm_medium`,
+`utm_source`, `utm_term`, and `wbraid`.
+
+Ambiguous names such as `ref`, `source`, and `campaign` are deliberately
+retained because sites can use them to identify a meaningful resource. Query
+order, duplicate meaningful parameters, percent-encoding, and non-default ports
+are also retained.
+
+`trending_links` publishes both canonical individual URLs and a `domains`
+ranking keyed by the normalized host. Tracking variants of one story therefore
+share one URL key, while domain activity is visible alongside individual
+resources.
+
+## Source contribution bound and privacy
+
+One source can contribute a given canonical hashtag, URL, or domain at most once
+per rolling five minutes of process time. Untrusted event timestamps determine
+the event's minute bucket but never expire this ledger. The limit is per signal
+family: two distinct URLs on one domain can both enter the URL ranking, while
+that source contributes only once to the domain ranking during the horizon.
+
+The Jetstream DID exists only as a local argument at the ingestion boundary.
+`WindowStore` immediately folds it into a 128-bit keyed BLAKE2 digest for the
+complete `(source, signal family, canonical value)` tuple. The key is random for
+each process. Only these opaque tuple digests and expiry timestamps live in the
+five-minute ledger.
+
+The ledger holds at most 1,024 live tuples per source and 100,000 globally.
+Both ceilings REFUSE rather than evict. A source that fills its own ceiling has
+further contributions refused (reported per family as `rate_limited_source_*`):
+an eviction — even of the source's own oldest entry — would let a source flush
+its earlier tuples with junk and replay an already-credited signal. When the
+global ceiling is reached, new contributions are likewise refused (reported per
+family as `rate_limited_global_*`) rather than evicting the globally oldest
+tuple, because a global eviction of a live in-horizon tuple both re-credits an
+already-counted signal and refills its source's per-source budget — a second
+flush path reachable by anyone minting DIDs. Only genuinely expired entries
+free capacity. A live tuple is therefore never evicted under either ceiling,
+refusal makes self-flushing cost the attacker the contribution instead of
+buying one, each source is bounded at at most 1,024 accepted contributions per
+rolling five minutes, and degradation under global pressure is visible in the
+public `rate_limited_global_*` exclusion counts. The key,
+digests, and raw DIDs are never put in minute buckets, checkpoints, CacheKit values,
+logs, history, or health output. `/health` also exposes the aggregate
+`events_missing_source` counter so a Jetstream schema change cannot silently empty
+all public trend rankings, and (LAB-1775) `ledger_entries` — how many digests are
+live, never which — so ledger pressure is diagnosable without weakening that
+boundary. The ledger is not restored:
+after a process restart the key rotates and the five-minute bound starts fresh.
+That small, explicit continuity gap is preferable to creating a durable
+pseudonymous author index. A post without a usable source can still count toward
+volume, language, and sentiment aggregates, but its hashtag/link/domain/emoji
+contributions are excluded so missing identity cannot bypass the public trend
+bound.
+
+Jetstream reconnects resume from the greatest validated cursor seen, so an
+out-of-order or hostile old timestamp cannot rewind the subscription. If a backlog
+longer than five minutes is delivered faster than real time, its trend signals share the current
+process-time bound and can be under-counted; event-volume aggregates remain
+exact, and language aggregates remain exact except where per-minute compaction
+applies (below). Event timestamps are deliberately not used to expire
+the ledger because they are untrusted and previously allowed a source to erase
+the bound.
+
+## Public-safety exclusions
+
+URL checks are local and syntactic. The ingestion hot path never resolves DNS,
+opens a socket, follows a redirect, or fetches submitted content. Known
+enumerated wildcard-DNS, rebinding, and loopback provider roots are denied;
+any hostname with a DNS label matching the local-development class pattern is
+denied syntactically (see below); and
+hostnames containing dotted or dashed non-global IPv4 spellings are rejected as
+additional defence. An
+arbitrary hostname controlled by an attacker can still resolve to a
+private address: proving otherwise would require the DNS lookup this boundary
+deliberately forbids. Published links therefore remain untrusted destinations for
+viewer-side safe-link handling; this policy prevents the ingester itself from
+performing SSRF, but cannot promise that every clickable hostname resolves public.
+
+Skyline rejects:
+
+- non-HTTP(S) schemes;
+- credentials in an authority;
+- control characters, whitespace, backslashes, bad percent escapes, invalid
+  hosts/ports, browser-dependent numeric hosts, and overlong URLs;
+- localhost, single-label names, non-global IP literals, and syntactic
+  private-target names;
+- an exact host or subdomain of the enumerated local-network suffix roots `corp`,
+  `home`, `home.arpa`, `internal`, `intra`, `intranet`, `lan`, `local`,
+  `localdomain`, `localhost`, `private`, or `test`;
+- any hostname with a DNS label containing one of the four distinctive stems
+  of the local/loopback family — `local`, `lokal`, `lokaal`, or `loopback`
+  (so `localdev`, `devlocal`, `mylocal`, `localhost`, and `lokalhost` are all
+  caught). This syntactic rule exists because that provider class is unbounded:
+  registering `localdev.<newTLD>` and pointing it at a loopback or private
+  address costs about ten dollars, so enumeration alone cannot converge. The
+  rule is deliberately scoped to those four stems; shorter, more ambiguous
+  tokens (`home`, `lcl`, `lvh`, `intern`, `127`) are NOT used as substrings,
+  because they cannot be told apart by syntax from legitimate public hosts
+  (`home.cern`, `lcl.fr`, `internet.org`, `route127.net`) — those specific
+  classic dev domains are enumerated in the provider-root list below instead.
+  The one accepted false positive is a legitimate label that embeds `local`
+  (for example `localize`): it is excluded from the ranking, never a safety
+  miss — the published set is a ranking, not a directory;
+- an exact host or subdomain of the enumerated wildcard-DNS/rebinding/loopback
+  provider roots `1u.ms`, `backname.io`, `ddev.site`, `devlocal.dev`, `devlocal.io`,
+  `devlocal.me`, `devlocal.nl`, `devlocal.site`, `devlocal.us`, `docksal.site`,
+  `fbi.com`, `home.no`, `ip.es.io`, `l0pb.dev`, `l0pb.me`, `lacolhost.com`,
+  `lcl.host`, `lndo.site`, `local.gd`, `local.qinlili.bid`, `local.sisteminha.com`,
+  `localdev.cc`, `localdev.hu`, `localdev.it`, `localdev.name`, `localdev.pl`,
+  `localdev.pw`, `localdev.space`, `localdev.tech`, `localdev.top`, `localdev.xyz`,
+  `localfabriek.nl`, `localho.st`, `localhost.cool`, `localhost.direct`,
+  `localhost.team`, `localhost.tw`, `localhst.co.uk`, `localtest.dev`,
+  `localtest.me`, `lokaal.host`, `lokal.host`, `lokalhost.link`, `loopback.cz`,
+  `loopback.it`, `loopback.link`, `loopback.run`, `lvh.me`, `mylocal.in`,
+  `mylocal.zone`, `nip.io`, `rbndr.us`, `rebind.network`, `sslip.io`, `test.ws`,
+  `traefik.me`, `vcap.me`, or `yoogle.com`;
+- an exact host or subdomain of `pornhub.com`, `redtube.com`, `xhamster.com`,
+  `xnxx.com`, or `xvideos.com`.
+
+The enumerated provider and suffix roots are both asserted, in each direction,
+against the dated resolution/probe fixture
+`ingester/tests/fixtures/host_provider_sweep.json`, last re-verified on
+2026-08-08; parked former providers remain conservatively denied. The test
+bounds the sweep's age at 90 days, so re-verification is forced by the clock
+rather than by intention: an unrefreshed sweep fails CI until it is re-run and
+re-dated. The list is enumerated and periodically re-verified — it is not a
+guarantee of completeness, a crawler, a page classifier, or a permanent
+blocklist of people.
+
+## Transparency fields
+
+Every public aggregate includes:
+
+- `normalization_version`: the policy version above;
+- `total_events_considered`: structurally valid post-create events in the
+  selected window (also retained as `total_posts` for compatibility);
+- `total_signal_candidates`: accepted or excluded tag, URL, domain, emoji, and
+  restored-checkpoint decisions in the selected window — the denominator for
+  the exclusion counts; unrelated facet feature types never enter it;
+- `excluded_count_by_reason`: aggregate counts of candidate signal
+  contributions omitted for normalization, safety, in-event duplication,
+  missing source, or the rolling source bound.
+
+Exclusion counts are contribution counts, not unique people and not necessarily
+unique events: one post can contain more than one excluded candidate. Checkpoint
+restore retains per-minute top-K entries, so long-tail tag, URL/domain, language,
+and emoji rankings are approximate immediately after a restart; event and signal
+candidate totals remain exact.
+
+The same top-K truncation also applies in steady state, not only after a restart
+(LAB-1775). A minute bucket keeps every distinct key while it is inside the
+full-fidelity horizon — the 5 m window plus 5 minutes of slack for the future
+skew `ingest_raw` accepts — and is then compacted in place to its top 20 tags,
+20 URLs, 20 domains, 10 emoji and 32 languages. So the **5 m window is exact**,
+while 1 h and 24 h long-tail rankings are approximate — bounded memory is what
+keeps the service inside its 512 MiB host at all. Truncation is
+frequency-ordered and only ever drops keys, never rewrites a count, and
+`posts_per_minute`, `total_events_considered`, `total_signal_candidates` and
+every `excluded_count_by_reason` entry stays exact in all three windows.
+
+Be precise about what that leaves, because "counts are exact" would overclaim:
+a surviving key's count is exact *within its minute*, but a 1 h or 24 h total is
+summed only over the minutes where that key made the top-K, so a published count
+is a **lower bound** on true occurrences. Measured against an uncompacted control
+on an hour of Zipf-distributed traffic: top-25 membership unchanged, top-10 order
+preserved, the six heaviest counts exact, rank 10 at 97.5 %, median 92 % across
+the top 25. A tag averaging under roughly one occurrence per minute never makes a
+minute's top-K and can be absent entirely. These aggregates are a trend
+**ranking**, not a census.
+
+One consequence is worth stating plainly rather than leaving for a reader to
+derive: `lang_mix` computes its shares over the languages a bucket **retains**,
+so once a minute carries more than 32 distinct languages the 1 h and 24 h shares
+describe the retained set rather than every post. At observed rates a minute
+carries 23–27, so the bound does not bite; `total_posts` is exact either way.
+
+## Recorded evaluation
+
+`ingester/tests/fixtures/signal_quality_events.jsonl` contains case and Unicode
+variants, tracking URLs, a repetitive source, broad distinct-source activity,
+malformed/dangerous URLs, and representative explicit adult/spam terms. The
+test evaluates the same recorded input before and after source bounding in the
+5-minute window:
+
+| Signal | Normalized, before source bound | Published after policy |
+| :--- | ---: | ---: |
+| `flashsale` from one repetitive source | 6 | 1 |
+| `community` from four distinct sources | 4 | 4 |
+
+The repetitive source no longer outranks broader activity in that 5-minute
+snapshot. The rule is a rate bound, not a permanent per-source cap: a source can
+contribute the same signal at most 12 times in 1 hour and 288 times in 24 hours
+when it contributes once at each five-minute horizon. Those longer-window
+limits have separate regression coverage; the policy does not claim to detect
+sock puppets or rotated tag variants. The fixture also
+asserts exact exclusion-reason totals and that no fixture DID appears in a
+bucket checkpoint or any public aggregate.

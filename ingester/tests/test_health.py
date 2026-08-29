@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 
+from skyline_ingester.extract import PostFeatures
 from skyline_ingester.health import HealthState, start_health_server
+from skyline_ingester.windows import WindowStore
 
 
 def make_state(now: float = 1000.0) -> tuple[HealthState, list[float]]:
@@ -45,11 +47,48 @@ def test_snapshot_never_leaks_payload_or_keys() -> None:
     assert set(body) == {
         "status",
         "jetstream_connected",
+        "events_missing_source",
         "events_seen",
         "last_event_age_seconds",
         "last_publish_age_seconds",
         "uptime_seconds",
+        # LAB-1775 AC-6, added deliberately: memory diagnostics, no aggregate
+        # content. rss_mib is None off Linux, hence still present as a key.
+        "rss_mib",
+        "rss_peak_mib",
     }
+
+
+def test_snapshot_reports_store_sizes_without_their_contents() -> None:
+    # LAB-1775 AC-6: the store-backed fields are SIZES. A count of counter keys
+    # is diagnosable; the keys themselves would turn the liveness endpoint into
+    # an unauthenticated read of the aggregates AC-0 keeps off it.
+    store = WindowStore()
+    store.add(
+        PostFeatures(
+            ts=600.0,
+            lang="en",
+            hashtags=["secrettag"],
+            links=["https://secret.example.com/path"],
+            emoji=[],
+            sentiment=None,
+            domains=["secret.example.com"],
+            hashtag_labels={"secrettag": "SecretTag"},
+        ),
+        source_id="did:plc:health",
+    )
+    state = HealthState(now_fn=lambda: 1000.0, store=store)
+    _, body = state.snapshot()
+    assert body["buckets"] == 1
+    assert body["counter_keys"] > 0
+    assert body["ledger_entries"] == 3  # tag + url + domain
+    assert "secret" not in json.dumps(body)
+
+
+def test_snapshot_without_a_store_omits_size_fields() -> None:
+    _, body = make_state()[0].snapshot()
+    assert "buckets" not in body
+    assert body["rss_peak_mib"] > 0
 
 
 async def _request(port: int, raw: bytes) -> tuple[int, dict[str, str], bytes]:

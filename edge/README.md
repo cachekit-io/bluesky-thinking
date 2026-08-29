@@ -3,9 +3,11 @@
 TypeScript Cloudflare Worker serving the five Skyline aggregates from the shared
 CachekitIO namespace via [interop/v1](../docs/architecture.md#locked-key-convention)
 reads (`@cachekit-io/cachekit` 0.1.3), plus a static dashboard on Workers Assets.
-The edge is **read-only**: aggregates are computed and written by the Python
-ingester; a cache miss here is surfaced (404 + `X-Cache: MISS`), never recomputed
-or faked.
+For the live aggregates the edge is **read-only**: they are computed and written
+by the Python ingester; a cache miss here is surfaced (404 + `X-Cache: MISS`),
+never recomputed or faked. The edge's only writes are its own derived state:
+hourly/daily snapshot rows into the `HISTORY` D1 store and CacheKit-cached
+history responses (LAB-1616, below) — never the interop aggregate keys.
 
 ## Dashboard
 
@@ -17,6 +19,12 @@ its selected 5m / 1h / 24h window, rank and proportional bar where applicable,
 and the posts/minute card also shows its sample size. The selection is retained in
 the `?window=` URL parameter.
 
+A history panel (LAB-1616) charts posts-per-minute over 7d/30d from
+`/api/history`: one amber bar per present bucket, absent buckets rendered as
+holes, with a coverage line stating when history began and how many points the
+range actually holds ("missing points are gaps in collection, not zero
+activity"), plus a `<details>` data table.
+
 `generated_at` is Unix seconds and is rendered as both localized text and an
 accessible ISO timestamp. Staleness follows the ingester publishing cadence: 5m
 payloads warn after **1 minute**, 1h after **5 minutes**, and 24h after **15
@@ -26,11 +34,13 @@ verification have separate dashboard copy.
 
 ## API
 
-| Route                                  | Description                                                                                                                                                                                                                                                                                                    |
-| :------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GET /api/{operation}?window={window}` | Cached aggregate. `operation` ∈ `trending_hashtags` · `trending_links` · `lang_mix` · `posts_per_minute` · `top_emoji`; `window` ∈ `5m` · `1h` · `24h` (required — interop binding rules forbid default parameters).                                                                                           |
-| `GET /api/stats`                       | Per-isolate `hits` / `misses` / `errors` / `hit_rate` + a `scope` string restating this: counters reset when Cloudflare recycles the isolate, and `hit_rate` is aggregate-key availability at this isolate — not an SDK L1 rate, and not the end-user rate (POP cache hits are served before the worker runs). |
-| `GET /`                                | Static dashboard (Workers Assets).                                                                                                                                                                                                                                                                             |
+| Route                                        | Description                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| :------------------------------------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /api/{operation}?window={window}`       | Cached aggregate. `operation` ∈ `trending_hashtags` · `trending_links` · `lang_mix` · `posts_per_minute` · `top_emoji`; `window` ∈ `5m` · `1h` · `24h` (required — interop binding rules forbid default parameters).                                                                                                                                                                                                                    |
+| `GET /api/stats`                             | Per-isolate `hits` / `misses` / `errors` / `hit_rate` + a `scope` string restating this: counters reset when Cloudflare recycles the isolate, and `hit_rate` is aggregate-key availability at this isolate — not an SDK L1 rate, and not the end-user rate (POP cache hits are served before the worker runs).                                                                                                                          |
+| `GET /api/history/{operation}?range={range}` | Snapshot history from D1 (LAB-1616): `range` ∈ `7d` (hourly points) · `30d` (daily points). Bounded, ascending series with a coverage block — absent buckets are gaps, never zeros. `x-history-source: cachekit\|d1\|d1-fallback` names the serving layer (responses are CacheKit-cached per bucket; cached bytes are validated before relay and only complete series are cached). Served from D1 alone if `CACHEKIT_API_KEY` is unset. |
+| `GET /api/history/status`                    | Capture health: per-tier row counts, newest bucket, `stale` flag. Separate from live freshness by design.                                                                                                                                                                                                                                                                                                                               |
+| `GET /`                                      | Static dashboard (Workers Assets).                                                                                                                                                                                                                                                                                                                                                                                                      |
 
 Every aggregate response carries `X-Cache: HIT|MISS`. Status codes: unknown
 operation → 404, missing/invalid window → 400 (both before any cache read),
@@ -75,6 +85,13 @@ payload served through `/api/{operation}` is first integrity-checked there
 
 Misses never call the hot path: 404 + `X-Cache: MISS`, unchanged.
 
+History capture (LAB-1616) rides the keep-alive cron: at each top of hour the
+scheduled handler snapshots the five `1h` aggregates into the `HISTORY` D1
+binding (daily tier + retention sweep at UTC midnight). Capture and keep-alive
+are failure-isolated from each other, and capture failures produce gaps plus
+structured `history_gap` / `history_capture_failed` logs — never invented
+points. Full design + operating contract: [`docs/history.md`](../docs/history.md).
+
 ## Deploy
 
 `wrangler deploy`, then set the secret (creds per
@@ -82,6 +99,12 @@ Misses never call the hot path: 404 + `X-Cache: MISS`, unchanged.
 
 ```bash
 op read "op://cachekit/ck-dev-bluesky-default/credential" | wrangler secret put CACHEKIT_API_KEY
+```
+
+Any pending D1 migration must be applied **before** the deploy that expects it:
+
+```bash
+npx wrangler d1 migrations apply skyline-history --remote
 ```
 
 Dev deployment: **https://skyline-edge.raywalker.workers.dev** (the dev

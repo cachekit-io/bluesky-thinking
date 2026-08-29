@@ -48,6 +48,17 @@ crons = ["*/10 * * * *"]
 binding = "HOTPATH"
 service = "skyline-hotpath"
 
+# Snapshot-history store (LAB-1616, docs/history.md). Capture rides the
+# existing cron above — captureTick no-ops except at minute 0 — so this adds
+# zero cron expressions (free plan allows five per ACCOUNT, shared with every
+# other Worker). Schema changes ship as files in ./migrations; apply with
+#   npx wrangler d1 migrations apply skyline-history --remote
+# BEFORE deploying a Worker that depends on them.
+[[d1_databases]]
+binding = "HISTORY"
+database_name = "skyline-history"
+database_id = "a2cfe6d3-e26a-4e1a-aa02-cb3606f833e7"
+
 # Static dashboard. Asset requests are served before the worker script runs;
 # unmatched paths (/api/*) fall through to the fetch handler.
 [assets]

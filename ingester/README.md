@@ -45,12 +45,102 @@ key material:
 
 ```json
 {"status": "ok", "jetstream_connected": true, "events_seen": 12345,
- "last_event_age_seconds": 0.4, "last_publish_age_seconds": 7.1, "uptime_seconds": 900.0}
+ "events_missing_source": 0,
+ "last_event_age_seconds": 0.4, "last_publish_age_seconds": 7.1, "uptime_seconds": 900.0,
+ "rss_mib": 61.4, "rss_peak_mib": 74.2,
+ "buckets": 1440, "counter_keys": 217565, "ledger_entries": 11976}
 ```
 
 Returns **503** whenever the Jetstream socket is down, so a dead consumer inside a live process is
 visible from outside — Render's health check then restarts the service, and the CacheKit
 checkpoint makes that restart safe. Deployment blueprint: [`../render.yaml`](../render.yaml).
+
+The last five fields are memory diagnostics (LAB-1775). They are **sizes, never contents** — a
+count of live counter keys, not the keys — so the endpoint stays liveness-only. `rss_mib` is the
+current resident set (`/proc/self/statm`, `null` off Linux) and `rss_peak_mib` the high-water mark
+(`resource.getrusage`); both are stdlib, no new dependency. The two come from different kernel
+accounting paths and `ru_maxrss` updates lazily, so `rss_mib` can read a little *above*
+`rss_peak_mib` — that is expected, not a bug. They exist because Render's memory
+graph is behind a dashboard login that no agent has, so an OOM recurrence has to be diagnosable
+from the public endpoint alone: `counter_keys` climbing without bound is the signature of the
+LAB-1775 regression returning.
+
+## Window retention and memory
+
+The store keeps one counter bucket per minute for 24 h. Resident cost is therefore
+*(retained minutes) × (distinct keys per minute)*, and at observed firehose rates a minute carries
+~2,470 distinct keys — so 1,440 full-fidelity minutes projected to **~1,050 MiB**, against the
+512 MiB of the Render free plan. That is the OOM restart LAB-1775 chased down.
+
+A bucket keeps every distinct key while it is inside the **full-fidelity horizon** — the 5 m
+window plus 5 minutes of slack, 10 minutes in total. Once it ages past that it is truncated in
+place to its top-K entries (20 tags / 20 links / 20 domains / 10 emoji / 32 languages, one display
+spelling per surviving tag) and is re-truncated if it ever regrows.
+
+The slack is load-bearing, not padding. `_prune` anchors the compaction floor on the minute being
+*added* (deliberately — one far-future timestamp must never become a permanent retention anchor),
+and `jetstream.ingest_raw` accepts events up to `MAX_FUTURE_SKEW_SECONDS` (300 s) ahead. Without
+slack, a single accepted future-dated post dragged the floor into the live window and truncated
+it — measured 1,000 → 100 distinct tags in the 5 m window from one `+300 s` frame, repeatable
+every minute. `test_windows.py` pins slack ≥ the accepted skew.
+
+Consequences worth knowing:
+
+- **The 5 m window is bit-exact.** Only the 1 h and 24 h *long tails* are approximate — the same
+  approximation the CacheKit checkpoint has always shipped for restore.
+- **Retained counts are exact.** Truncation drops keys; it never rewrites a count.
+- **`posts_per_minute` and the exclusion denominators are exact in every window.** Compaction
+  never touches `n`, `signal_candidates` or `excluded`.
+- Truncation is **frequency-ordered**, not arrival-ordered, so it keeps what was actually
+  trending in that minute. Measured on a Zipf-distributed hour against an uncompacted control:
+  top-25 *membership* is unchanged and top-10 *ordering* is preserved. Counts are exact for the
+  heaviest tags and degrade gradually down the ranking — ranks 1–6 exact, rank 10 at 97.5 %,
+  median 92 % across the top 25, worst 55 %. 47 of the top 50 survive; a tag averaging under
+  about one occurrence per minute never makes a minute's top-K and can drop out entirely.
+  Trend *ranking* is what this preserves; per-key totals in the 1 h and 24 h windows are a
+  lower bound, not a census.
+- **`lang_mix` shares are renormalized over the languages a bucket retains.** Below 32 distinct
+  languages per minute — every minute at observed rates, which carry 23–27 — that is a no-op;
+  above it, 1 h and 24 h shares describe the retained set, not all posts. `total_posts` stays
+  exact regardless.
+
+Measured with [`tools/soak_memory.py`](tools/soak_memory.py) against the live public Jetstream —
+no credentials needed, it drives `extract` → `WindowStore` directly:
+
+```bash
+uv run python tools/soak_memory.py live --seconds 540      # RSS + cardinality vs the real firehose
+uv run python tools/soak_memory.py saturate --minutes 1440 # a full 24h window, synthetically filled
+```
+
+At a full 1,440-bucket window and observed live cardinality that is **41.6 MiB steady / 48.0 MiB
+peak** including the `merged()` transient, versus **438.5 MiB / 634.2 MiB** with compaction
+disabled (`--no-compaction`) — the latter over the 512 MiB limit on retained structure alone.
+
+Worst case, measured: a quiet tail then a burst into the uncompacted head, which is when the
+contribution ledger is empty and a single minute can draw on the whole of it —
+
+```bash
+uv run python tools/soak_memory.py saturate --minutes 1440 --per-bucket 200 --head-per-bucket 40000
+```
+
+— is **110.8 MiB steady / 140.9 MiB** at the 24 h merge peak, with the ledger refusing 1,000,000
+offered contributions. (An earlier pass published 71.8 MiB for this case. That number was low
+twice over: it counted one retained key per accepted contribution when a hashtag mints two, `tags`
+and `tag_labels`, and it treated the ledger's ~20,000/min *sustained* rate as a per-minute ceiling.)
+**While event time advances**, `MAX_SOURCE_LEDGER_ENTRIES` over `SOURCE_DEDUPE_SECONDS` bounds what
+the head can accept, so it needs no cap of its own; `test_windows.py` derives both the aged and the
+head budget from those constants (driving the head one through `add()`), so raising the ledger cap
+fails a test. That precondition is the firehose's own contract and what the measurement above
+assumes — it is not enforced.
+
+**One axis is still unbounded.** A feed that *stalls* event time while still delivering volume keeps
+one head bucket permanently inside the full-fidelity horizon: ledger entries expire on monotonic
+time and free capacity for new keys, while nothing ages the bucket out. It accumulates at roughly
+27k keys/min, without bound. `ingest_raw` bounds event time from above but accepts any past
+timestamp, so this is reachable from a broken or hostile feed, not from a healthy Jetstream. The
+bucket-count cap does not help — it bounds how many buckets exist, not how many keys one head
+bucket accumulates. Closing it needs a head admission cap with explicit at-cap semantics.
+`counter_keys` on `/health` climbing without bound is its signature.
 
 ## What it publishes
 
@@ -62,12 +152,14 @@ invalidate can still leave the key briefly deleted until the next tick — cache
 set/replace, so that gap is inherent to the decorator API.
 
 Values are interop/v1 plain MessagePack, top-level maps with string keys. All carry
-`window` (str), `generated_at` (unix seconds, int), `total_posts` (int), plus:
+`window` (str), `generated_at` (unix seconds, int), `total_posts` (int),
+`total_events_considered` (int), `total_signal_candidates` (int),
+`excluded_count_by_reason` (map), and `normalization_version` (str), plus:
 
 | Operation | Payload field |
 | :--- | :--- |
-| `trending_hashtags` | `hashtags`: `[{tag, count}]`, top 50 |
-| `trending_links` | `links`: `[{uri, count}]`, top 50 (link facets + external embeds) |
+| `trending_hashtags` | `hashtags`: `[{tag, display, count}]`, top 50; `tag` remains canonical and `display` preserves the most frequent spelling |
+| `trending_links` | `links`: `[{uri, count}]` and `domains`: `[{domain, count}]`, top 50 |
 | `lang_mix` | `langs`: `{lang: share}` (floats summing to ~1; top 25 + `other`) |
 | `posts_per_minute` | `ppm`: float |
 | `top_emoji` | `emoji`: `[{emoji, count}]`, top 25 (ZWJ sequences count once) |
@@ -79,15 +171,18 @@ via `@cache.secure(master_key=…)` auto mode, `namespace="bluesky-thinking"`. I
 Python-only 7-segment auto key (`ns:bluesky-thinking:func:…`), and the backend stores ciphertext
 only (asserted in tests). Zero-knowledge holds end-to-end: the sentiment value is encrypted here and
 its plaintext source is never written to any other key (the checkpoint omits it — see below), so the
-backend never sees it in the clear. Ciphertext-only verification against the live SaaS is Stage 3.
+backend never sees it in the clear. Its secure value contains only the window, generation time,
+normalization version, and live per-language sentiment; public transparency counters derived from
+the operator-writable checkpoint are deliberately excluded. Ciphertext-only verification against
+the live SaaS is Stage 3.
 
 ### Checkpointing
 
 Window state is checkpointed into CacheKit (auto-mode key, TTL 26 h) every
 `CHECKPOINT_INTERVAL_SECONDS` and restored on startup, so a process restart doesn't zero the 24h
 window (the spec's Render-restart mitigation). Per-minute counters are truncated to their top-K
-entries in the snapshot — long-tail trending counts are approximate after a restore;
-`posts_per_minute` and `lang_mix` stay exact.
+entries in the snapshot — long-tail trending, language, and emoji counts are approximate after a
+restore; `posts_per_minute` and `total_signal_candidates` stay exact.
 
 The checkpoint is stored **unencrypted**, so it deliberately omits the per-language sentiment
 totals: those are the cleartext source of the `@cache.secure` value, and persisting them in the
@@ -96,15 +191,49 @@ zero-knowledge property. Sentiment is not restart-critical — the secure 1h win
 an hour of a restart; the aggregate counts above are unaffected.
 
 The checkpoint is equally **untrusted on read-back** (a backend operator can poison it): `restore()`
-validates and coerces every entry, skipping corrupt ones with a warning instead of crashing startup,
+validates every entry, dropping unsafe counter keys and values individually instead of erasing the
+rest of their minute or crashing startup,
 and ignores any legacy `sent` field entirely — restoring it would let a poisoned checkpoint choose
-the plaintext that the next secure publish encrypts.
+the plaintext that the next secure publish encrypts. Restore keeps the same per-counter top-K
+accepted entries written by `snapshot()` and considers at most one 24-hour window of minute
+buckets. Each checkpoint map is scanned completely up to 1,024 entries; a larger map rejects its
+whole bucket instead of silently restoring a partial counter. An oversized operator-poisoned map
+therefore cannot displace valid history behind an invalid prefix or publish a healthy-looking
+partial minute.
+
+Checkpoint schema v2 is tied to `skyline-normalization-v1`. A checkpoint from
+an older normalization version is rejected instead of mixing incompatible
+ranking keys under a new version label. Canonical domains, display-label counts,
+and aggregate exclusion counts are restart-safe; the transient source ledger is
+not.
 
 ## Privacy
 
-Aggregate-only: the extractor reduces each post to counter inputs (tags, links, primary language,
-emoji, a lexicon sentiment score). Post text, author DIDs, and rkeys are never stored — not in the
-windows, not in the checkpoint, not in any cache value.
+Aggregate-only: the extractor reduces each post to normalized counter inputs
+(tags, links/domains, primary language, emoji, a lexicon sentiment score) and
+aggregate exclusion reasons. Post text and record keys are never stored.
+
+For public tags, URLs, domains, and emoji, one source contributes a given
+canonical value at most once per rolling five minutes. The raw DID crosses one
+local call boundary, is immediately folded into a process-keyed tuple digest,
+and is never stored or logged. The random key and opaque five-minute ledger are
+excluded from buckets, checkpoints, cache values, and history, and rotate on
+restart. The ledger holds at most 1,024 tuples per source and 100,000 globally.
+Both ceilings refuse rather than evict: a source at its own ceiling has further
+contributions refused (reported as `rate_limited_source_*`), and global
+pressure from many distinct sources refuses new contributions (reported as
+`rate_limited_global_*`) instead of evicting the globally oldest tuple — a
+live-tuple eviction would re-credit an already-counted signal and refill its
+source's budget. Only genuinely expired entries free capacity. Full canonicalization, safety,
+filter-list, tracking-parameter, and transparency
+semantics: [public signal policy](../docs/signal-policy.md).
+
+After a reconnect, a backlog delivered faster than real time shares the current
+process-time source bound and can under-count trend signals; volume aggregates
+remain exact, and language aggregates remain exact in the 5 m window and for any
+minute that carried at most 32 distinct languages (every minute, at observed
+rates — see *Window retention and memory* for the compaction bound). Event
+timestamps never expire the privacy ledger because they are untrusted.
 
 ## Tests
 
@@ -116,4 +245,5 @@ uv run ruff check src tests && uv run ruff format --check src tests
 The suite drives the real SDK against an in-process bytes backend (interop mode enforces the
 cross-SDK value contract, so `backend=None`/L1-only is rejected by cachekit itself) and asserts the
 byte-locked key vectors from the architecture spec, aggregate correctness from a recorded fixture
-stream, window expiry, checkpoint restore, and ciphertext-only secure storage.
+stream, window expiry, checkpoint restore, ciphertext-only secure storage, and
+the recorded signal-quality before/after evaluation.

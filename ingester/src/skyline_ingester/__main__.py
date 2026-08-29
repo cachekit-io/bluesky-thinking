@@ -78,8 +78,8 @@ async def checkpoint_loop(publisher: Publisher, interval_seconds: float) -> None
 
 async def run(settings: Settings) -> None:
     store = WindowStore()
+    health = HealthState(store=store)
     publisher = build_publisher(settings, store)
-    health = HealthState()
     await asyncio.to_thread(publisher.restore_checkpoint)
     await asyncio.gather(
         serve_health(health, settings.port),
