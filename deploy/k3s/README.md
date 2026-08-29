@@ -83,17 +83,33 @@ raise `-L` to list recent candidates.
 ```bash
 kubectl -n skyline rollout status deploy/skyline-ingester --timeout=180s
 kubectl -n skyline port-forward deploy/skyline-ingester 18080:8080 & pf=$!
-curl -s --retry 20 --retry-connrefused --retry-delay 1 \
-  localhost:18080/health | python3 -m json.tool
+curl -sS --fail-with-body --retry 20 --retry-connrefused --retry-delay 1 \
+  -o /tmp/skyline-health.json localhost:18080/health
+health=$?
 kill "$pf"   # drop the port-forward — a leaked one blocks the next run of this step
+python3 -m json.tool /tmp/skyline-health.json
+[[ $health -eq 0 ]] || echo "DEGRADED: /health never returned 200 — body above" >&2
 ```
 
-(`$pf` rather than `%1`: job control is interactive-shell only, so `kill %1`
-fails with "no such job" the moment this block is pasted into a script.)
+Three details in that block are load-bearing, so don't simplify them away:
 
-A `503` body says *why* it is degraded (`jetstream_connected: false`); no
-response at all means the pod isn't up — check
-`kubectl -n skyline logs deploy/skyline-ingester`.
+- `--fail-with-body`, not plain `--fail`: a 503 must be a *failure* (otherwise
+  the degraded body pretty-prints and the step looks green on a dead
+  consumer), but the body is also the diagnosis — it says *why*
+  (`jetstream_connected: false`). `--fail` alone would throw it away.
+- `-o` to a file rather than piping straight into `json.tool`: `curl` writes
+  the body on *every* failed retry, so a piped version feeds `json.tool` one
+  concatenated document per attempt and it dies with `Extra data` instead of
+  showing the diagnosis. `-o` truncates per attempt, leaving exactly the last
+  body. It also lets `$?` read `curl` directly instead of the pipe's tail.
+- `$pf` rather than `%1`: job control is interactive-shell only, so `kill %1`
+  fails with "no such job" the moment this block is pasted into a script.
+
+`--retry` treats 503 as transient and `--retry-connrefused` covers the
+port-forward race, so the retry budget absorbs both the startup window where
+Jetstream hasn't connected yet and a forwarder that isn't listening yet. A 503
+that survives it is a real dead consumer. No response at all means the pod
+isn't up — check `kubectl -n skyline logs deploy/skyline-ingester`.
 
 If GHCR image pulls fail with `unauthorized`, step 2 was skipped or did not
 take — the package is still private.
