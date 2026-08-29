@@ -40,11 +40,19 @@ Not every `main` commit has an image — the workflow only runs on pushes
 touching `ingester/**` — so take the SHA from the latest successful publish
 run, not from `git rev-parse`:
 
+A missing run makes `sha` empty, which would render `skyline-ingester:` — an
+invalid reference that `Recreate` would apply *after* terminating the running
+pod, so validate before applying, never after:
+
 ```bash
 sha="$(gh run list -R cachekit-io/bluesky-thinking -w ingester-image \
   -b main -e push -s success -L 1 --json headSha -q '.[0].headSha')"
-sed "s|skyline-ingester:SET-COMMIT-SHA|skyline-ingester:${sha}|" \
-  deploy/k3s/skyline-ingester.yaml | kubectl apply -f -
+if [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+  sed "s|skyline-ingester:SET-COMMIT-SHA|skyline-ingester:${sha}|" \
+    deploy/k3s/skyline-ingester.yaml | kubectl apply -f -
+else
+  echo "refusing to apply: no published image SHA (got '${sha}')" >&2
+fi
 ```
 
 Upgrades and rollbacks are the same lines with a different published SHA —
