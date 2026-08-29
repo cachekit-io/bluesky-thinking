@@ -33,10 +33,12 @@ hitrate() {
 [ "${1:-}" = "hitrate" ] && hitrate "${2:-3600}"
 
 fail=0
+skipped=0
 
 echo "== ingester /health (AC-1: alive, Jetstream connected)"
 if [ -z "$INGESTER" ]; then
     echo "SKIP: INGESTER_URL not set (the k3s ingester has no public URL — see the port-forward note above)"
+    skipped=$((skipped + 1))
 else
     # No curl -f here: a 503 carries the JSON that says WHY (Jetstream down),
     # which is exactly what separates "degraded" from "not deployed at all".
@@ -64,8 +66,10 @@ if body=$(curl -fsS -D "$headers" "$EDGE/api/posts_per_minute?window=$WINDOW"); 
     echo "$body"
     grep -i '^x-cache:' "$headers" || { echo "FAIL: no X-Cache header"; fail=$((fail + 1)); }
     grep -iq '^x-cache: *hit' "$headers" || { echo "FAIL: expected X-Cache: HIT"; fail=$((fail + 1)); }
-    # cf-ray's trailing colo code is the serving POP — the request's own
-    # evidence it was served outside the ingester's origin region (Oregon).
+    # cf-ray's trailing colo code is the serving POP, printed as evidence of
+    # edge distribution. (It used to be read as "served outside the origin
+    # region" — that was Render's Oregon; the ingester is now in Ray's
+    # homelab and is not an origin the edge ever dials.)
     grep -i '^cf-ray:' "$headers" || true
 else
     echo "FAIL: $EDGE/api/posts_per_minute?window=$WINDOW did not return 200"
@@ -88,9 +92,16 @@ echo "== hit/miss counters (epic AC-4 raw material; per-isolate scope)"
 curl -fsS "$EDGE/api/stats" || { echo "FAIL: /api/stats unreachable"; fail=$((fail + 1)); }
 echo
 
-if [ "$fail" -eq 0 ]; then
-    echo "ALL CHECKS PASSED"
-else
+if [ "$fail" -ne 0 ]; then
     echo "FAILED: $fail check(s)"
     exit 1
+elif [ "$skipped" -ne 0 ]; then
+    # Never print a pass for a run that didn't check. Losing the ingester is
+    # precisely the failure this script exists to catch, and AC-1 is the only
+    # check that looks at it — a green banner over a skipped AC-1 is the
+    # report you'd most regret trusting. Port-forward and set INGESTER_URL.
+    echo "INCOMPLETE: $skipped check(s) SKIPPED, the rest passed"
+    exit 1
+else
+    echo "ALL CHECKS PASSED"
 fi

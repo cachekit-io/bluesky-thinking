@@ -1,7 +1,19 @@
 # Builds the Skyline ingester container (LAB-2383). On pull requests the image
 # is built but never pushed, so reviewers see the Dockerfile proven green
-# before merge; on pushes to main it is published to GHCR as both `latest` and
-# the commit SHA (the SHA tag is what deploy/k3s/ pins against for rollbacks).
+# before merge; on pushes to main it is published to GHCR under the commit SHA,
+# which is what deploy/k3s/ pins against for deploys and rollbacks.
+#
+# No `latest` tag is published, deliberately: deploy/k3s/skyline-ingester.yaml
+# ships a SET-COMMIT-SHA sentinel precisely so no mutable tag can ever reach
+# the cluster. Publishing one anyway would leave that footgun loaded with no
+# consumer.
+#
+# The two jobs are split so `packages: write` exists ONLY on the main-branch
+# publish. A single job carrying that permission would hand a GHCR publish
+# token to every same-repo PR build — and because this workflow file is inside
+# its own `paths` filter, a PR can edit the job it is about to run. That would
+# let any branch push repoint the very :${sha} tag the runbook deploys, into a
+# pod that holds CACHEKIT_MASTER_KEY.
 name: ingester-image
 
 on:
@@ -15,31 +27,48 @@ on:
       - "ingester/**"
       - ".github/workflows/ingester-image.yml"
 
+permissions:
+  contents: read
+
 jobs:
-  image:
+  # PR path: prove the Dockerfile builds. No registry credentials at all.
+  build:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      # Needed only by the main-branch publish; harmless on the PR path
-      # because push is gated off there (and fork PRs get a read-only token).
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - name: Build (no push)
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: ingester
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # main path: the only place a GHCR write token exists.
+  publish:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
       packages: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
       - name: Log in to GHCR
-        if: github.event_name == 'push'
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build (and publish on main)
+      - name: Build and publish
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: ingester
-          push: ${{ github.event_name == 'push' }}
-          tags: |
-            ghcr.io/cachekit-io/skyline-ingester:latest
-            ghcr.io/cachekit-io/skyline-ingester:${{ github.sha }}
+          push: true
+          tags: ghcr.io/cachekit-io/skyline-ingester:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

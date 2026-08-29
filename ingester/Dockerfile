@@ -11,7 +11,10 @@
 #
 # Both base images are pinned tag@digest (multi-arch manifest-list digests):
 # the tag is documentation, the digest is what builds — reproducible and
-# immune to tag repointing. Renovate (renovate.json) keeps the digests current.
+# immune to tag repointing. Digest bumps ride the org Renovate preset
+# (renovate.json extends local>cachekit-io/renovate-config) — which only
+# reaches this file if that preset enables the `dockerfile` manager. If these
+# digests ever go stale, check that first.
 
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim@sha256:e5b65587bce7de595f299855d7385fe7fca39b8a74baa261ba1b7147afa78e58 AS builder
 

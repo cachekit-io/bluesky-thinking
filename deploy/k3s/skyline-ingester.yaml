@@ -35,24 +35,43 @@ spec:
       labels:
         app: skyline-ingester
     spec:
+      # Nothing here talks to the API server; the ingester's only credentials
+      # are the two env-injected CacheKit keys.
+      automountServiceAccountToken: false
+      # The entrypoint is Python, and Python leaves SIGTERM at SIG_DFL — which
+      # the kernel DISCARDS for a PID-namespace init. So the pod always dies by
+      # SIGKILL after the grace period, and the default 30 s would be 30 s of
+      # added single-writer downtime on every Recreate rollout and every
+      # liveness-triggered restart (the load-bearing recovery path). There is
+      # nothing to flush on the way out: state persists via the CacheKit
+      # checkpoint, never on disk.
+      terminationGracePeriodSeconds: 5
       securityContext:
         runAsNonRoot: true
         # Matches the image's fixed numeric UID (ingester/Dockerfile) —
         # runAsNonRoot requires a numeric identity the kubelet can verify.
         runAsUser: 10001
         runAsGroup: 10001
+        # k3s leaves the kubelet SeccompDefault gate off, so without this the
+        # pod runs seccomp-unconfined — full syscall surface on a process that
+        # parses an untrusted public firehose and holds the master key.
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: ingester
           # SET-COMMIT-SHA is a deliberate sentinel, not a real tag: the
           # runbook (deploy/k3s/README.md) renders it to a commit-SHA tag at
           # EVERY apply, so a reapply can never fall back to a mutable tag
-          # and a liveness-probe restart re-runs the same bytes. (A SHA tag
-          # is stable in practice but still repointable with packages:write;
-          # the runbook has an optional @sha256 digest render for full
-          # immutability.) Applying this file unrendered fails closed
-          # (ImagePullBackOff) instead of silently resolving a mutable tag.
-          # IfNotPresent for the same reason: a restart must never be an
-          # implicit upgrade.
+          # and a liveness-probe restart re-runs the same bytes. IfNotPresent
+          # for the same reason: a restart must never be an implicit upgrade.
+          # The tag is repointable only by a holder of packages:write, which
+          # since LAB-2383 means a main-branch merge (ingester-image.yml grants
+          # that token to the publish job alone, never to a PR build).
+          #
+          # Applying this file UNRENDERED does not fail safely — under
+          # Recreate the old pod is terminated first, so the sentinel yields
+          # ImagePullBackOff with nothing running. Use the runbook, which
+          # validates the SHA before it applies anything.
           image: ghcr.io/cachekit-io/skyline-ingester:SET-COMMIT-SHA
           imagePullPolicy: IfNotPresent
           ports:

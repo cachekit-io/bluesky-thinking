@@ -3,8 +3,9 @@
 The ingester's deployment home (LAB-2383), replacing the Render free-tier
 blueprint that used to live at `/render.yaml`. The image is published by
 [`ingester-image.yml`](../../.github/workflows/ingester-image.yml) to
-`ghcr.io/cachekit-io/skyline-ingester` (`latest` + commit SHA) on every push
-to `main` that touches `ingester/**`.
+`ghcr.io/cachekit-io/skyline-ingester`, tagged by commit SHA only, on every
+push to `main` that touches `ingester/**`. No `latest` tag is published —
+nothing may reach the cluster under a mutable reference.
 
 ## Runbook
 
@@ -30,11 +31,22 @@ kubectl -n skyline create secret generic skyline-ingester \
 `CACHEKIT_MASTER_KEY` is the 64-hex `encryption_key` field; the ingester
 validates the format at startup.
 
-**2. Render the image SHA into the manifest and apply** — the manifest ships
+**2. Make the image public** (one-time, and it *must* happen before the first
+apply). GHCR packages are private on first publish and the Deployment carries
+no `imagePullSecret`, so until this is done every apply ends in
+`ImagePullBackOff: unauthorized`. Flip it once at
+`https://github.com/orgs/cachekit-io/packages/container/skyline-ingester/settings`
+→ *Danger Zone* → *Change visibility* → Public. (The repo itself is already
+public, so this exposes nothing new.) The alternative, if the image must stay
+private, is an `imagePullSecret` on the Deployment.
+
+**3. Render the image SHA into the manifest and apply** — the manifest ships
 with the `SET-COMMIT-SHA` sentinel instead of a mutable tag, so *every* apply
 (first or repeat) deploys an immutable commit-SHA reference and liveness-probe
-restarts re-run the same bytes. Applying the file unrendered fails closed
-(`ImagePullBackOff` on the sentinel) rather than silently resolving `latest`:
+restarts re-run the same bytes. Applying the file *unrendered* does not fail
+gracefully — under `Recreate` the old pod is terminated first, so the sentinel
+gives you `ImagePullBackOff` with nothing running. Always render via the guard
+below, never `kubectl apply -f deploy/k3s/` directly:
 
 Not every `main` commit has an image — the workflow only runs on pushes
 touching `ingester/**` — so take the SHA from the latest successful publish
@@ -56,32 +68,35 @@ else
 fi
 ```
 
-Upgrades and rollbacks are the same lines with a different published SHA —
-raise `-L` to list recent candidates. Optional hardening: a SHA *tag* is
-still repointable by anyone with `packages:write`; for a fully immutable
-reference resolve the tag's digest and render `:${sha}@sha256:<digest>`
-instead (digest: the `ingester-image` run summary, or
-`gh api /orgs/cachekit-io/packages/container/skyline-ingester/versions`).
+That `false` matters: without a nonzero status a failed render is merely
+advisory, you walk on to the verify step, and it passes green against the
+*old* pod that is still running — a deploy that deployed nothing, reported as
+success. `false` rather than `exit 1` for the same reason this block avoids
+`set -e`: an interactive paste must not kill the operator's shell.
 
-**3. Verify** — wait for the rollout, then for the forwarded port, then read
+Upgrades and rollbacks are the same lines with a different published SHA —
+raise `-L` to list recent candidates.
+
+**4. Verify** — wait for the rollout, then for the forwarded port, then read
 `/health`; it should report `jetstream_connected: true` within ~a minute:
 
 ```bash
 kubectl -n skyline rollout status deploy/skyline-ingester --timeout=180s
-kubectl -n skyline port-forward deploy/skyline-ingester 18080:8080 &
+kubectl -n skyline port-forward deploy/skyline-ingester 18080:8080 & pf=$!
 curl -s --retry 20 --retry-connrefused --retry-delay 1 \
   localhost:18080/health | python3 -m json.tool
-kill %1   # drop the port-forward — a leaked one blocks the next run of this step
+kill "$pf"   # drop the port-forward — a leaked one blocks the next run of this step
 ```
+
+(`$pf` rather than `%1`: job control is interactive-shell only, so `kill %1`
+fails with "no such job" the moment this block is pasted into a script.)
 
 A `503` body says *why* it is degraded (`jetstream_connected: false`); no
 response at all means the pod isn't up — check
 `kubectl -n skyline logs deploy/skyline-ingester`.
 
-If GHCR image pulls fail with `unauthorized`: the
-`ghcr.io/cachekit-io/skyline-ingester` package must be public (GHCR packages
-default to private on first publish — flip it once in the package settings),
-or add an `imagePullSecret` to the Deployment.
+If GHCR image pulls fail with `unauthorized`, step 2 was skipped or did not
+take — the package is still private.
 
 ## Semantics worth knowing (carried over from the Render deployment)
 

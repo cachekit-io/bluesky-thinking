@@ -65,7 +65,7 @@ All three SDKs address the cache with **interop/v1** keys (`bluesky-thinking:{op
 | `cachekit-rs` Worker **deploys and runs** on Cloudflare | ✅ live at `lab-735-skyline-spike.raywalker.workers.dev`, 180 KiB gzipped, 2 ms startup | [`spike/edge-worker/`](spike/edge-worker/) |
 | Cross-SDK key byte-compatibility | ✅ Python (PyPI), TS (npm), Rust (live CF edge) all derive `bluesky-thinking:posts_per_minute:230037de…` | [`docs/architecture.md`](docs/architecture.md#locked-key-convention) |
 | CachekitIO namespace + credentials | ✅ creds exist at `op://cachekit/ck-dev-bluesky-default`, round-trip verified against `api.dev.cachekit.io` (Stage 3) | [`docs/architecture.md`](docs/architecture.md#credentials) |
-| Free-tier hosts chosen | ✅ Render free web service (ingester; since moved to the lab k3s cluster, see *Deploy*) · Cloudflare Workers free (edge) | [`docs/architecture.md`](docs/architecture.md#hosting) |
+| Free-tier hosts chosen | ✅ Lab k3s cluster (ingester; Render free tier until 2026-08-29, LAB-2383) · Cloudflare Workers free (edge) | [`docs/architecture.md`](docs/architecture.md#hosting) |
 
 ## Cost table (AC-8)
 
