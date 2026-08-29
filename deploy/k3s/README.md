@@ -52,6 +52,7 @@ if [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
     deploy/k3s/skyline-ingester.yaml | kubectl apply -f -
 else
   echo "refusing to apply: no published image SHA (got '${sha}')" >&2
+  false   # nonzero status so a chained `&& kubectl rollout status ...` won't proceed
 fi
 ```
 
