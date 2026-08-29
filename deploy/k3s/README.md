@@ -30,28 +30,39 @@ kubectl -n skyline create secret generic skyline-ingester \
 `CACHEKIT_MASTER_KEY` is the 64-hex `encryption_key` field; the ingester
 validates the format at startup.
 
-**2. Apply the manifests, then pin the image** — the manifest ships with the
-`latest` tag only so the first apply works before any SHA is known; pin it to
-the current `main` commit immediately, so liveness-probe restarts re-run the
-same bytes instead of re-resolving a mutable tag:
+**2. Render the image SHA into the manifest and apply** — the manifest ships
+with the `SET-COMMIT-SHA` sentinel instead of a mutable tag, so *every* apply
+(first or repeat) deploys an immutable commit-SHA reference and liveness-probe
+restarts re-run the same bytes. Applying the file unrendered fails closed
+(`ImagePullBackOff` on the sentinel) rather than silently resolving `latest`:
+
+Not every `main` commit has an image — the workflow only runs on pushes
+touching `ingester/**` — so take the SHA from the latest successful publish
+run, not from `git rev-parse`:
 
 ```bash
-kubectl apply -f deploy/k3s/
-kubectl -n skyline set image deploy/skyline-ingester \
-  ingester="ghcr.io/cachekit-io/skyline-ingester:$(git rev-parse origin/main)"
+sha="$(gh run list -R cachekit-io/bluesky-thinking -w ingester-image \
+  -b main -e push -s success -L 1 --json headSha -q '.[0].headSha')"
+sed "s|skyline-ingester:SET-COMMIT-SHA|skyline-ingester:${sha}|" \
+  deploy/k3s/skyline-ingester.yaml | kubectl apply -f -
 ```
 
-Upgrades are the same `set image` line with a newer SHA (every push to `main`
-touching `ingester/**` publishes one); rollbacks are the same line with an
-older one.
+Upgrades and rollbacks are the same lines with a different published SHA —
+raise `-L` to list recent candidates. Optional hardening: a SHA *tag* is
+still repointable by anyone with `packages:write`; for a fully immutable
+reference resolve the tag's digest and render `:${sha}@sha256:<digest>`
+instead (digest: the `ingester-image` run summary, or
+`gh api /orgs/cachekit-io/packages/container/skyline-ingester/versions`).
 
-**3. Verify** — the pod should go Ready and `/health` should report
-`jetstream_connected: true` within ~a minute:
+**3. Verify** — wait for the rollout, then for the forwarded port, then read
+`/health`; it should report `jetstream_connected: true` within ~a minute:
 
 ```bash
-kubectl -n skyline get pods
+kubectl -n skyline rollout status deploy/skyline-ingester --timeout=180s
 kubectl -n skyline port-forward deploy/skyline-ingester 18080:8080 &
-curl -s localhost:18080/health | python3 -m json.tool
+curl -s --retry 20 --retry-connrefused --retry-delay 1 \
+  localhost:18080/health | python3 -m json.tool
+kill %1   # drop the port-forward — a leaked one blocks the next run of this step
 ```
 
 A `503` body says *why* it is degraded (`jetstream_connected: false`); no

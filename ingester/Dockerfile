@@ -8,8 +8,12 @@
 # Python is 3.12 to match ingester/.python-version — keep the two in sync when
 # bumping either. Dependencies are exactly uv.lock (--locked fails the build on
 # any drift, same contract as the old Render `uv sync --locked` build command).
+#
+# Both base images are pinned tag@digest (multi-arch manifest-list digests):
+# the tag is documentation, the digest is what builds — reproducible and
+# immune to tag repointing. Renovate (renovate.json) keeps the digests current.
 
-FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS builder
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim@sha256:e5b65587bce7de595f299855d7385fe7fca39b8a74baa261ba1b7147afa78e58 AS builder
 
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
@@ -27,7 +31,7 @@ COPY README.md ./
 COPY src ./src
 RUN uv sync --locked --no-dev --no-editable
 
-FROM python:3.12-slim-bookworm
+FROM python:3.12-slim-bookworm@sha256:0f5b26b9518d002b6173fd61daad821fa340635ebfec5bba471013f9ca114579
 
 # Non-root with a FIXED numeric UID: k8s `runAsNonRoot: true` rejects images
 # whose USER is a name (kubelet can't prove a name isn't root), so the UID

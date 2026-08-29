@@ -41,7 +41,9 @@ else
     # No curl -f here: a 503 carries the JSON that says WHY (Jetstream down),
     # which is exactly what separates "degraded" from "not deployed at all".
     health_body=$(mktemp)
-    health_code=$(curl -sS --max-time 10 -o "$health_body" -w '%{http_code}' "$INGESTER/health" || echo 000)
+    # On transport failure curl's -w already prints 000, so set the sentinel
+    # via assignment, not a second echo (|| echo would yield "000000").
+    health_code=$(curl -sS --max-time 10 -o "$health_body" -w '%{http_code}' "$INGESTER/health") || health_code=000
     if [ "$health_code" = "200" ]; then
         python3 -m json.tool "$health_body"
     elif [ "$health_code" = "000" ]; then

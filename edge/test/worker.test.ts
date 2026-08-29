@@ -15,6 +15,11 @@ const explodingDb: D1Database = {
   },
 };
 
+// Deliberately NOT credential-shaped (no ck_ prefix): the SDK only checks
+// truthiness, global fetch is stubbed, and a real-looking literal would trip
+// secret scanners for no test value.
+const TEST_API_KEY = 'unit-test-api-key';
+
 function stubFetch(status = 200): ReturnType<typeof vi.fn> {
   const mock = vi.fn(async () => new Response('ok', { status }));
   vi.stubGlobal('fetch', mock);
@@ -30,7 +35,7 @@ describe('scheduled: history capture is contained', () => {
       worker.scheduled(
         { scheduledTime: Date.UTC(2026, 7, 14, 14, 0, 0) },
         {
-          CACHEKIT_API_KEY: 'ck_test_not_a_real_key',
+          CACHEKIT_API_KEY: TEST_API_KEY,
           HISTORY: explodingDb,
         },
       ),
@@ -50,7 +55,7 @@ describe('scheduled: history capture is contained', () => {
     await worker.scheduled(
       { scheduledTime: Date.UTC(2026, 7, 14, 14, 10, 0) },
       {
-        CACHEKIT_API_KEY: 'ck_test_not_a_real_key',
+        CACHEKIT_API_KEY: TEST_API_KEY,
         HISTORY: explodingDb,
       },
     );

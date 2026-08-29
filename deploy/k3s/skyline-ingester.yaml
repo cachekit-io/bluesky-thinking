@@ -43,12 +43,17 @@ spec:
         runAsGroup: 10001
       containers:
         - name: ingester
-          # `latest` is the BOOTSTRAP tag only — the runbook pins this to a
-          # commit-SHA tag right after the first apply (deploy/k3s/README.md),
-          # so a liveness-probe restart re-runs the same bytes instead of
-          # silently pulling whatever `latest` means by then. IfNotPresent for
-          # the same reason: a restart must never be an implicit upgrade.
-          image: ghcr.io/cachekit-io/skyline-ingester:latest
+          # SET-COMMIT-SHA is a deliberate sentinel, not a real tag: the
+          # runbook (deploy/k3s/README.md) renders it to a commit-SHA tag at
+          # EVERY apply, so a reapply can never fall back to a mutable tag
+          # and a liveness-probe restart re-runs the same bytes. (A SHA tag
+          # is stable in practice but still repointable with packages:write;
+          # the runbook has an optional @sha256 digest render for full
+          # immutability.) Applying this file unrendered fails closed
+          # (ImagePullBackOff) instead of silently resolving a mutable tag.
+          # IfNotPresent for the same reason: a restart must never be an
+          # implicit upgrade.
+          image: ghcr.io/cachekit-io/skyline-ingester:SET-COMMIT-SHA
           imagePullPolicy: IfNotPresent
           ports:
             - name: health

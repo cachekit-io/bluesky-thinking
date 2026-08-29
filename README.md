@@ -111,9 +111,10 @@ publishes `ghcr.io/cachekit-io/skyline-ingester` (`latest` + commit SHA) on merg
 - **Ingester (lab k3s)**: manifests in [`deploy/k3s/`](deploy/k3s/); the full runbook (create the
   Secret from `op://cachekit/ck-dev-bluesky-default`, `kubectl apply`, verify the probe) is
   [`deploy/k3s/README.md`](deploy/k3s/README.md). The ingester **fails closed** without both
-  secrets. The running Deployment is pinned to a commit-SHA image tag; rolling out a new image is
-  an explicit `kubectl set image` with a newer SHA (runbook) — there is no git-push auto-deploy,
-  and a pod restart is never an implicit upgrade.
+  secrets. The manifest carries an image-tag sentinel that the runbook renders to a commit SHA at
+  every apply, so the deployed reference is always immutable; rolling out a new image is the same
+  render-and-apply with a newer SHA — there is no git-push auto-deploy, and a pod restart is never
+  an implicit upgrade.
 - **Edge + hot path (Cloudflare)**: `cd edge && npx wrangler deploy` ·
   `cd hotpath && npx wrangler deploy` (see each component's README for secrets).
 - **Verification**: [`stage4/verify.sh`](stage4/verify.sh) probes reachability, `X-Cache: HIT`,
