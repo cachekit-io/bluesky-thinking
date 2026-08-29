@@ -10,9 +10,11 @@
 set -euo pipefail
 
 EDGE="${EDGE_URL:-https://skyline-edge.raywalker.workers.dev}"
-# Guessed name-based URL; if the first Render deploy lands suffixed, update it
-# here AND in edge/wrangler.toml (INGESTER_HEALTH_URL).
-INGESTER="${INGESTER_URL:-https://skyline-ingester.onrender.com}"
+# The k3s ingester (deploy/k3s/) is egress-only — no public URL. To include
+# the /health check, port-forward and point INGESTER_URL at it:
+#   kubectl -n skyline port-forward deploy/skyline-ingester 18080:8080 &
+#   INGESTER_URL=http://localhost:18080 ./verify.sh
+INGESTER="${INGESTER_URL:-}"
 WINDOW="${WINDOW:-5m}"
 # Locked contract: 5m TTL is 60 s, republished at TTL/2 — anything older than
 # ~5 min means the pipeline stalled, not merely lagged.
@@ -33,23 +35,26 @@ hitrate() {
 fail=0
 
 echo "== ingester /health (AC-1: alive, Jetstream connected)"
-# No curl -f here: a 503 carries the JSON that says WHY (Jetstream down),
-# which is exactly what separates "degraded" from "not deployed at all".
-health_body=$(mktemp)
-health_code=$(curl -sS --max-time 90 -o "$health_body" -w '%{http_code}' "$INGESTER/health" || echo 000)
-if [ "$health_code" = "200" ]; then
-    python3 -m json.tool "$health_body"
-elif [ "$health_code" = "000" ]; then
-    echo "FAIL: $INGESTER/health unreachable (not deployed, or spun down and still cold-starting)"
-    fail=$((fail + 1))
+if [ -z "$INGESTER" ]; then
+    echo "SKIP: INGESTER_URL not set (the k3s ingester has no public URL — see the port-forward note above)"
 else
-    # 503 + JSON body = process up, Jetstream down; a Render "Not Found"
-    # page = the service doesn't exist at this URL yet.
-    echo "FAIL: /health returned $health_code:"
-    cat "$health_body"; echo
-    fail=$((fail + 1))
+    # No curl -f here: a 503 carries the JSON that says WHY (Jetstream down),
+    # which is exactly what separates "degraded" from "not deployed at all".
+    health_body=$(mktemp)
+    health_code=$(curl -sS --max-time 10 -o "$health_body" -w '%{http_code}' "$INGESTER/health" || echo 000)
+    if [ "$health_code" = "200" ]; then
+        python3 -m json.tool "$health_body"
+    elif [ "$health_code" = "000" ]; then
+        echo "FAIL: $INGESTER/health unreachable (pod down, or the port-forward dropped)"
+        fail=$((fail + 1))
+    else
+        # 503 + JSON body = process up, Jetstream down.
+        echo "FAIL: /health returned $health_code:"
+        cat "$health_body"; echo
+        fail=$((fail + 1))
+    fi
+    rm -f "$health_body"
 fi
-rm -f "$health_body"
 
 echo "== edge serves real data (epic AC-1: 200 + X-Cache: HIT from a non-origin POP)"
 headers=$(mktemp)

@@ -15,15 +15,16 @@ class Settings(BaseSettings):
     # (AC-6 groundwork). Absent -> the secure cache is disabled, everything else runs.
     cachekit_master_key: SecretStr | None = None
 
-    # PORT: injected by Render for its free-tier port scan; the /health
-    # listener (LAB-738 AC-0) binds it.
+    # PORT: the /health listener port (LAB-738 AC-0). The default matches the
+    # k3s containerPort (was Render-injected in the Render era).
     port: int = 8080
 
     jetstream_url: str = "wss://jetstream2.us-east.bsky.network/subscribe"
     publish_tick_seconds: float = 15.0
-    # 300 s (LAB-1933): with the hour-coarsened snapshot this is what fits the
-    # checkpoint inside Render's 5 GB/month outbound allowance (~46 MB/day at
-    # the measured ~159 KB wire size). Restart staleness bound: <= 5 min.
+    # 300 s (LAB-1933): sized to fit the hour-coarsened checkpoint inside
+    # Render's 5 GB/month outbound allowance (~46 MB/day at the measured
+    # ~159 KB wire size); the lab cluster is unmetered but the cadence stays —
+    # nothing needs it tighter. Restart staleness bound: <= 5 min.
     checkpoint_interval_seconds: float = 300.0
     top_n: int = 50
 

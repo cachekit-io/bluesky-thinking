@@ -21,8 +21,8 @@ safety-filtered under the transparent [Skyline public signal policy](docs/signal
 
 > Status: **live** — dashboard + API at
 > [`skyline-edge.raywalker.workers.dev`](https://skyline-edge.raywalker.workers.dev), ingester on
-> Render ([`skyline-ingester.onrender.com/health`](https://skyline-ingester.onrender.com/health)),
-> hot path at
+> the lab k3s cluster ([`deploy/k3s/`](deploy/k3s/) — egress-only, no public URL; `/health` is
+> reachable via `kubectl port-forward`), hot path at
 > [`skyline-hotpath.raywalker.workers.dev`](https://skyline-hotpath.raywalker.workers.dev).
 > Re-verify any time with
 > [`stage4/verify.sh`](stage4/verify.sh) (reachability, `X-Cache: HIT` from a non-origin POP,
@@ -34,7 +34,7 @@ safety-filtered under the transparent [Skyline public signal policy](docs/signal
 flowchart LR
     JS[Bluesky Jetstream\npublic WebSocket] -->|filtered JSON events| ING
 
-    subgraph Render free web service
+    subgraph Lab k3s cluster
         ING[Python ingester + aggregator\ncachekit-py 0.15\n5m / 1h / 24h windows\n+ /health on PORT]
     end
 
@@ -65,7 +65,7 @@ All three SDKs address the cache with **interop/v1** keys (`bluesky-thinking:{op
 | `cachekit-rs` Worker **deploys and runs** on Cloudflare | ✅ live at `lab-735-skyline-spike.raywalker.workers.dev`, 180 KiB gzipped, 2 ms startup | [`spike/edge-worker/`](spike/edge-worker/) |
 | Cross-SDK key byte-compatibility | ✅ Python (PyPI), TS (npm), Rust (live CF edge) all derive `bluesky-thinking:posts_per_minute:230037de…` | [`docs/architecture.md`](docs/architecture.md#locked-key-convention) |
 | CachekitIO namespace + credentials | ✅ creds exist at `op://cachekit/ck-dev-bluesky-default`, round-trip verified against `api.dev.cachekit.io` (Stage 3) | [`docs/architecture.md`](docs/architecture.md#credentials) |
-| Free-tier hosts chosen | ✅ Render free web service (ingester) · Cloudflare Workers free (edge) | [`docs/architecture.md`](docs/architecture.md#hosting) |
+| Free-tier hosts chosen | ✅ Render free web service (ingester; since moved to the lab k3s cluster, see *Deploy*) · Cloudflare Workers free (edge) | [`docs/architecture.md`](docs/architecture.md#hosting) |
 
 ## Cost table (AC-8)
 
@@ -75,41 +75,45 @@ against the providers' published limits, 2026-07-29.
 | Component | Host | Binding free-tier limit | Skyline's use | Cost |
 | :--- | :--- | :--- | :--- | ---: |
 | Jetstream feed | Bluesky public infra | none (public, no auth) | 1 outbound WebSocket | $0 |
-| Python ingester | Render free **web service**¹ | **750 instance-hrs/month, workspace-wide.** A 31-day month is 744 h, so exactly **one** always-on free service fits, with ~6 h to spare — a second would exhaust the budget and suspend every free service in the workspace | one always-on service, kept warm by the CF cron ping | $0 |
+| Python ingester | Lab k3s cluster ([`deploy/k3s/`](deploy/k3s/))¹ | n/a — self-hosted; the binding limits are the Deployment's own (256 MiB memory limit, measured under LAB-1775) | one single-replica Deployment, egress-only | $0 |
 | Edge API + dashboard + Rust-WASM hot path | Cloudflare Workers free plan | **100k requests/day and 10 ms CPU per invocation, shared across both Workers** (`skyline-edge` incl. its cron, `skyline-hotpath`) | cached reads, ≪ limits; the hot path is reached by service binding (its subrequests don't hit the public URL) | $0 |
-| Keep-alive cron | Cloudflare cron trigger on `skyline-edge` | cron triggers are free; each firing counts as a request in the same 100k/day budget; **5 cron expressions per account** — history capture rides this same schedule, adding none | ~144 pings/day (every 10 min) ≈ **4,464/month — 0.14 % of the daily request budget** | $0 |
+| History-capture cron | Cloudflare cron trigger on `skyline-edge` | cron triggers are free; each firing counts as a request in the same 100k/day budget; **5 cron expressions per account** | 24 fires/day (hourly) ≈ **744/month — 0.02 % of the daily request budget**. Was every 10 min when it doubled as the Render keep-alive ping; that job died with the Render deployment (LAB-2383) | $0 |
 | Snapshot history store | Cloudflare D1 (`skyline-history`) | **100k rows written/day · 5M rows read/day · 5 GB storage (account-wide)** | ≈250 writes/day, ≤40 MiB steady state, reads bounded by CacheKit + POP response caching — budgets in [`docs/history.md`](docs/history.md) | $0 |
 | Cache backend | CachekitIO (ours) | n/a — dogfood | one demo tenant | $0² |
 | **Total** | | | | **$0/mo** |
 
-¹ Web services are the **only** service type on Render's free tier — background workers and cron
-jobs are paid, which is why the ingester serves `GET /health` on `$PORT` and why the keep-alive is
-a Cloudflare cron, not a Render one. Free services spin down after 15 min without *inbound* traffic
-(the outbound Jetstream socket doesn't count); the cron ping supplies that traffic. Restarts lose
-in-memory window state, mitigated by checkpointing aggregation state into CacheKit (`posts_per_minute`
-and signal-candidate totals restore exactly; per-minute trending and language counters are
-top-K-truncated, so long-tail counts are approximate). That truncation is **steady-state, not just
-post-restart**: the free plan's 512 MiB is the binding constraint, so a minute bucket keeps every
-distinct key only while it is inside the live 5 m window and is then compacted to its top-K
-entries — see [`ingester/README.md`](ingester/README.md#window-retention-and-memory).
+¹ The ingester ran on a Render free web service until 2026-08-29 (account suspended; moved under
+LAB-2383). `GET /health` on `$PORT` — a Render web-service requirement originally — stays as the
+k3s liveness probe: 503 while Jetstream is disconnected, so a sustained-dead consumer gets the
+container restarted. Restarts lose in-memory window state, mitigated by checkpointing aggregation
+state into CacheKit (`posts_per_minute` and signal-candidate totals restore exactly; per-minute
+trending and language counters are top-K-truncated, so long-tail counts are approximate). That
+truncation is **steady-state, not just post-restart**: memory is bounded by design (measured under
+LAB-1775, encoded as the Deployment's 256 MiB limit), so a minute bucket keeps every distinct key
+only while it is inside the live 5 m window and is then compacted to its top-K entries — see
+[`ingester/README.md`](ingester/README.md#window-retention-and-memory).
 ² CachekitIO is the platform being showcased — we build, run, and own it. No third-party line item.
 
 Fly.io was evaluated and **rejected**: its free tier was discontinued in 2024 (new orgs get a
 one-time trial credit only; an always-on 256 MB machine bills ≈ $2/mo). Oracle Cloud's always-free
-VM was dropped in Stage 3 grooming (credit-card requirement); Render replaced it.
+VM was dropped in Stage 3 grooming (credit-card requirement); Render replaced it, and the lab k3s
+cluster replaced Render in turn when the account was suspended (LAB-2383, 2026-08-29).
 
 ## Deploy (Stage 4)
 
-Deploys are by hand by design — first Render setup and both Workers via `wrangler` (the one
-exception: after that first setup, the ingester rides Render's git-push auto-deploy, below).
-CI, however, gates all three components on PR + push
+Deploys are by hand by design — `kubectl` for the ingester, `wrangler` for both Workers.
+CI gates all three components on PR + push
 (path-filtered): [`ingester-qa`](.github/workflows/ingester-qa.yml),
-[`edge-qa`](.github/workflows/edge-qa.yml) and [`hotpath-qa`](.github/workflows/hotpath-qa.yml).
+[`edge-qa`](.github/workflows/edge-qa.yml) and [`hotpath-qa`](.github/workflows/hotpath-qa.yml),
+and [`ingester-image`](.github/workflows/ingester-image.yml) builds the container on PR and
+publishes `ghcr.io/cachekit-io/skyline-ingester` (`latest` + commit SHA) on merge to `main`.
 
-- **Ingester (Render)**: [`render.yaml`](render.yaml) is the blueprint. First deploy is manual —
-  Render dashboard → *New → Blueprint* → connect this repo, then paste the two secrets
-  (`CACHEKIT_API_KEY`, `CACHEKIT_MASTER_KEY` from `op://cachekit/ck-dev-bluesky-default`). The
-  ingester **fails closed** without both. Subsequent deploys ride Render's git-push auto-deploy.
+- **Ingester (lab k3s)**: manifests in [`deploy/k3s/`](deploy/k3s/); the full runbook (create the
+  Secret from `op://cachekit/ck-dev-bluesky-default`, `kubectl apply`, verify the probe) is
+  [`deploy/k3s/README.md`](deploy/k3s/README.md). The ingester **fails closed** without both
+  secrets. The running Deployment is pinned to a commit-SHA image tag; rolling out a new image is
+  an explicit `kubectl set image` with a newer SHA (runbook) — there is no git-push auto-deploy,
+  and a pod restart is never an implicit upgrade.
 - **Edge + hot path (Cloudflare)**: `cd edge && npx wrangler deploy` ·
   `cd hotpath && npx wrangler deploy` (see each component's README for secrets).
 - **Verification**: [`stage4/verify.sh`](stage4/verify.sh) probes reachability, `X-Cache: HIT`,
@@ -118,6 +122,7 @@ CI, however, gates all three components on PR + push
 ## Repository layout
 
 ```
+deploy/k3s/            — ingester deployment manifests + runbook for the lab k3s cluster (LAB-2383)
 docs/architecture.md   — the Stage-1 architecture spec (locked contract)
 docs/history.md        — aggregate-snapshot history: design decision, budgets, privacy/retention (LAB-1616)
 edge/                  — Stage-2 TS edge API + dashboard: CF Worker serving the five aggregates (interop/v1 reads, X-Cache + hit-rate stats) + Workers Assets dashboard

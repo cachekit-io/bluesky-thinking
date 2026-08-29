@@ -1,0 +1,105 @@
+# Skyline ingester on the lab k3s cluster (LAB-2383) — replaces the Render
+# free-tier deployment (/render.yaml, deleted in the same change).
+#
+# The workload is egress-only: outbound WebSocket to Jetstream plus HTTPS to
+# the CacheKit dev API. Nothing dials in, so there is deliberately no Service
+# and no Ingress — the liveness probe hits the container port directly.
+#
+# Prerequisite: the `skyline-ingester` Secret in this namespace (see
+# deploy/k3s/README.md). The ingester FAILS CLOSED without both keys.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: skyline
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: skyline-ingester
+  namespace: skyline
+  labels:
+    app: skyline-ingester
+spec:
+  replicas: 1
+  # Recreate, not RollingUpdate: the ingester is a single writer — two live
+  # replicas would double-publish every window and race the checkpoint. The
+  # gap during a rollout is safe: checkpoint restore (PR #18) bounds the
+  # staleness to CHECKPOINT_INTERVAL_SECONDS (300 s).
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: skyline-ingester
+  template:
+    metadata:
+      labels:
+        app: skyline-ingester
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        # Matches the image's fixed numeric UID (ingester/Dockerfile) —
+        # runAsNonRoot requires a numeric identity the kubelet can verify.
+        runAsUser: 10001
+        runAsGroup: 10001
+      containers:
+        - name: ingester
+          # `latest` is the BOOTSTRAP tag only — the runbook pins this to a
+          # commit-SHA tag right after the first apply (deploy/k3s/README.md),
+          # so a liveness-probe restart re-runs the same bytes instead of
+          # silently pulling whatever `latest` means by then. IfNotPresent for
+          # the same reason: a restart must never be an implicit upgrade.
+          image: ghcr.io/cachekit-io/skyline-ingester:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: health
+              containerPort: 8080
+          env:
+            # Values carried over from the deleted render.yaml.
+            - name: CACHEKIT_API_URL
+              value: "https://api.dev.cachekit.io"
+            # dev instance is outside the SDK's SSRF allowlist
+            - name: CACHEKIT_ALLOW_CUSTOM_HOST
+              value: "true"
+            - name: JETSTREAM_URL
+              value: "wss://jetstream2.us-east.bsky.network/subscribe"
+            - name: CACHEKIT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: skyline-ingester
+                  key: CACHEKIT_API_KEY
+            - name: CACHEKIT_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: skyline-ingester
+                  key: CACHEKIT_MASTER_KEY
+          resources:
+            # LAB-1775 (PR #17) window-compaction measurements: 41.6 MiB
+            # steady / 48.0 MiB peak over a full 24 h window; 140.9 MiB peak
+            # in the measured worst case (quiet tail, then a burst into the
+            # uncompacted head). 256 Mi is ~1.8x that worst case — and it is
+            # also the backstop for the one documented unbounded case (a feed
+            # that stalls event time can grow a single head bucket without
+            # bound): OOMKill -> restart -> checkpoint restore.
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+          # Replaces Render's health-check restart semantics: /health returns
+          # 503 while Jetstream is disconnected, so a dead consumer inside a
+          # live process still gets restarted. 6 failures x 30 s = a sustained
+          # ~3 min outage before the kill — ordinary Jetstream reconnects
+          # never trip it, and checkpoint restore makes the restart safe.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: health
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 6
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

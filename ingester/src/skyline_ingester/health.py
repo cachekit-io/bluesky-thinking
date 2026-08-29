@@ -1,9 +1,10 @@
 """$PORT health endpoint (LAB-738 AC-0).
 
-Render's free tier hosts web services only, and a free web service must
-answer HTTP on $PORT or the deploy's port scan fails. This module is the
-ingester's whole HTTP surface: ``GET /health``, liveness only — no aggregate
-data, no key material.
+Originated as a Render free-tier web-service requirement (answer HTTP on
+$PORT or the deploy's port scan fails); since the k3s move (LAB-2383) it is
+the livenessProbe's target (deploy/k3s/). This module is the ingester's whole
+HTTP surface: ``GET /health``, liveness only — no aggregate data, no key
+material.
 
 Hand-rolled on ``asyncio.start_server`` so the listener shares the ingest
 event loop without blocking it, and without adding a web framework for one
@@ -115,11 +116,11 @@ class HealthState:
             "last_publish_age_seconds": age(self.last_publish_at),
             "uptime_seconds": round(now - self.started_at, 1),
         }
-        # Additive only (LAB-1775 AC-6): Render's health check and the edge
-        # keep-alive cron read the status code, never the body. These make an
-        # OOM recurrence diagnosable from the public endpoint alone — memory
-        # growth and its cause (bucket/key counts) in one payload — without
-        # Render dashboard access, which no agent has.
+        # Additive only (LAB-1775 AC-6): the k8s livenessProbe reads the
+        # status code, never the body. These make an OOM recurrence
+        # diagnosable from the endpoint alone — memory growth and its cause
+        # (bucket/key counts) in one payload — without cluster access, which
+        # no agent has.
         body["rss_mib"] = _rss_mib()
         body["rss_peak_mib"] = _peak_rss_mib()
         if self._store is not None:

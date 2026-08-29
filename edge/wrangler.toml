@@ -28,19 +28,15 @@ compatibility_flags = ["nodejs_compat"]
 # explicit config-level opt-out (trusted operator config, same trust model as
 # the Python CACHEKIT_ALLOW_CUSTOM_HOST env var).
 CACHEKIT_API_URL = "https://api.dev.cachekit.io"
-# Keep-alive target (LAB-738 AC-1): the Render free tier spins the ingester
-# down after 15 min without inbound traffic, and its Jetstream socket is
-# outbound so it doesn't count. Render URLs are name-based but globally
-# unique — if the first deploy lands with a suffixed URL, update this value
-# AND the INGESTER_URL default in stage4/verify.sh.
-INGESTER_HEALTH_URL = "https://skyline-ingester.onrender.com/health"
 
-# Cron keep-alive (LAB-738 AC-1): ping the ingester's /health every 10
-# minutes from the edge worker's scheduled handler. Cloudflare cron triggers
-# are free; Render's own cron jobs are not. ~4.3k invocations/month, counted
-# in the README cost table.
+# Snapshot-history capture (LAB-1616, docs/history.md): hourly, because
+# captureTick only acts at minute 0 (daily tier + retention sweep at UTC
+# midnight ride the same fire). This cron used to be the Render keep-alive
+# ping every 10 minutes; the ingester now runs on the lab k3s cluster
+# (deploy/k3s/), which never idles it out, so the ping is gone (LAB-2383)
+# and capture — previously a passenger — owns the schedule.
 [triggers]
-crons = ["*/10 * * * *"]
+crons = ["0 * * * *"]
 
 # Stage 3 (AC-3): the Rust-WASM hot path, reached via service binding — not
 # a public URL. Every served aggregate is integrity-checked there first.
@@ -48,10 +44,9 @@ crons = ["*/10 * * * *"]
 binding = "HOTPATH"
 service = "skyline-hotpath"
 
-# Snapshot-history store (LAB-1616, docs/history.md). Capture rides the
-# existing cron above — captureTick no-ops except at minute 0 — so this adds
-# zero cron expressions (free plan allows five per ACCOUNT, shared with every
-# other Worker). Schema changes ship as files in ./migrations; apply with
+# Snapshot-history store (LAB-1616, docs/history.md), fed by the hourly cron
+# above (one expression of the free plan's five per ACCOUNT, shared with
+# every other Worker). Schema changes ship as files in ./migrations; apply with
 #   npx wrangler d1 migrations apply skyline-history --remote
 # BEFORE deploying a Worker that depends on them.
 [[d1_databases]]

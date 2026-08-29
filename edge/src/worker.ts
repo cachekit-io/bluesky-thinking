@@ -14,8 +14,6 @@ interface Env {
   CACHEKIT_API_KEY?: string;
   /** Override for the dev instance / tests; defaults to https://api.cachekit.io. */
   CACHEKIT_API_URL?: string;
-  /** Keep-alive target — the Render ingester's /health (wrangler [vars]). */
-  INGESTER_HEALTH_URL?: string;
   /** Service binding to the Rust-WASM hot-path Worker (wrangler [[services]]). */
   HOTPATH?: HotpathBinding;
   /** D1 snapshot-history store (wrangler [[d1_databases]], LAB-1616). */
@@ -136,57 +134,29 @@ export default {
   },
 
   /**
-   * One cron, two independent jobs, run CONCURRENTLY:
-   *
-   * - Keep-alive ping (LAB-738 AC-1): Render's free tier spins the ingester
-   *   down after 15 minutes without inbound traffic, and its Jetstream
-   *   socket is outbound so it doesn't qualify. One GET to /health every 10
-   *   minutes keeps the writer up — and wakes it (~1 min cold start) if it
-   *   ever did spin down, hence the generous timeout.
-   * - History capture (LAB-1616): captureTick no-ops except at minute 0, so
-   *   no extra cron expression is spent (free plan: five per ACCOUNT).
-   *
-   * Concurrent on purpose: capture buckets against controller.scheduledTime
-   * but its staleness guard reads the aggregates at wall time, so making it
-   * wait behind a 90-second keep-alive timeout would eat most of the skew
-   * budget for nothing. Each job catches its own failures — neither can
-   * cost the other.
+   * History capture (LAB-1616), the cron's only job since LAB-2383: the
+   * keep-alive ping existed solely for Render's free-tier inbound-idle
+   * spin-down, and the ingester now runs on the lab k3s cluster, which has
+   * no such semantics (its restarts come from the Deployment's liveness
+   * probe). The schedule is hourly (wrangler [triggers]) because captureTick
+   * no-ops off minute 0 anyway — same set of effective fires as the old
+   * every-10-minutes keep-alive schedule, minus the five no-ops an hour.
    */
   async scheduled(controller: unknown, env: Env): Promise<void> {
-    const keepAlive = async (): Promise<void> => {
-      if (!env.INGESTER_HEALTH_URL) {
-        console.log('keep-alive: INGESTER_HEALTH_URL not set, skipping');
-        return;
-      }
-      try {
-        const res = await fetch(env.INGESTER_HEALTH_URL, { signal: AbortSignal.timeout(90_000) });
-        // 503 = process up but Jetstream down — still logged, still keep-alive
-        // traffic; the ping's job is inbound bytes, not adjudicating health.
-        // Structured fields, same idiom as hotpath_verify in handler.ts.
-        console.log('keep-alive', { url: env.INGESTER_HEALTH_URL, status: res.status });
-      } catch (err) {
-        console.error('keep-alive_failed', { url: env.INGESTER_HEALTH_URL, err: String(err) });
-      }
-    };
-
-    const capture = async (): Promise<void> => {
-      if (!env.HISTORY || !env.CACHEKIT_API_KEY) {
-        console.log('history: HISTORY binding or CACHEKIT_API_KEY not set, skipping capture');
-        return;
-      }
-      try {
-        const scheduledTime = (controller as { scheduledTime?: number } | null)?.scheduledTime;
-        const report = await captureTick(
-          ensureBackend(env),
-          env.HISTORY,
-          scheduledTime ?? Date.now(),
-        );
-        if (report.boundary !== 'none') console.log('history_capture', report);
-      } catch (err) {
-        console.error('history_capture_failed', { err: String(err) });
-      }
-    };
-
-    await Promise.all([keepAlive(), capture()]);
+    if (!env.HISTORY || !env.CACHEKIT_API_KEY) {
+      console.log('history: HISTORY binding or CACHEKIT_API_KEY not set, skipping capture');
+      return;
+    }
+    try {
+      const scheduledTime = (controller as { scheduledTime?: number } | null)?.scheduledTime;
+      const report = await captureTick(
+        ensureBackend(env),
+        env.HISTORY,
+        scheduledTime ?? Date.now(),
+      );
+      if (report.boundary !== 'none') console.log('history_capture', report);
+    } catch (err) {
+      console.error('history_capture_failed', { err: String(err) });
+    }
   },
 };

@@ -85,12 +85,13 @@ payload served through `/api/{operation}` is first integrity-checked there
 
 Misses never call the hot path: 404 + `X-Cache: MISS`, unchanged.
 
-History capture (LAB-1616) rides the keep-alive cron: at each top of hour the
-scheduled handler snapshots the five `1h` aggregates into the `HISTORY` D1
-binding (daily tier + retention sweep at UTC midnight). Capture and keep-alive
-are failure-isolated from each other, and capture failures produce gaps plus
-structured `history_gap` / `history_capture_failed` logs — never invented
-points. Full design + operating contract: [`docs/history.md`](../docs/history.md).
+History capture (LAB-1616) is the hourly cron's only job (the Render
+keep-alive ping it used to share the schedule with died with the Render
+deployment, LAB-2383): at each top of hour the scheduled handler snapshots the
+five `1h` aggregates into the `HISTORY` D1 binding (daily tier + retention
+sweep at UTC midnight). Capture failures produce gaps plus structured
+`history_gap` / `history_capture_failed` logs — never invented points. Full
+design + operating contract: [`docs/history.md`](../docs/history.md).
 
 ## Deploy
 
