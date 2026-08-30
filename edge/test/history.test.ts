@@ -177,7 +177,7 @@ const HOUR_MS = Date.UTC(2026, 7, 14, 14, 0, 0);
 const MIDNIGHT_MS = Date.UTC(2026, 7, 14, 0, 0, 0);
 
 describe('captureTick boundaries', () => {
-  it('no-ops entirely off the hour boundary (the keep-alive fires)', async () => {
+  it('no-ops entirely off the hour boundary (defense against off-minute fires)', async () => {
     const { db, sqlite } = freshDb();
     const report = await captureTick(liveBackend(0), db, Date.UTC(2026, 7, 14, 14, 10, 0));
     expect(report).toEqual({ boundary: 'none' });

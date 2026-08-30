@@ -10,9 +10,11 @@
 set -euo pipefail
 
 EDGE="${EDGE_URL:-https://skyline-edge.raywalker.workers.dev}"
-# Guessed name-based URL; if the first Render deploy lands suffixed, update it
-# here AND in edge/wrangler.toml (INGESTER_HEALTH_URL).
-INGESTER="${INGESTER_URL:-https://skyline-ingester.onrender.com}"
+# The k3s ingester (deploy/k3s/) is egress-only — no public URL. To include
+# the /health check, port-forward and point INGESTER_URL at it:
+#   kubectl -n skyline port-forward deploy/skyline-ingester 18080:8080 &
+#   INGESTER_URL=http://localhost:18080 ./verify.sh
+INGESTER="${INGESTER_URL:-}"
 WINDOW="${WINDOW:-5m}"
 # Locked contract: 5m TTL is 60 s, republished at TTL/2 — anything older than
 # ~5 min means the pipeline stalled, not merely lagged.
@@ -31,25 +33,32 @@ hitrate() {
 [ "${1:-}" = "hitrate" ] && hitrate "${2:-3600}"
 
 fail=0
+skipped=0
 
 echo "== ingester /health (AC-1: alive, Jetstream connected)"
-# No curl -f here: a 503 carries the JSON that says WHY (Jetstream down),
-# which is exactly what separates "degraded" from "not deployed at all".
-health_body=$(mktemp)
-health_code=$(curl -sS --max-time 90 -o "$health_body" -w '%{http_code}' "$INGESTER/health" || echo 000)
-if [ "$health_code" = "200" ]; then
-    python3 -m json.tool "$health_body"
-elif [ "$health_code" = "000" ]; then
-    echo "FAIL: $INGESTER/health unreachable (not deployed, or spun down and still cold-starting)"
-    fail=$((fail + 1))
+if [ -z "$INGESTER" ]; then
+    echo "SKIP: INGESTER_URL not set (the k3s ingester has no public URL — see the port-forward note above)"
+    skipped=$((skipped + 1))
 else
-    # 503 + JSON body = process up, Jetstream down; a Render "Not Found"
-    # page = the service doesn't exist at this URL yet.
-    echo "FAIL: /health returned $health_code:"
-    cat "$health_body"; echo
-    fail=$((fail + 1))
+    # No curl -f here: a 503 carries the JSON that says WHY (Jetstream down),
+    # which is exactly what separates "degraded" from "not deployed at all".
+    health_body=$(mktemp)
+    # On transport failure curl's -w already prints 000, so set the sentinel
+    # via assignment, not a second echo (|| echo would yield "000000").
+    health_code=$(curl -sS --max-time 10 -o "$health_body" -w '%{http_code}' "$INGESTER/health") || health_code=000
+    if [ "$health_code" = "200" ]; then
+        python3 -m json.tool "$health_body"
+    elif [ "$health_code" = "000" ]; then
+        echo "FAIL: $INGESTER/health unreachable (pod down, or the port-forward dropped)"
+        fail=$((fail + 1))
+    else
+        # 503 + JSON body = process up, Jetstream down.
+        echo "FAIL: /health returned $health_code:"
+        cat "$health_body"; echo
+        fail=$((fail + 1))
+    fi
+    rm -f "$health_body"
 fi
-rm -f "$health_body"
 
 echo "== edge serves real data (epic AC-1: 200 + X-Cache: HIT from a non-origin POP)"
 headers=$(mktemp)
@@ -57,8 +66,10 @@ if body=$(curl -fsS -D "$headers" "$EDGE/api/posts_per_minute?window=$WINDOW"); 
     echo "$body"
     grep -i '^x-cache:' "$headers" || { echo "FAIL: no X-Cache header"; fail=$((fail + 1)); }
     grep -iq '^x-cache: *hit' "$headers" || { echo "FAIL: expected X-Cache: HIT"; fail=$((fail + 1)); }
-    # cf-ray's trailing colo code is the serving POP — the request's own
-    # evidence it was served outside the ingester's origin region (Oregon).
+    # cf-ray's trailing colo code is the serving POP, printed as evidence of
+    # edge distribution. (It used to be read as "served outside the origin
+    # region" — that was Render's Oregon; the ingester is now in Ray's
+    # homelab and is not an origin the edge ever dials.)
     grep -i '^cf-ray:' "$headers" || true
 else
     echo "FAIL: $EDGE/api/posts_per_minute?window=$WINDOW did not return 200"
@@ -81,9 +92,16 @@ echo "== hit/miss counters (epic AC-4 raw material; per-isolate scope)"
 curl -fsS "$EDGE/api/stats" || { echo "FAIL: /api/stats unreachable"; fail=$((fail + 1)); }
 echo
 
-if [ "$fail" -eq 0 ]; then
-    echo "ALL CHECKS PASSED"
-else
+if [ "$fail" -ne 0 ]; then
     echo "FAILED: $fail check(s)"
     exit 1
+elif [ "$skipped" -ne 0 ]; then
+    # Never print a pass for a run that didn't check. Losing the ingester is
+    # precisely the failure this script exists to catch, and AC-1 is the only
+    # check that looks at it — a green banner over a skipped AC-1 is the
+    # report you'd most regret trusting. Port-forward and set INGESTER_URL.
+    echo "INCOMPLETE: $skipped check(s) SKIPPED, the rest passed"
+    exit 1
+else
+    echo "ALL CHECKS PASSED"
 fi

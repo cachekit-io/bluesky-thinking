@@ -31,17 +31,16 @@ provides that) — the SDK does not read this service's `.env` file:
 | `CACHEKIT_API_URL` | `https://api.cachekit.io` | Backend endpoint (the demo uses the dev instance, `https://api.dev.cachekit.io`). |
 | `CACHEKIT_ALLOW_CUSTOM_HOST` | unset | Required `true` for the dev instance — its hostname is outside the SDK's SSRF allowlist. |
 | `JETSTREAM_URL` | `wss://jetstream2.us-east.bsky.network/subscribe` | Jetstream endpoint. |
-| `PORT` | `8080` | `/health` listener port (Render injects this on deploy). |
+| `PORT` | `8080` | `/health` listener port (the k3s liveness probe targets it). |
 | `PUBLISH_TICK_SECONDS` | `15` | Publish-loop poll interval. |
-| `CHECKPOINT_INTERVAL_SECONDS` | `300` | Window-state checkpoint cadence — also the restart staleness bound. 300 s is what fits the checkpoint inside Render's 5 GB/month egress allowance (see *Checkpointing*). |
+| `CHECKPOINT_INTERVAL_SECONDS` | `300` | Window-state checkpoint cadence — also the restart staleness bound. 300 s was originally sized to fit Render's 5 GB/month egress allowance (see *Checkpointing*); the lab cluster has no egress cap, but the cadence stays — nothing needs it tighter. |
 | `TOP_N` | `50` | Entries kept in trending lists. |
 
 ## Health endpoint (Stage 4, LAB-738)
 
-The ingester's whole HTTP surface is `GET /health` on `$PORT` — it exists because Render's free
-tier only hosts *web services*, which must answer HTTP, and because the keep-alive cron
-(`edge/wrangler.toml [triggers]`) needs something to ping. Liveness only, no aggregate data, no
-key material:
+The ingester's whole HTTP surface is `GET /health` on `$PORT` (it originated as a Render
+free-tier web-service requirement; today it is the k3s liveness probe's target). Liveness only,
+no aggregate data, no key material:
 
 ```json
 {"status": "ok", "jetstream_connected": true, "events_seen": 12345,
@@ -52,18 +51,19 @@ key material:
 ```
 
 Returns **503** whenever the Jetstream socket is down, so a dead consumer inside a live process is
-visible from outside — Render's health check then restarts the service, and the CacheKit
-checkpoint makes that restart safe. Deployment blueprint: [`../render.yaml`](../render.yaml).
+visible from outside — the k3s `livenessProbe` turns a sustained 503 (~3 min) into a container
+restart, and the CacheKit checkpoint makes that restart safe. Deployment manifests and runbook:
+[`../deploy/k3s/`](../deploy/k3s/).
 
 The last five fields are memory diagnostics (LAB-1775). They are **sizes, never contents** — a
 count of live counter keys, not the keys — so the endpoint stays liveness-only. `rss_mib` is the
 current resident set (`/proc/self/statm`, `null` off Linux) and `rss_peak_mib` the high-water mark
 (`resource.getrusage`); both are stdlib, no new dependency. The two come from different kernel
 accounting paths and `ru_maxrss` updates lazily, so `rss_mib` can read a little *above*
-`rss_peak_mib` — that is expected, not a bug. They exist because Render's memory
-graph is behind a dashboard login that no agent has, so an OOM recurrence has to be diagnosable
-from the public endpoint alone: `counter_keys` climbing without bound is the signature of the
-LAB-1775 regression returning.
+`rss_peak_mib` — that is expected, not a bug. They exist because the host's memory graph
+(Render's dashboard then, the lab cluster now) sits behind access no agent has, so an OOM
+recurrence has to be diagnosable from the endpoint alone: `counter_keys` climbing without bound
+is the signature of the LAB-1775 regression returning.
 
 ## Window retention and memory
 

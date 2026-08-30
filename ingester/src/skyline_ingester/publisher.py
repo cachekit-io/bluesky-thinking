@@ -37,7 +37,8 @@ def _no_encryption() -> EncryptionConfig:
     # (which it is whenever the secure cache is on). The interop aggregates are
     # contract-locked to PLAIN MessagePack — encrypted bytes would be unreadable
     # by the TS/Rust readers — and the checkpoint must survive a restart on a
-    # different host (Render), which a machine-local encryption UUID would break.
+    # different host (a rescheduled k3s pod), which a machine-local encryption
+    # UUID would break.
     return EncryptionConfig(enabled=False)
 
 

@@ -747,7 +747,7 @@ def test_a_full_24h_window_stays_inside_its_absolute_key_budget():
     # budget rises with it. So pin the DERIVED sum against the absolute number
     # the 512 MiB arithmetic was actually done against (200 keys/bucket x 1440
     # buckets x ~299 B/key = ~82 MiB of retained counters). Raising any K, or
-    # adding a key family, fails here rather than in a Render OOM alert.
+    # adding a key family, fails here rather than as a production OOMKill.
     assert budget_per_bucket <= 200, (
         f"compaction constants now admit {budget_per_bucket} keys/bucket; redo the memory arithmetic before raising this"
     )
@@ -778,7 +778,7 @@ def test_the_uncompacted_head_stays_inside_a_ledger_derived_key_budget(monkeypat
     # rests on it. Derived from the constant and driven through add() rather than
     # hand-built buckets, so the path that actually mints keys is the path under
     # test: a ledger raise, or a new key family riding along on an accepted
-    # contribution, fails here instead of in a Render OOM alert.
+    # contribution, fails here instead of as a production OOMKill.
     #
     # Two keys per accepted contribution, not one: an accepted hashtag mints its
     # tags entry AND its tag_labels entry. That factor was missing from the

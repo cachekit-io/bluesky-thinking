@@ -299,7 +299,9 @@ def _day_store(span_minutes: int = WINDOW_MINUTES["24h"]) -> WindowStore:
 def test_snapshot_coarsens_aged_buckets_to_hour_units():
     # THE bound this ticket delivers: a full 24h window serializes as ~85 units
     # (last hour minute-keyed + one unit per aged hour), not ~1,441 — the size
-    # cut that fits the checkpoint inside Render's 5 GB/month egress allowance.
+    # cut that was sized against Render's 5 GB/month egress allowance. The lab
+    # k3s cluster is unmetered, but the bound still holds and still matters:
+    # it is what keeps the checkpoint small enough to write every 300 s.
     store = _day_store()
     snap = store.snapshot(NOW)
     minutes = [minute for minute, _d in snap["buckets"]]

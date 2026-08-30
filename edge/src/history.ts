@@ -3,9 +3,9 @@
  *
  * Persists versioned, aggregate-only snapshots of the live interop values
  * into D1 so 7-day and 30-day charts and baselines exist after the rolling
- * windows move on. Capture runs on the edge cron — the Render ingester is
- * never involved, so history failure cannot touch current publishing (and
- * adds zero Render egress, the binding constraint since LAB-1894).
+ * windows move on. Capture runs on the edge cron — the ingester is never
+ * involved, so history failure cannot touch current publishing (and added
+ * zero ingester egress, the binding constraint in the Render era, LAB-1894).
  *
  * Tiering is capture-time, not post-hoc: the hourly tier snapshots the `1h`
  * rolling window at each top of hour, the daily tier snapshots the `24h`
@@ -478,14 +478,13 @@ async function enforceRetention(
 /**
  * One cron tick. Decides from the scheduled fire time which boundaries are
  * due: minute 0 → hourly capture; additionally hour 0 UTC → daily capture
- * plus the retention sweep. Any other fire is a no-op — the caller runs
- * this on the existing every-10-minutes keep-alive schedule (a new cron
- * expression would spend one of the account's five free-plan cron slots
- * for nothing).
+ * plus the retention sweep. Any other fire is a no-op — the schedule is
+ * hourly (wrangler [triggers]) so that never happens in production, but the
+ * guard stays as defense against manual triggers and schedule edits.
  *
  * Errors are counted and logged per operation inside captureTier; this
  * function only throws if D1 itself fails the retention sweep, and the
- * caller isolates even that from the keep-alive.
+ * caller contains even that (scheduled() must never reject).
  */
 export async function captureTick(
   backend: Backend,
