@@ -52,8 +52,9 @@ kubectl -n skyline patch serviceaccount default \
   -p '{"imagePullSecrets":[{"name":"ghcr-creds"}]}'
 ```
 
-No `ghcr-creds` to copy? Mint a **fine-grained PAT carrying only
-`read:packages`** on `cachekit-io`, feed it to `kubectl create secret
+No `ghcr-creds` to copy? Mint a **classic PAT carrying only
+`read:packages`** with access to `cachekit-io` packages (GHCR does not
+accept fine-grained PATs), feed it to `kubectl create secret
 docker-registry ghcr-creds --docker-server=ghcr.io ...`, then run the same
 `patch` line above. Never park a broad-scope session token (e.g.
 `gh auth token`) in a cluster secret: it outlives the shell, sits
@@ -136,10 +137,13 @@ causes, in order of likelihood: the secret is missing from the `skyline`
 namespace; it is not attached to the default ServiceAccount
 (`kubectl -n skyline get sa default -o jsonpath='{.imagePullSecrets}'` must
 name `ghcr-creds`); or the token inside a *copied* secret lacks
-`read:packages` on `cachekit-io` (expired or rotated at the source). After
-fixing any of them, `kubectl -n skyline rollout restart
-deploy/skyline-ingester` — the admission controller injects SA pull secrets
-only at pod *creation*, so the already-stuck pod never picks up the fix.
+`read:packages` on `cachekit-io` (expired or rotated at the source). In the
+token case, re-run the copy/apply from step 2 first — the copied secret is an
+independent snapshot, so restarting without refreshing it just hands the new
+pod the same dead credentials. After fixing any of them, `kubectl -n skyline
+rollout restart deploy/skyline-ingester` — the admission controller injects
+SA pull secrets only at pod *creation*, so the already-stuck pod never picks
+up the fix.
 
 ## Semantics worth knowing (carried over from the Render deployment)
 
