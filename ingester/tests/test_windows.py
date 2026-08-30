@@ -85,6 +85,34 @@ def test_lang_mix_shares_sum_to_one(store):
     assert set(langs) == {"en", "ja", "es", "und"}
     assert abs(sum(langs.values()) - 1.0) < 0.01
     assert langs["en"] == 0.5  # 6 of 12
+    # No long tail here (4 distinct langs, well under top-25) — no residual key.
+    assert "other_share" not in value
+
+
+def test_lang_mix_real_other_token_survives_the_residual():
+    # LAB-1632 panel reproduction: a real `other` token (a post can declare any
+    # 2-8 char lowercase primary subtag, "other" included — extract.py has no
+    # vocabulary check) held a top-25 share of 1000/1036 ~= 0.9652. Pre-fix,
+    # the synthetic residual was written into langs["other"] AFTER the top-25
+    # map was built, clobbering that share down to the tiny rest/total value.
+    store = WindowStore()
+    for index in range(1000):
+        store.add(_post(NOW_MIN, lang="other"), source_id=f"did:plc:other-{index}")
+    for index in range(10):
+        store.add(_post(NOW_MIN, lang="en"), source_id=f"did:plc:en-{index}")
+    # 26 distinct filler languages (1 post each) push total distinct langs to
+    # 28 — past the top-25 cutoff — so 3 of them spill into the residual.
+    for index in range(26):
+        lang = f"f{chr(97 + index // 26)}{chr(97 + index % 26)}"
+        store.add(_post(NOW_MIN, lang=lang), source_id=f"did:plc:filler-{index}")
+
+    value = store.build_value("lang_mix", "5m", NOW)
+    total = 1000 + 10 + 26
+    langs = value["langs"]
+
+    assert langs["other"] == round(1000 / total, 4)  # real token's share, untouched
+    assert value["other_share"] == round(3 / total, 4)  # synthetic residual, sibling key
+    assert abs(sum(langs.values()) + value["other_share"] - 1.0) < 0.01
 
 
 def test_posts_per_minute(store):

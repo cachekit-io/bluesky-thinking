@@ -57,6 +57,42 @@ describe('Skyline dashboard payload renderers', () => {
     expect(renderOperation(operation, payload)).toContain(expected);
   });
 
+  it('renders a real "other" language token distinct from the long-tail other_share sibling (LAB-1632)', () => {
+    const markup = renderOperation('lang_mix', {
+      window: '5m',
+      generated_at,
+      total_posts: 1036,
+      langs: { other: 0.9652, en: 0.0097 },
+      other_share: 0.0029,
+    });
+    // both rows render: the real "other" token's share survives, and the
+    // synthetic residual appears as its own "Other languages" row.
+    expect(markup).toContain('96.5%');
+    expect(markup).toContain('0.3%');
+    expect(markup).toContain('Other languages');
+  });
+
+  it('keeps the other_share row visible when ten real languages outrank it (LAB-2077)', () => {
+    const langs = Object.fromEntries(
+      ['en', 'ja', 'pt', 'de', 'es', 'fr', 'ko', 'nl', 'it', 'pl'].map((lang, i) => [
+        lang,
+        0.099 - i * 0.001,
+      ]),
+    );
+    const markup = renderOperation('lang_mix', {
+      window: '5m',
+      generated_at,
+      total_posts: 1036,
+      langs,
+      other_share: 0.0029,
+    });
+    // the residual claims the tenth slot; the evicted language's share (pl, 9.0%)
+    // folds into it so displayed shares never understate: 0.090 + 0.0029 → 9.3%.
+    expect(markup).toContain('Other languages');
+    expect(markup).not.toContain('>pl<');
+    expect(markup).toContain('9.3%');
+  });
+
   it('rejects missing or wrong-shape rankings instead of calling them empty', () => {
     expect(renderOperation('trending_hashtags', { hashtags: {} })).toContain(
       'unexpected payload shape',

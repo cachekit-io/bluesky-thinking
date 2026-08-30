@@ -29,7 +29,7 @@ const seed: Record<string, unknown> = {
       { uri: 'https://cachekit.io', count: 89 },
     ],
   },
-  lang_mix: { ...base, langs: { en: 0.62, ja: 0.14, pt: 0.09, other: 0.15 } },
+  lang_mix: { ...base, langs: { en: 0.62, ja: 0.14, pt: 0.09 }, other_share: 0.15 },
   posts_per_minute: { ...base, ppm: 204.8 },
   top_emoji: {
     ...base,

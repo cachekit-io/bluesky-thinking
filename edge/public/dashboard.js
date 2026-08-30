@@ -50,6 +50,8 @@ function freshnessLabel(seconds) {
   return `${minutes} minute${minutes === 1 ? '' : 's'}`;
 }
 
+const MAX_ROWS = 10;
+
 /** @param {unknown[]} items @param {string} nameKey @param {string} valueKey @param {{ percent?: boolean, links?: boolean }} [options] */
 function rankedRows(items, nameKey, valueKey, { percent = false, links = false } = {}) {
   const rows = items
@@ -60,7 +62,7 @@ function rankedRows(items, nameKey, valueKey, { percent = false, links = false }
       return typeof name === 'string' && isNumber(value) ? [{ name, value }] : [];
     })
     .sort((a, b) => b.value - a.value)
-    .slice(0, 10);
+    .slice(0, MAX_ROWS);
   const firstRow = rows[0];
   if (!firstRow) return null;
 
@@ -82,17 +84,19 @@ function rankedRows(items, nameKey, valueKey, { percent = false, links = false }
     .join('')}</ol>`;
 }
 
-/** @param {AggregatePayload} langs */
-function languageRows(langs) {
-  return rankedRows(
-    Object.entries(langs).map(([lang, share]) => ({
-      lang: lang === 'other' ? 'Other languages' : lang,
-      share,
-    })),
-    'lang',
-    'share',
-    { percent: true },
+/** @param {AggregatePayload} langs @param {number} [otherShare] long-tail residual, a sibling of `langs` (LAB-1632) */
+function languageRows(langs, otherShare) {
+  const rows = Object.entries(langs).flatMap(([lang, share]) =>
+    isNumber(share) ? [{ lang, share }] : [],
   );
+  if (isNumber(otherShare)) {
+    // reserve one of rankedRows' MAX_ROWS slots so the residual survives the cut, and fold
+    // any evicted languages' shares into it — "Other languages" means everything not shown (LAB-2077)
+    rows.sort((a, b) => b.share - a.share);
+    for (const evicted of rows.splice(MAX_ROWS - 1)) otherShare += evicted.share;
+    rows.push({ lang: 'Other languages', share: otherShare });
+  }
+  return rankedRows(rows, 'lang', 'share', { percent: true });
 }
 
 /** @param {string} uri */
@@ -131,7 +135,7 @@ export function renderOperation(operation, data) {
     case 'lang_mix':
       if (!isAggregatePayload(data.langs)) return renderMalformed();
       return rankingOrEmpty(
-        languageRows(data.langs),
+        languageRows(data.langs, isNumber(data.other_share) ? data.other_share : undefined),
         'No language mix is available for this window yet.',
       );
     case 'top_emoji':

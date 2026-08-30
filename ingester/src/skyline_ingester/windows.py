@@ -545,13 +545,20 @@ class WindowStore:
             value["links"] = [{"uri": u, "count": c} for u, c in m.links.most_common(top_n)]
             value["domains"] = [{"domain": d, "count": c} for d, c in m.domains.most_common(top_n)]
         elif operation == "lang_mix":
+            # The long-tail residual lives in a sibling key, never inside `langs`.
+            # extract.normalize_language only ever emits real tokens into `langs`
+            # (a matched BCP-47 primary subtag, or "und"); a residual key placed
+            # inside that same map is always a string a post could also declare
+            # (LAB-1632: a real "other" token collided with and was clobbered by
+            # the synthetic residual). Keeping it out of the map is what makes
+            # the collision structural, not just a different magic string.
             total = sum(m.langs.values())
             top = m.langs.most_common(25)
             langs = {lang: round(c / total, 4) for lang, c in top} if total else {}
             rest = total - sum(c for _, c in top)
-            if rest:
-                langs["other"] = round(rest / total, 4)
             value["langs"] = langs
+            if rest:
+                value["other_share"] = round(rest / total, 4)
         elif operation == "posts_per_minute":
             value["ppm"] = round(m.n / WINDOW_MINUTES[window], 3)
         elif operation == "top_emoji":

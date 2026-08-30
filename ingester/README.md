@@ -160,7 +160,7 @@ Values are interop/v1 plain MessagePack, top-level maps with string keys. All ca
 | :--- | :--- |
 | `trending_hashtags` | `hashtags`: `[{tag, display, count}]`, top 50; `tag` remains canonical and `display` preserves the most frequent spelling |
 | `trending_links` | `links`: `[{uri, count}]` and `domains`: `[{domain, count}]`, top 50 |
-| `lang_mix` | `langs`: `{lang: share}` (floats summing to ~1; top 25 + `other`) |
+| `lang_mix` | `langs`: `{lang: share}`, top 25 real tokens only; plus `other_share` (float, sibling key, present only if there's a long tail) — floats sum to ~1 |
 | `posts_per_minute` | `ppm`: float |
 | `top_emoji` | `emoji`: `[{emoji, count}]`, top 25 (ZWJ sequences count once) |
 
