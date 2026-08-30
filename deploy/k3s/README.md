@@ -31,14 +31,34 @@ kubectl -n skyline create secret generic skyline-ingester \
 `CACHEKIT_MASTER_KEY` is the 64-hex `encryption_key` field; the ingester
 validates the format at startup.
 
-**2. Make the image public** (one-time, and it *must* happen before the first
-apply). GHCR packages are private on first publish and the Deployment carries
-no `imagePullSecret`, so until this is done every apply ends in
-`ImagePullBackOff: unauthorized`. Flip it once at
-`https://github.com/orgs/cachekit-io/packages/container/skyline-ingester/settings`
-→ *Danger Zone* → *Change visibility* → Public. (The repo itself is already
-public, so this exposes nothing new.) The alternative, if the image must stay
-private, is an `imagePullSecret` on the Deployment.
+**2. Wire image-pull credentials** (one-time, and it *must* happen before the
+first apply). The `cachekit-io` org **disables public packages** (the
+visibility dialog greys out *Public* with "Setting is disabled by organization
+administrators"), so the image is private and every pull needs GHCR
+credentials — without them each apply ends in `ImagePullBackOff:
+unauthorized`.
+
+Copy the lab cluster's existing GHCR pull secret (`ghcr-creds` in
+`arc-runners`) into `skyline` and attach it to the namespace's **default
+ServiceAccount** rather than the Deployment: the ServiceAccount admission
+controller merges SA pull secrets into every pod at creation, so a later
+`kubectl apply` of this manifest can't strip them:
+
+```bash
+kubectl -n arc-runners get secret ghcr-creds -o json \
+  | jq '.metadata = {name: "ghcr-creds", namespace: "skyline"}' \
+  | kubectl apply -f -
+kubectl -n skyline patch serviceaccount default \
+  -p '{"imagePullSecrets":[{"name":"ghcr-creds"}]}'
+```
+
+No `ghcr-creds` to copy? Mint a **fine-grained PAT carrying only
+`read:packages`** on `cachekit-io`, feed it to `kubectl create secret
+docker-registry ghcr-creds --docker-server=ghcr.io ...`, then run the same
+`patch` line above. Never park a broad-scope session token (e.g.
+`gh auth token`) in a cluster secret: it outlives the shell, sits
+unencrypted in the k3s datastore, and its blast radius is the GitHub org —
+not this cluster.
 
 **3. Render the image SHA into the manifest and apply** — the manifest ships
 with the `SET-COMMIT-SHA` sentinel instead of a mutable tag, so *every* apply
@@ -111,8 +131,15 @@ Jetstream hasn't connected yet and a forwarder that isn't listening yet. A 503
 that survives it is a real dead consumer. No response at all means the pod
 isn't up — check `kubectl -n skyline logs deploy/skyline-ingester`.
 
-If GHCR image pulls fail with `unauthorized`, step 2 was skipped or did not
-take — the package is still private.
+If GHCR image pulls fail with `unauthorized`, step 2 did not take. Three
+causes, in order of likelihood: the secret is missing from the `skyline`
+namespace; it is not attached to the default ServiceAccount
+(`kubectl -n skyline get sa default -o jsonpath='{.imagePullSecrets}'` must
+name `ghcr-creds`); or the token inside a *copied* secret lacks
+`read:packages` on `cachekit-io` (expired or rotated at the source). After
+fixing any of them, `kubectl -n skyline rollout restart
+deploy/skyline-ingester` — the admission controller injects SA pull secrets
+only at pod *creation*, so the already-stuck pod never picks up the fix.
 
 ## Semantics worth knowing (carried over from the Render deployment)
 
