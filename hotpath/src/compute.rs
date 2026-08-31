@@ -220,12 +220,33 @@ mod tests {
 
     // ── Integrity verification ────────────────────────────────────────────────
 
+    // Byte-locked checksum vectors (LAB-1602): expected values are hard-coded
+    // literals, same discipline as `derives_byte_locked_keys`, so a
+    // cachekit-core bump that moves the xxHash3-64 primitive fails here
+    // instead of needing a human to hand-diff crate sources (LAB-1492).
+    /// xxHash3-64 of the canonical interop msgpack for `{"rust": 42}`.
+    const RUST_42_XXH3: &str = "573a48b587ebc7b9";
+
+    #[test]
+    fn checksum_matches_byte_locked_literals() {
+        // Empty-input value matches the upstream xxHash3-64 reference vector —
+        // independently verifiable, not derived from this implementation.
+        assert_eq!(hex::encode(cachekit_core::checksum(b"")), "2d06800538d394c2");
+        assert_eq!(hex::encode(cachekit_core::checksum(b"skyline")), "867903f9a19a1915");
+
+        // Pin the payload bytes first so a serialization change fails loudly
+        // here rather than masquerading as a checksum change below.
+        let payload = count_slice(&[("rust", 42)]);
+        assert_eq!(payload, b"\x81\xa4rust\x2a");
+        assert_eq!(hex::encode(cachekit_core::checksum(&payload)), RUST_42_XXH3);
+    }
+
     #[test]
     fn verify_reports_checksum_and_validity() {
         let payload = count_slice(&[("rust", 42)]);
         let report = verify_payload(&payload, None);
         assert_eq!(report.size_bytes, payload.len());
-        assert_eq!(report.xxh3_64, hex::encode(cachekit_core::checksum(&payload)));
+        assert_eq!(report.xxh3_64, RUST_42_XXH3);
         assert!(report.valid_interop_value);
         assert_eq!(report.interop_error, None);
         assert_eq!(report.matches_expected, None);
@@ -234,7 +255,7 @@ mod tests {
     #[test]
     fn verify_detects_corruption_via_expected_checksum() {
         let payload = count_slice(&[("rust", 42)]);
-        let good = cachekit_core::checksum(&payload);
+        let good = parse_checksum_hex(RUST_42_XXH3).unwrap();
         assert_eq!(verify_payload(&payload, Some(good)).matches_expected, Some(true));
 
         let mut corrupted = payload.clone();
@@ -258,11 +279,9 @@ mod tests {
 
     #[test]
     fn checksum_hex_roundtrip_and_rejection() {
-        let payload = b"skyline";
-        let hex_str = hex::encode(cachekit_core::checksum(payload));
         assert_eq!(
-            parse_checksum_hex(&hex_str).unwrap(),
-            cachekit_core::checksum(payload)
+            parse_checksum_hex("867903f9a19a1915").unwrap(),
+            cachekit_core::checksum(b"skyline")
         );
         assert!(parse_checksum_hex("zz").is_err());
         assert!(parse_checksum_hex("abcd").is_err()); // 4 bytes short
