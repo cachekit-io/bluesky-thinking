@@ -134,6 +134,8 @@ take — the package is still private.
   spin-down and is gone; the edge cron that remains (`0 * * * *`) is history
   capture only and never touches the ingester.
 - **Memory bounds are measured, not guessed.** Requests/limits encode the
+  LAB-2586 on-cluster findings (full-24h-window working set plus the glibc
+  transient high-water the publish ticks ratchet up, which the original
   LAB-1775 / [#17](https://github.com/cachekit-io/bluesky-thinking/pull/17)
-  window-compaction findings — see the comment block in
+  minutes-scale measurement could not see) — see the comment block in
   [`skyline-ingester.yaml`](skyline-ingester.yaml).

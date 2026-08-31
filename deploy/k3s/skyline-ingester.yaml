@@ -97,18 +97,38 @@ spec:
                   name: skyline-ingester
                   key: CACHEKIT_MASTER_KEY
           resources:
-            # LAB-1775 (PR #17) window-compaction measurements: 41.6 MiB
-            # steady / 48.0 MiB peak over a full 24 h window; 140.9 MiB peak
-            # in the measured worst case (quiet tail, then a burst into the
-            # uncompacted head). 256 Mi is ~1.8x that worst case — and it is
-            # also the backstop for the one documented unbounded case (a feed
-            # that stalls event time can grow a single head bucket without
-            # bound): OOMKill -> restart -> checkpoint restore.
+            # LAB-2586 sizing, measured on this cluster against live Jetstream.
+            # (Supersedes the LAB-1775 figures this block used to cite: those
+            # were taken under podman over minutes, before any window had
+            # filled — a measurement-window artifact, and the reason the first
+            # deploy OOMKilled every ~22 h at 256Mi.)
+            #
+            # Live window state is bounded and behaves exactly as LAB-1775
+            # designed it: ~45 MiB of counter keys at hour 14.5 (159k keys via
+            # /health x the measured ~299 B/key), filling to ~75 MiB at the
+            # full 24 h window, on a ~62 MiB process baseline. The working set
+            # k8s kills on is larger: every publish tick copies the retained
+            # window and folds it into a merge accumulator inside a to_thread
+            # worker, and glibc keeps each worker heap at its transient
+            # high-water (measured amplification ~2.4x live window state;
+            # LAB-2586 probes reproduced the ratchet and showed it plateaus
+            # once the window stops growing — it is high-water, not a leak).
+            # Working set therefore climbs ~16 -> 7 MiB/h (decelerating) while
+            # the window fills, projecting a plateau of ~260-310 MiB at 24 h+
+            # — above the old 256Mi limit, which is why the pod always died at
+            # ~22 h, just before the plateau could appear.
+            #
+            # Limit: 512Mi = projected plateau + >65% headroom (also absorbs a
+            # checkpoint landing concurrently with a 24 h merge), and still
+            # the backstop for the one documented unbounded case (a feed that
+            # stalls event time): OOMKill -> restart -> checkpoint restore.
+            # Request: expected steady state, rounded up — scheduling honesty
+            # on the one-node cluster, not a bin-packing constraint.
             requests:
               cpu: 100m
-              memory: 128Mi
+              memory: 320Mi
             limits:
-              memory: 256Mi
+              memory: 512Mi
           # Replaces Render's health-check restart semantics: /health returns
           # 503 while Jetstream is disconnected, so a dead consumer inside a
           # live process still gets restarted. 6 failures x 30 s = a sustained
