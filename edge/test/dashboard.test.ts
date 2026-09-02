@@ -164,7 +164,13 @@ class ElementStub {
 describe('dashboard bootstrap smoke test', () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  it('boots from the module tag and renders live aggregate cards', async () => {
+  /**
+   * Stub the DOM + network, import a fresh module instance, return the render
+   * targets. `load` must be a literal `import('../public/dashboard.js?<tag>')`:
+   * Vite's dynamic-import-vars rule needs a literal file-extension suffix, so a
+   * templated `?${tag}` cannot be resolved — pass one literal import per test.
+   */
+  async function boot(statsPayload: unknown, load: () => Promise<unknown>) {
     const grid = new ElementStub();
     const tiles = new ElementStub();
     const cards = new Map<string, ElementStub>();
@@ -195,8 +201,7 @@ describe('dashboard bootstrap smoke test', () => {
       setInterval: vi.fn(),
     });
     vi.stubGlobal('fetch', async (input: string) => {
-      if (input === '/api/stats')
-        return Response.json({ hits: 1, misses: 0, errors: 0, hit_rate: 1 });
+      if (input === '/api/stats') return Response.json(statsPayload);
       const operation = input.match(/\/api\/([^?]+)/)?.[1];
       const data = {
         posts_per_minute: { generated_at, total_posts: 3, ppm: 0.6 },
@@ -216,11 +221,29 @@ describe('dashboard bootstrap smoke test', () => {
       return Response.json({ data }, { headers: { 'x-cache': 'HIT', 'x-hotpath': 'verified' } });
     });
 
-    await import('../public/dashboard.js?smoke');
-    await vi.waitFor(() =>
-      expect(cards.get('card-trending_hashtags')?.innerHTML).toContain('cachekit'),
+    await load();
+    await vi.waitFor(() => {
+      expect(cards.get('card-trending_hashtags')?.innerHTML).toContain('cachekit');
+      expect(tiles.innerHTML).not.toBe('');
+    });
+    return { grid, tiles };
+  }
+
+  it('boots from the module tag and renders live aggregate cards', async () => {
+    const { grid, tiles } = await boot(
+      { hits: 1, misses: 0, errors: 0, hit_rate: 1 },
+      () => import('../public/dashboard.js?smoke'),
     );
     expect(grid.innerHTML).toContain('card-trending_hashtags');
     expect(tiles.innerHTML).toContain('Key availability (this isolate)');
+    expect(tiles.innerHTML).toContain('100.0%');
+  });
+
+  it('treats a missing hit_rate as stats unavailable, never NaN%', async () => {
+    const { tiles } = await boot(
+      { hits: 1, misses: 0, errors: 0 },
+      () => import('../public/dashboard.js?nan'),
+    );
+    expect(tiles.innerHTML).toContain('Stats unavailable');
   });
 });

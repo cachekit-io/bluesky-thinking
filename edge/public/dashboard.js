@@ -408,7 +408,8 @@ function initDashboard() {
         !response.ok ||
         !isNumber(stats.hits) ||
         !isNumber(stats.misses) ||
-        !isNumber(stats.errors)
+        !isNumber(stats.errors) ||
+        (stats.hit_rate !== null && !isNumber(stats.hit_rate))
       )
         throw new Error('stats unavailable');
       if (version !== refreshVersion) return;

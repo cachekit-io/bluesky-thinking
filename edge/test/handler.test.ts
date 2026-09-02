@@ -161,6 +161,7 @@ describe('GET /api/stats', () => {
     const res = await handleApi(api('/api/stats'), backend);
 
     expect(res.status).toBe(200);
+    expect(res.headers.get('cache-control')).toBe('no-store');
     expect(await res.json()).toEqual({
       hits: 1,
       misses: 2,
