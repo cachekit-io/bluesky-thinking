@@ -245,5 +245,6 @@ describe('dashboard bootstrap smoke test', () => {
       () => import('../public/dashboard.js?nan'),
     );
     expect(tiles.innerHTML).toContain('Stats unavailable');
+    expect(tiles.innerHTML).not.toContain('NaN%');
   });
 });
