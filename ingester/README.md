@@ -116,6 +116,16 @@ At a full 1,440-bucket window and observed live cardinality that is **41.6 MiB s
 peak** including the `merged()` transient, versus **438.5 MiB / 634.2 MiB** with compaction
 disabled (`--no-compaction`) — the latter over the 512 MiB limit on retained structure alone.
 
+> **On-cluster reality check (LAB-2586).** The soak figures above measure retained structure plus
+> one merge transient, single-threaded, over minutes. On the lab k3s deployment the container
+> working set is larger and grows for the whole first 24 h: live counter keys match the model
+> (159k keys ≈ 45 MiB at the measured ~299 B/key, at hour 14.5, via `/health`), but each publish
+> tick's full-window copy + merge fold runs in an `asyncio.to_thread` worker, and glibc keeps each
+> worker heap at its transient high-water — measured ~2.4× live window state, a ratchet that
+> plateaus only once the window stops growing (~260–310 MiB projected at 24 h+, LAB-2586 probes).
+> [`deploy/k3s/skyline-ingester.yaml`](../deploy/k3s/skyline-ingester.yaml) sizes for that
+> on-cluster reality, not for these single-threaded soak numbers.
+
 Worst case, measured: a quiet tail then a burst into the uncompacted head, which is when the
 contribution ledger is empty and a single minute can draw on the whole of it —
 
