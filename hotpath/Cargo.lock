@@ -141,6 +141,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "cachekit-core"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93adc5646956ba8da140f4179a02e60a2cc7a401b83ebb1270cc4d03748e1fac"
+dependencies = [
+ "byteorder",
+ "bytes",
+ "cbindgen",
+ "serde",
+ "serde_bytes",
+ "thiserror 2.0.19",
+ "xxhash-rust",
+]
+
+[[package]]
 name = "cachekit-rs"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -149,7 +164,7 @@ dependencies = [
  "async-trait",
  "blake2",
  "bytes",
- "cachekit-core",
+ "cachekit-core 0.4.0",
  "getrandom 0.2.17",
  "hex",
  "js-sys",
@@ -1169,7 +1184,7 @@ name = "skyline-hotpath"
 version = "0.1.0"
 dependencies = [
  "base64",
- "cachekit-core",
+ "cachekit-core 0.6.0",
  "cachekit-rs",
  "hex",
  "serde",
