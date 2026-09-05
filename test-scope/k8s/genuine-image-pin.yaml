@@ -1,0 +1,16 @@
+# K8s deployment — this SHOULD trigger "Pin container images by digest in Helm/K8s"
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-app
+spec:
+  replicas: 1
+  template:
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.25
+          ports:
+            - containerPort: 80
+        - name: sidecar
+          image: envoyproxy/envoy:v1.28.0

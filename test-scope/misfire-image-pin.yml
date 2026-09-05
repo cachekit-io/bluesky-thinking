@@ -1,0 +1,11 @@
+# docker-compose — NOT k8s. This should NOT trigger "Pin container images by digest in Helm/K8s"
+version: "3.8"
+services:
+  db:
+    image: postgres:15
+    ports:
+      - "5432:5432"
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
