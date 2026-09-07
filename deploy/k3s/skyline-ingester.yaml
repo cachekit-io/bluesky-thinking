@@ -114,11 +114,15 @@ spec:
             # LAB-2586 probes reproduced the ratchet and showed it plateaus
             # once the window stops growing — it is high-water, not a leak).
             # Working set therefore climbs ~16 -> 7 MiB/h (decelerating) while
-            # the window fills, projecting a plateau of ~260-310 MiB at 24 h+
-            # — above the old 256Mi limit, which is why the pod always died at
-            # ~22 h, just before the plateau could appear.
+            # the window fills — above the old 256Mi limit by hour ~22, which
+            # is why the pod always died there, just before the plateau could
+            # appear. Observed at this limit (LAB-2266 canary, two pods,
+            # 2026-09-01 -> 09-04): 298-319 MiB at 24 h, then a plateau of
+            # ~345-372 MiB from hour 26 to hour 46, still creeping ~1.4 -> 0.5
+            # MiB/h (decelerating). That is ~20% above the ~260-310 MiB the
+            # LAB-2586 probes projected; zero OOMKills.
             #
-            # Limit: 512Mi = projected plateau + >65% headroom (also absorbs a
+            # Limit: 512Mi = observed plateau + ~27% headroom (also absorbs a
             # checkpoint landing concurrently with a 24 h merge), and still
             # the backstop for the one documented unbounded case (a feed that
             # stalls event time): OOMKill -> restart -> checkpoint restore.

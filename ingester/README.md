@@ -60,10 +60,10 @@ count of live counter keys, not the keys — so the endpoint stays liveness-only
 current resident set (`/proc/self/statm`, `null` off Linux) and `rss_peak_mib` the high-water mark
 (`resource.getrusage`); both are stdlib, no new dependency. The two come from different kernel
 accounting paths and `ru_maxrss` updates lazily, so `rss_mib` can read a little *above*
-`rss_peak_mib` — that is expected, not a bug. They exist because the host's memory graph
-(Render's dashboard then, the lab cluster now) sits behind access no agent has, so an OOM
-recurrence has to be diagnosable from the endpoint alone: `counter_keys` climbing without bound
-is the signature of the LAB-1775 regression returning.
+`rss_peak_mib` — that is expected, not a bug. They exist so that an OOM recurrence is
+diagnosable from the endpoint alone, without the host's memory graph (Render's dashboard then,
+the lab cluster's VictoriaMetrics now): `counter_keys` climbing without bound is the signature of
+the LAB-1775 regression returning.
 
 ## Window retention and memory
 
@@ -122,7 +122,10 @@ disabled (`--no-compaction`) — the latter over the 512 MiB limit on retained s
 > (159k keys ≈ 45 MiB at the measured ~299 B/key, at hour 14.5, via `/health`), but each publish
 > tick's full-window copy + merge fold runs in an `asyncio.to_thread` worker, and glibc keeps each
 > worker heap at its transient high-water — measured ~2.4× live window state, a ratchet that
-> plateaus only once the window stops growing (~260–310 MiB projected at 24 h+, LAB-2586 probes).
+> plateaus only once the window stops growing. Observed on the cluster at the 512 MiB limit
+> (LAB-2266 canary, two pods, 2026-09-01 → 09-04): 298–319 MiB at 24 h, then ~345–372 MiB from
+> hour 26 to hour 46, creeping ~1.4 → 0.5 MiB/h and decelerating — ~20 % above the ~260–310 MiB
+> the LAB-2586 probes projected, with zero OOMKills.
 > [`deploy/k3s/skyline-ingester.yaml`](../deploy/k3s/skyline-ingester.yaml) sizes for that
 > on-cluster reality, not for these single-threaded soak numbers.
 
