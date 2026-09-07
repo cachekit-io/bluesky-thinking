@@ -412,13 +412,17 @@ function initDashboard() {
         !response.ok ||
         !isNumber(stats.hits) ||
         !isNumber(stats.misses) ||
-        !isNumber(stats.errors)
+        !isNumber(stats.errors) ||
+        (stats.hit_rate !== null && !isNumber(stats.hit_rate))
       )
         throw new Error('stats unavailable');
       if (version !== refreshVersion) return;
       const rate = stats.hit_rate === null ? '—' : `${(stats.hit_rate * 100).toFixed(1)}%`;
       dashboardTiles.innerHTML = [
-        ['Cache hit rate', rate],
+        // LAB-1618 copy: this is aggregate-key availability seen by one
+        // worker isolate (counters reset on recycle) — not an SDK L1 rate,
+        // and POP cache hits never reach the isolate at all.
+        ['Key availability (this isolate)', rate],
         ['Hits', fmt(stats.hits)],
         ['Misses', fmt(stats.misses)],
         ['Errors', fmt(stats.errors)],
