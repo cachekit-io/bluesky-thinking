@@ -10,6 +10,17 @@
         "*"
       ],
       "automerge": false
+    },
+    {
+      "description": "Hold wasm-bindgen. hotpath pins it exactly, and the Worker build in hotpath-qa.yml runs a wasm-bindgen-cli of that exact version, from a pinned, checksummed download (the pins are recorded in docs/architecture.md, Build-chain pins). The CLI rejects a Wasm file built by any other wasm-bindgen version, so a Renovate update to the crate alone fails the wasm32 check and takes its whole group with it. It waits under Pending Approval on the Dependency Dashboard instead, for a human to move the crate pin and the CLI pin together. Vulnerability updates are not held: Renovate forces dependencyDashboardApproval off for them, and their PR still needs the CLI pin moved by hand before the wasm32 check passes.",
+      "matchManagers": [
+        "cargo"
+      ],
+      "matchPackageNames": [
+        "wasm-bindgen"
+      ],
+      "groupName": null,
+      "dependencyDashboardApproval": true
     }
   ]
 }
