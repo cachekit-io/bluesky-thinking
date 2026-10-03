@@ -33,12 +33,13 @@ def _no_l1() -> L1CacheConfig:
 
 
 def _no_encryption() -> EncryptionConfig:
-    # cachekit auto-enables encryption when CACHEKIT_MASTER_KEY is in the env
-    # (which it is whenever the secure cache is on). The interop aggregates are
-    # contract-locked to PLAIN MessagePack — encrypted bytes would be unreadable
-    # by the TS/Rust readers — and the checkpoint must survive a restart on a
-    # different host (a rescheduled k3s pod), which a machine-local encryption
-    # UUID would break.
+    # Required by cachekit >= 0.21.0: with CACHEKIT_MASTER_KEY in the env (it
+    # is whenever the secure cache is on), a cache that states no encryption
+    # intent raises ConfigurationError at decoration. These caches must stay
+    # plaintext: the interop aggregates are contract-locked to PLAIN MessagePack
+    # (the TS/Rust readers hold no key), and the checkpoint must survive a
+    # restart on a different host (a rescheduled pod), which a
+    # machine-local encryption UUID would break.
     return EncryptionConfig(enabled=False)
 
 
