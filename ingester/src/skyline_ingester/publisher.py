@@ -34,8 +34,9 @@ def _no_l1() -> L1CacheConfig:
 
 def _no_encryption() -> EncryptionConfig:
     # Required by cachekit >= 0.21.0: with CACHEKIT_MASTER_KEY in the env (it
-    # is whenever the secure cache is on), a cache that states no encryption
-    # intent raises ConfigurationError at decoration. These caches must stay
+    # is whenever the secure cache is on), a cache that omits `encryption=` (or
+    # passes an EncryptionConfig without `enabled=`) raises ConfigurationError
+    # at decoration; an explicit enabled=False does not. These caches must stay
     # plaintext: the interop aggregates are contract-locked to PLAIN MessagePack
     # (the TS/Rust readers hold no key), and the checkpoint must survive a
     # restart on a different host (a rescheduled pod), which a

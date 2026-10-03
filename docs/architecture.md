@@ -135,7 +135,7 @@ CACHEKIT_API_KEY=op://cachekit/ck-dev-bluesky-default/credential
 CACHEKIT_MASTER_KEY=op://cachekit/ck-dev-bluesky-default/encryption_key
 
 # .op.apikey.env — API key only (interop/evidence tooling; with the master key
-# in env, cachekit >= 0.21.0 refuses any cache that states no encryption intent)
+# in env, cachekit >= 0.21.0 refuses any cache that omits `encryption=`)
 CACHEKIT_API_KEY=op://cachekit/ck-dev-bluesky-default/credential
 ```
 
