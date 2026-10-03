@@ -7,8 +7,8 @@ Anything not locked here is a Stage-2 implementation choice.
 
 | Component | Language / SDK | Pinned version | Host |
 | :--- | :--- | :--- | :--- |
-| Ingester + window aggregator | Python / `cachekit` | `0.15.0` (PyPI) | Lab k3s cluster ([`deploy/k3s/`](../deploy/k3s/)) |
-| Edge API | TypeScript / `@cachekit-io/cachekit` | `0.1.3` (npm) | Cloudflare Workers (free plan) |
+| Ingester + window aggregator | Python / `cachekit` | `0.21.0` (PyPI) | Lab k3s cluster ([`deploy/k3s/`](../deploy/k3s/)) |
+| Edge API | TypeScript / `@cachekit-io/cachekit` | `0.1.5` (npm) | Cloudflare Workers (free plan) |
 | Edge hot path | Rust / `cachekit-rs` | `0.7.0` (crates.io) | Cloudflare Workers, `wasm32-unknown-unknown` |
 | Dashboard | static HTML/JS | — | Cloudflare Workers Assets |
 | Cache backend | CachekitIO | `api.dev.cachekit.io` | ours (dogfood) |
@@ -134,8 +134,8 @@ references (no secret material); recreate them at the repo root as:
 CACHEKIT_API_KEY=op://cachekit/ck-dev-bluesky-default/credential
 CACHEKIT_MASTER_KEY=op://cachekit/ck-dev-bluesky-default/encryption_key
 
-# .op.apikey.env — API key only (interop/evidence tooling; the master key in
-# env auto-enables encryption, which interop-mode scripts must not inherit)
+# .op.apikey.env — API key only (interop/evidence tooling; with the master key
+# in env, cachekit >= 0.21.0 refuses any cache that omits `encryption=`)
 CACHEKIT_API_KEY=op://cachekit/ck-dev-bluesky-default/credential
 ```
 

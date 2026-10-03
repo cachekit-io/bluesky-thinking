@@ -38,9 +38,9 @@ def test_values_are_plain_msgpack_maps(publisher, backend):
 
 
 def test_interop_values_stay_plaintext_with_master_key_in_env(monkeypatch, store, backend):
-    """CACHEKIT_MASTER_KEY auto-enables cachekit encryption from the env; the
-    interop aggregates are contract-locked to plain msgpack (TS/Rust read them
-    without keys) and must pin encryption off regardless."""
+    """With CACHEKIT_MASTER_KEY in the env, cachekit >= 0.21.0 refuses a cache
+    that omits `encryption=`; the interop aggregates are contract-locked to plain
+    msgpack (TS/Rust read them without keys), so they pass enabled=False explicitly."""
     from skyline_ingester.publisher import Publisher
 
     from .conftest import MASTER_KEY

@@ -35,7 +35,7 @@ flowchart LR
     JS[Bluesky Jetstream\npublic WebSocket] -->|filtered JSON events| ING
 
     subgraph Lab k3s cluster
-        ING[Python ingester + aggregator\ncachekit-py 0.15\n5m / 1h / 24h windows\n+ /health on PORT]
+        ING[Python ingester + aggregator\ncachekit-py 0.21\n5m / 1h / 24h windows\n+ /health on PORT]
     end
 
     ING -->|"@cache.io writes\ninterop/v1 keys"| CK[(CachekitIO\napi.dev.cachekit.io\nnamespace: bluesky-thinking)]
