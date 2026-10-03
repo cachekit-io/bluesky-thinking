@@ -24,10 +24,13 @@ privacy/retention/deletion/restore contract: [`history.md`](history.md).
 
 ### The decision: interop/v1, not the 7-segment auto key
 
-The 7-segment canonical key (`ns:{ns}:func:{mod.fn}:args:{64-hex}:{flags}`) embeds a
-**language-specific** `func:` segment (Python module path vs Rust crate path vs TS function name),
-so auto-generated keys are *never* byte-compatible across SDKs — by design. The protocol's shipped
-answer for cross-SDK sharing is **interop/v1** (`protocol/spec/interop-mode.md`):
+The 7-segment canonical key (`ns:{ns}:func:{mod.fn}:args:{64-hex}:{flags}`) is cachekit-py's
+auto-mode key, and its **language-specific** `func:` segment is the Python module path. The other
+SDKs mint a different shape or none: `@cachekit-io/cachekit` auto keys are `{ns}:{64-hex}` with no
+`func:` segment, and `cachekit-rs` has no auto-mode key (callers supply keys, and its `#[cachekit]`
+macro mints interop/v1 keys only). So auto-generated keys are *never* byte-compatible across
+SDKs — by design. The protocol's shipped answer for cross-SDK sharing is **interop/v1**
+(`protocol/spec/interop-mode.md`):
 
 ```
 {namespace}:{operation}:{args_hash}
