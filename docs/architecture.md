@@ -9,7 +9,7 @@ Anything not locked here is a Stage-2 implementation choice.
 | :--- | :--- | :--- | :--- |
 | Ingester + window aggregator | Python / `cachekit` | `0.21.0` (PyPI) | Lab k3s cluster ([`deploy/k3s/`](../deploy/k3s/)) |
 | Edge API | TypeScript / `@cachekit-io/cachekit` | `0.1.5` (npm) | Cloudflare Workers (free plan) |
-| Edge hot path | Rust / `cachekit-rs` | `0.9.0` (crates.io) | Cloudflare Workers, `wasm32-unknown-unknown` |
+| Edge hot path | Rust / `cachekit-rs` | `0.7.0` (crates.io) | Cloudflare Workers, `wasm32-unknown-unknown` |
 | Dashboard | static HTML/JS | — | Cloudflare Workers Assets |
 | Cache backend | CachekitIO | `api.dev.cachekit.io` | ours (dogfood) |
 | Data source | Bluesky Jetstream | public WebSocket | e.g. `wss://jetstream2.us-east.bsky.network/subscribe` |
