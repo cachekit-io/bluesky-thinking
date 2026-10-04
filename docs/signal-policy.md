@@ -114,7 +114,7 @@ public `rate_limited_global_*` exclusion counts. The key,
 digests, and raw DIDs are never put in minute buckets, checkpoints, CacheKit values,
 logs, history, or health output. `/health` also exposes the aggregate
 `events_missing_source` counter so a Jetstream schema change cannot silently empty
-all public trend rankings, and (LAB-1775) `ledger_entries` — how many digests are
+all public trend rankings, and `ledger_entries` — how many digests are
 live, never which — so ledger pressure is diagnosable without weakening that
 boundary. The ledger is not restored:
 after a process restart the key rotates and the five-minute bound starts fresh.
@@ -219,8 +219,8 @@ restore retains per-minute top-K entries, so long-tail tag, URL/domain, language
 and emoji rankings are approximate immediately after a restart; event and signal
 candidate totals remain exact.
 
-The same top-K truncation also applies in steady state, not only after a restart
-(LAB-1775). A minute bucket keeps every distinct key while it is inside the
+The same top-K truncation also applies in steady state, not only after a restart.
+A minute bucket keeps every distinct key while it is inside the
 full-fidelity horizon — the 5 m window plus 5 minutes of slack for the future
 skew `ingest_raw` accepts — and is then compacted in place to its top 20 tags,
 20 URLs, 20 domains, 10 emoji and 32 languages. So the **5 m window is exact**,
@@ -248,7 +248,7 @@ carries 23–27, so the bound does not bite; `total_posts` is exact either way.
 Separately, when a window's real languages exceed the top-25 published rows,
 the long-tail share is carried in a top-level `other_share` field — a sibling
 of `langs`, never a key inside it — so it can never be confused with (or
-overwrite) a real `other`-tagged post's own share (LAB-1632).
+overwrite) a real `other`-tagged post's own share.
 
 ## Recorded evaluation
 
