@@ -110,7 +110,7 @@ Any pending D1 migration must be applied **before** the deploy that expects it:
 npx wrangler d1 migrations apply skyline-history --remote
 ```
 
-Deployment: **https://skyline-edge.raywalker.workers.dev** (the backend
+Dev deployment: **https://skyline-edge.raywalker.workers.dev** (the backend
 endpoint is a `[vars]` entry, `CACHEKIT_API_URL`).
 
 Two build-time accommodations for `@cachekit-io/cachekit` 0.1.3 (both retire

@@ -9,7 +9,8 @@ brings its own deps via `--with`:
 
 ```bash
 cd ingester
-export CACHEKIT_API_URL=<endpoint> CACHEKIT_ALLOW_CUSTOM_HOST=true
+# Replace <endpoint> with your CachekitIO endpoint URL first:
+export CACHEKIT_API_URL="<endpoint>" CACHEKIT_ALLOW_CUSTOM_HOST=true
 ```
 
 | Script | Proof | Run |

@@ -19,15 +19,22 @@ repos:
         name: No internal references in commit message
         # Same patterns. git hands this hook the raw message file: "# " comment lines, the diff
         # below the `git commit -v` scissors line, and its own merge and revert subjects, which
-        # quote branch names and earlier subjects. Only the text the author wrote is checked.
+        # quote branch names and earlier subjects. Only the text the author wrote is checked; a
+        # merge or revert subject is skipped only while git is making that merge or revert.
         language: python
         entry: python -c
         args:
           - |
-            import re, sys
+            import os, re, subprocess, sys
             P = re.compile(r"\b(?i:LAB)-[0-9]+|op://|\.ts\.net|(?i:\bk3s[\s_-]+(?:cluster|node|host)s?\b)|dev\.cachekit\.io|\bStage [0-9]|\bAC-[0-9]|github\.com/cachekit(?![\w-])")
             KIND = r"(?:branch|branches|remote-tracking branch|remote-tracking branches|tag|tags|commit|commits)"
-            GIT_SUBJECT = re.compile(rf"Merge {KIND} '[^']*'(?:(?:, |; | and ){KIND}? ?'[^']*')*(?: of \S+)?(?: into \S+)?|(?:Revert|Reapply) \".*\"")
+            MERGE_SUBJECT = re.compile(rf"Merge {KIND} '[^']*'(?:(?:, |; | and ){KIND}? ?'[^']*')*(?: of \S+)?(?: into \S+)?")
+            REVERT_SUBJECT = re.compile(r"(?:Revert|Reapply) \".*\"")
+
+            def in_progress(ref):
+                # git keeps MERGE_HEAD / REVERT_HEAD while it commits its own merge or revert message.
+                r = subprocess.run(["git", "rev-parse", "--git-path", ref], capture_output=True, text=True)
+                return r.returncode == 0 and os.path.exists(r.stdout.strip())
             try:
                 with open(sys.argv[1], encoding="utf-8", errors="replace") as f:
                     text = f.read()
@@ -35,7 +42,10 @@ repos:
                 sys.exit(f"{sys.argv[1]}: cannot read the commit message: {e}")
             text = text.split("# ------------------------ >8 ------------------------")[0]
             lines = [line for line in text.splitlines() if line.strip() and not re.match(r"#(?:[ \t]|$)", line)]
-            if lines and GIT_SUBJECT.fullmatch(lines[0]):
+            if lines and (
+                (MERGE_SUBJECT.fullmatch(lines[0]) and in_progress("MERGE_HEAD"))
+                or (REVERT_SUBJECT.fullmatch(lines[0]) and in_progress("REVERT_HEAD"))
+            ):
                 lines = lines[1:]
             bad = [line for line in lines if P.search(line)]
             for line in bad:

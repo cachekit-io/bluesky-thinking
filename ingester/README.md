@@ -11,8 +11,9 @@ byte-identical to what the TS edge API and Rust-WASM hot path read.
 cd ingester
 uv sync
 
-# Live: writes real CachekitIO entries. Creds per docs/architecture.md#credentials:
-CACHEKIT_API_URL=<endpoint> CACHEKIT_ALLOW_CUSTOM_HOST=true \
+# Live: writes real CachekitIO entries. Creds per docs/architecture.md#credentials.
+# Replace <endpoint> with your CachekitIO endpoint URL first:
+CACHEKIT_API_URL="<endpoint>" CACHEKIT_ALLOW_CUSTOM_HOST=true \
     op run --env-file=../.op.env -- uv run skyline-ingester
 
 # Dry-run: no key -> same pipeline, in-process backend, every write logged
