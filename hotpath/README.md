@@ -32,7 +32,7 @@ $ curl https://skyline-hotpath.raywalker.workers.dev/v1/key/posts_per_minute/5m
 
 ## Build, test, deploy
 
-Build-chain pins are locked in [`docs/architecture.md`](../docs/architecture.md#build-chain-pins-from-spike-friction-so-stage-2-doesnt-rediscover-them):
+Build-chain pins are locked in [`docs/architecture.md`](../docs/architecture.md#build-chain-pins-from-spike-friction-so-nobody-rediscovers-them):
 `worker-build@^0.1`, `wasm-bindgen-cli` **0.2.126** seeded into worker-build's cache — PATH is
 ignored, see the architecture doc (Cargo.toml pins the
 `wasm-bindgen` crate to `=0.2.126` and the committed `Cargo.lock` holds the full graph, so

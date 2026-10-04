@@ -1,10 +1,10 @@
-# Skyline aggregate-snapshot history (LAB-1616, decided 2026-08-14)
+# Skyline aggregate-snapshot history (decided 2026-08-14)
 
 Skyline's live values are rolling 5m/1h/24h windows: once a window moves on, the
 prior state is gone, so nobody can tell whether a topic is rising, fading,
 recurring, or merely always large. This document is the design decision for the
-durable history store, plus the operating contract (privacy, retention,
-deletion, cost, restore) the acceptance criteria require.
+durable history store, plus its operating contract (privacy, retention,
+deletion, cost, restore).
 
 ## The decision
 
@@ -18,18 +18,18 @@ snapshots of the `24h` window at each UTC midnight.
 The obvious design — the Python ingester persists what it publishes — was
 rejected on measured grounds, not taste:
 
-- **Egress was the ingester's binding constraint at design time.** LAB-1894
+- **Egress was the ingester's binding constraint at design time.** We
   measured the checkpoint alone at ~1.63 GB/day against Render's 5 GB/month
   bandwidth cap; the service had already been suspended once for exhausting
   it. Any ingester-side history write would have made that worse; edge-side
-  capture added **zero** ingester egress. (The cap dissolved with the k3s move,
-  LAB-2383 — the isolation argument below is the rationale that still binds.)
-- **Failure isolation comes free.** The AC requires that history failure never
-  stops current aggregate publishing. With capture on the edge, the ingester
+  capture added **zero** ingester egress. (The cap dissolved when the ingester left
+  Render — the isolation argument below is the rationale that still binds.)
+- **Failure isolation comes free.** History failure must never stop current
+  aggregate publishing. With capture on the edge, the ingester
   does not even know history exists — the property holds by construction, and
   the reverse holds too (a dead ingester just leaves gaps).
 - **The aggregates are already on the edge.** The Worker reads the same
-  interop/v1 entries it has served since Stage 2; capture is five extra GETs
+  interop/v1 entries it has served from the start; capture is five extra GETs
   per hour on an existing, credentialed path.
 
 ### Why D1
@@ -39,8 +39,8 @@ rejected on measured grounds, not taste:
 | **Cloudflare D1**       | **Chosen.** Native Workers binding, SQL range queries, migrations, Time Travel restore, and every free-tier limit clears our budget with room to spare — the tightest margin is ~3× on worst-case reads (below).   |
 | Workers KV              | No range queries — a 7d chart is 168 point-reads or a hand-rolled index. Wrong shape.                                                                                                                              |
 | R2 objects              | Range query = manifest + N GETs, retention = lifecycle rules per tier. More moving parts for the same rows.                                                                                                        |
-| Render Postgres         | Free instances expire after 30 days, and writes from Render add the exact egress LAB-1894 says we cannot afford.                                                                                                   |
-| CachekitIO as the store | It is a cache: TTL-bounded, key-value, no range scans. Using it as a durable archive misrepresents the product and the epic's privacy posture. It **does** serve as the response cache (below) — the correct role. |
+| Render Postgres         | Free instances expire after 30 days, and writes from Render add the exact egress we measured we cannot afford.                                                                                                     |
+| CachekitIO as the store | It is a cache: TTL-bounded, key-value, no range scans. Using it as a durable archive misrepresents the product and Skyline's privacy posture. It **does** serve as the response cache (below) — the correct role.  |
 
 ### Cadence and tiering: capture-time, not post-hoc
 
@@ -61,8 +61,8 @@ tier can be added later without touching stored data. YAGNI.
 The capture fires on the `skyline-edge` cron, hourly at minute 0 (`captureTick`
 guards the boundary itself, so off-minute fires are no-ops). It originally rode
 the `*/10` Render keep-alive schedule to avoid spending one of Workers Free's
-**five cron expressions per account**; since the ingester moved to the lab k3s
-cluster (LAB-2383) the keep-alive is gone and capture owns the slot outright.
+**five cron expressions per account**; since the ingester left Render the
+keep-alive is gone and capture owns the slot outright.
 
 ## Data model
 
@@ -113,8 +113,8 @@ The staleness guard is **symmetric**: a bucket label tolerates `generated_at`
 skew of up to one source TTL on either side. Older means the entry should
 already have expired; newer means the cron tick was delivered later than one
 TTL past the boundary. Both become gaps — a tighter "newer" bound would turn
-routine cron delivery lag into five false gaps on a healthy pipeline. (Until
-LAB-2383 the handler also ran a Render keep-alive ping with a 90 s timeout;
+routine cron delivery lag into five false gaps on a healthy pipeline. (While the
+ingester ran on Render the handler also ran a Render keep-alive ping with a 90 s timeout;
 capture ran concurrently with it precisely so that wait could not eat the skew
 budget. The ping is gone; the guard's math is unchanged.)
 
@@ -198,7 +198,7 @@ only a property of a well-behaved publisher, and the whole point of the
 allowlist is to not depend on that.
 The `@cache.secure` sentiment cache is excluded from history entirely: it is
 zero-knowledge ciphertext, and persisting any derivative would cross the
-boundary LAB-744 established. What history changes is **time**: a trending tag
+boundary the ingester established. What history changes is **time**: a trending tag
 that was public for an hour is now public for up to the retention horizon.
 That is the feature, applied to data already published under the signal
 policy's safety filters.
@@ -206,7 +206,7 @@ policy's safety filters.
 ## Retention and deletion
 
 - Hourly tier: **35 days** (7d queries need 7; the margin serves the upcoming
-  rising/velocity work, LAB-1619). Daily tier: **400 days** (30d queries plus
+  rising/velocity work). Daily tier: **400 days** (30d queries plus
   year-over-year headroom).
 - Enforced by the daily cron sweep (`DELETE … WHERE bucket_ts < horizon`),
   covered by tests — not by hope.
@@ -228,7 +228,7 @@ read/day. Cloudflare docs, verified 2026-08-14.
 | Rows written/day       | 120 hourly + 5 daily + ≤125 retention deletes ≈ 250 _logical_ rows — but D1 bills index maintenance, and `snapshots` carries two indexes (the composite-PK `sqlite_autoindex_snapshots_1` + `idx_snapshots_tier_bucket`), so each row costs 3 `rows_written` ≈ **750** |                          ~133× |
 | Rows read/day          | ≤170/query (≤168 range rows + 2 indexed `MIN` seeks — the history-start lookup is bound per tier so it seeks the `(tier, bucket_ts)` index instead of scanning the table); response reuse ≥1h complete / 60 s incomplete; even 10k uncached queries/day ≈ 1.7M         | ~3× worst-case, ~10³× expected |
 | Storage                | 4,200 hourly + 2,000 daily = 6,200 rows. Typical row ~6 KiB (top-20 trim) ≈ **~40 MiB** steady state; every row at the 32 KiB hard cap ≈ **~194 MiB** worst case. Payload bytes only — the two indexes and SQLite overflow pages sit on top of that                    |     ~25× at the worst-case cap |
-| Cron slots (5/account) | **1** — the hourly `skyline-edge` schedule (inherited from the retired keep-alive cron, LAB-2383)                                                                                                                                                                      |                              — |
+| Cron slots (5/account) | **1** — the hourly `skyline-edge` schedule (inherited from the retired keep-alive cron)                                                                                                                                                                                |                              — |
 | CachekitIO ops         | 5 GETs/hour capture + ≤10 response-cache entries/bucket                                                                                                                                                                                                                |        dogfood, our own tenant |
 
 The 7d/30d row math: 7d = 168 hourly rows/operation (840 total), 30d = 30
