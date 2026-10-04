@@ -1,8 +1,8 @@
 # Skyline hot-path Worker (`hotpath/`)
 
-The Rust-WASM leg of the Skyline edge (Stage 2, LAB-746): `cachekit-rs` 0.7.0 (crates.io)
-compiled to `wasm32-unknown-unknown`, deployed as its own Cloudflare Worker. Stage 3 binds it into the
-TS serving path (service binding); until then it runs standalone.
+The Rust-WASM leg of the Skyline edge: `cachekit-rs` 0.7.0 (crates.io) compiled to
+`wasm32-unknown-unknown`, deployed as its own Cloudflare Worker. The TS edge reaches it through a
+service binding (see below).
 
 Dev deployment: **https://skyline-hotpath.raywalker.workers.dev**
 
@@ -13,7 +13,7 @@ Dev deployment: **https://skyline-hotpath.raywalker.workers.dev**
 | interop/v1 key derivation | `GET /v1/key/:operation/:window` | The five locked operations × `5m`/`1h`/`24h` (contract: [`docs/architecture.md`](../docs/architecture.md)). Returns the key + locked TTL. Off-contract input → 400. |
 | Payload integrity | `POST /v1/verify[?expected=<16-hex>]` | Body = raw cached payload. Returns xxHash3-64 (big-endian hex, the `StorageEnvelope` convention) + strict interop/v1 validity (single MessagePack document, no trailing bytes, CK frames flagged with a diagnostic). |
 | Window-slice aggregation | `POST /v1/merge` | JSON `{"slices": ["<base64 msgpack {str:int} doc>", …], "top": 50}` → merged top-N counts (count desc, key asc) + the canonical interop/v1 MessagePack of the result, ready to write back byte-identically. |
-| Cache read + verify | `GET /v1/cache/:operation/:window` | Derives the key, fetches the live backend via `WorkersCachekitIO` (the LAB-1079 wasm32 `SystemTime` panic was fixed in cachekit-rs 0.7.0; the direct `worker::Fetch` workaround is gone — LAB-1492), checksums + strict-decodes the payload. Failure statuses: 503 if the `CACHEKIT_API_KEY` secret is missing (set since Stage 3), 500 if the backend config is invalid, 502 if the backend request fails. |
+| Cache read + verify | `GET /v1/cache/:operation/:window` | Derives the key, fetches the live backend via `WorkersCachekitIO` (the wasm32 `SystemTime` panic was fixed in cachekit-rs 0.7.0; the direct `worker::Fetch` workaround is gone), checksums + strict-decodes the payload. Failure statuses: 503 if the `CACHEKIT_API_KEY` secret is missing, 500 if the backend config is invalid, 502 if the backend request fails. |
 | Service info | `GET /` | Contract summary + endpoint list; doubles as a health check. |
 
 Example — the byte-locked spike vector, derived live on the edge:
@@ -37,7 +37,7 @@ Build-chain pins are locked in [`docs/architecture.md`](../docs/architecture.md#
 ignored, see the architecture doc (Cargo.toml pins the
 `wasm-bindgen` crate to `=0.2.126` and the committed `Cargo.lock` holds the full graph, so
 CLI and crate ABI can never drift). `cachekit-rs` comes from **crates.io 0.7.0** — the
-spec's git-tag workaround retired when LAB-742's publish landed; 0.7.0 keeps `worker`
+spec's git-tag workaround retired once cachekit-rs was published to crates.io; 0.7.0 keeps `worker`
 pinned at 0.4, so the chain pins are unchanged.
 
 ```console
@@ -51,12 +51,11 @@ $ npx wrangler deploy                            # runs worker-build itself, the
 CI ([`hotpath-qa`](../.github/workflows/hotpath-qa.yml)) gates every PR and push touching
 `hotpath/` — everything above except the deploy.
 
-Secrets: `CACHEKIT_API_KEY` via `wrangler secret put CACHEKIT_API_KEY`, from
-`op://cachekit/ck-dev-bluesky-default/credential`
+Secrets: `CACHEKIT_API_KEY` via `wrangler secret put CACHEKIT_API_KEY`, from your secret manager
 ([docs/architecture.md#credentials](../docs/architecture.md#credentials)).
-Config: `CACHEKIT_API_URL` (`wrangler.toml [vars]`) points at the dev
-instance. Nothing else is configurable.
+Config: `CACHEKIT_API_URL` (`wrangler.toml [vars]`) points at the demo's CachekitIO
+endpoint. Nothing else is configurable.
 
-Stage 3 also bound this Worker into the TS edge's serving path: the edge
+The TS edge binds this Worker into its serving path: the edge
 holds a service binding (`env.HOTPATH`) and `POST /v1/verify`s every payload
 it serves — see [`edge/README.md`](../edge/README.md).

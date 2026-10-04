@@ -12,12 +12,13 @@ repos:
         name: No internal references in docs
         language: pygrep
         entry: 'LAB-[0-9]+|op://|\.ts\.net|(?i:k3s cluster)|dev\.cachekit\.io|\bStage [0-9]|\bAC-[0-9]|github\.com/cachekit(?![\w-])'
-        files: ^((packages|crates)/[^/]+/)?README[^/]*$|^docs/
+        files: (^|/)README[^/]*$|^docs/
         types: [text]
         stages: [pre-commit]
       - id: no-internal-references-commit-msg
         name: No internal references in commit message
         language: pygrep
-        # Same patterns, skipping git's "#" comment lines and "Merge" subjects, which quote branch names.
-        entry: '^(?!#|Merge ).*?(?:LAB-[0-9]+|op://|\.ts\.net|(?i:k3s cluster)|dev\.cachekit\.io|\bStage [0-9]|\bAC-[0-9]|github\.com/cachekit(?![\w-]))'
+        # Same patterns, skipping "Merge" subjects and git's own comment lines ("#" then a space, a tab
+        # or nothing), which quote branch names. A line such as "#<ref>" survives commit -m, so it is checked.
+        entry: '^(?!#(?:[ \t]|$)|Merge ).*?(?:LAB-[0-9]+|op://|\.ts\.net|(?i:k3s cluster)|dev\.cachekit\.io|\bStage [0-9]|\bAC-[0-9]|github\.com/cachekit(?![\w-]))'
         stages: [commit-msg]
