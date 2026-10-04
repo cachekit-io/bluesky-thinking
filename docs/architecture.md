@@ -159,7 +159,11 @@ Round-trip verified end-to-end: `spike/roundtrip/roundtrip.py` (passed against t
   `~/.cache/worker-build/wasm-bindgen-<host-triple>-0.2.105/` (PATH alone is ignored, verified in
   CI 2026-08-03). The `0.2.105` dir name is the path worker-build **0.1.14** hardcodes — CI pins
   worker-build exactly for that reason, so the two must be bumped together; CI's exact incantation
-  is in `.github/workflows/hotpath-qa.yml`.
+  is in `.github/workflows/hotpath-qa.yml`. The `wasm-bindgen` crate pin (`hotpath/Cargo.toml`)
+  and this CLI pin also move together, by hand: `renovate.json` keeps every Renovate update to the
+  crate out of the group and holds it under Pending Approval on the Dependency Dashboard.
+  Vulnerability updates are not held, so their PR needs the CLI pin moved before the `wasm32` check
+  passes.
 - On wasm32 the CachekitIO backend is `cachekit::backend::workers::WorkersCachekitIO` (CF Fetch
   API); the reqwest-based `CachekitIO` does not implement `Backend` on that target. Its
   `SystemTime::now()` panic in the session headers (affected 0.2.0–0.6.0) was fixed in
