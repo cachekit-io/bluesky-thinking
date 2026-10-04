@@ -1,22 +1,22 @@
-# Skyline architecture spec (Stage 1, locked 2026-07-24)
+# Skyline architecture spec (locked 2026-07-24)
 
-Thin spec produced by the LAB-735 spike. It locks the cross-SDK contract Stages 2–5 build against.
-Anything not locked here is a Stage-2 implementation choice.
+Thin spec produced by the initial spike. It locks the cross-SDK contract the ingester, edge API and
+hot path build against. Anything not locked here is an implementation choice.
 
 ## Components
 
 | Component | Language / SDK | Pinned version | Host |
 | :--- | :--- | :--- | :--- |
-| Ingester + window aggregator | Python / `cachekit` | `0.21.0` (PyPI) | Lab k3s cluster ([`deploy/k3s/`](../deploy/k3s/)) |
+| Ingester + window aggregator | Python / `cachekit` | `0.21.0` (PyPI) | Self-hosted Kubernetes ([`deploy/k3s/`](../deploy/k3s/)) |
 | Edge API | TypeScript / `@cachekit-io/cachekit` | `0.1.5` (npm) | Cloudflare Workers (free plan) |
 | Edge hot path | Rust / `cachekit-rs` | `0.7.0` (crates.io) | Cloudflare Workers, `wasm32-unknown-unknown` |
 | Dashboard | static HTML/JS | — | Cloudflare Workers Assets |
-| Cache backend | CachekitIO | `api.dev.cachekit.io` | ours (dogfood) |
+| Cache backend | CachekitIO | hosted API (endpoint set at deploy time) | ours (dogfood) |
 | Data source | Bluesky Jetstream | public WebSocket | e.g. `wss://jetstream2.us-east.bsky.network/subscribe` |
-| Snapshot history store | Cloudflare D1 (`skyline-history`) | SQLite | Cloudflare, bound to the edge Worker — see [`history.md`](history.md) (LAB-1616) |
+| Snapshot history store | Cloudflare D1 (`skyline-history`) | SQLite | Cloudflare, bound to the edge Worker — see [`history.md`](history.md) |
 
 Aggregate-snapshot **history** (hourly/daily tiers, `/api/history/*`) is a
-post-Stage-5 addition captured entirely on the edge — the ingester and the
+later addition captured entirely on the edge — the ingester and the
 locked interop contract above are untouched. Design decision, budgets, and the
 privacy/retention/deletion/restore contract: [`history.md`](history.md).
 
@@ -53,7 +53,7 @@ SDKs — by design. The protocol's shipped answer for cross-SDK sharing is **int
 | Operations (segment 2) | `trending_hashtags` · `trending_links` · `lang_mix` · `posts_per_minute` · `top_emoji` |
 | Argument list (all operations) | exactly one arg: `window: str` ∈ `"5m"` \| `"1h"` \| `"24h"` |
 | Value format | interop/v1 plain MessagePack; top-level map, string keys |
-| TTLs | `5m` window → 60 s · `1h` → 300 s · `24h` → 900 s (Stage 2 may tune ±) |
+| TTLs | `5m` window → 60 s · `1h` → 300 s · `24h` → 900 s (implementations may tune ±) |
 
 Cross-SDK contract per interop-mode.md: **operation name + effective argument list (arity, order,
 types)**. One string argument, everywhere. TS wrappers must not add default parameters
@@ -73,7 +73,7 @@ BCP-47 primary subtag, or `und`) — never a synthetic bucket. Once a window's
 distinct languages exceed the top-25 cutoff, the long-tail residual is
 published as a **sibling** top-level key, `other_share` (a share value, not a
 nested map), so it can never collide with a real token a post declares
-(LAB-1632: `langs["other"]` previously doubled as both, and a real `other`
+(`langs["other"]` previously doubled as both, and a real `other`
 token's share was silently overwritten by the residual). `other_share` is
 absent when there is no long tail.
 
@@ -91,13 +91,13 @@ the operation segment provides the identity. Spike verification: `cachekit-py` 0
 `@cachekit-io/cachekit` 0.1.3 (local Node), and `cachekit-rs` 0.5.0 running **live on the
 Cloudflare edge** all derived `bluesky-thinking:posts_per_minute:230037de…` byte-identically.
 
-### The secure cache (AC-6 path)
+### The secure cache
 
 The "sensitive" derived cache (e.g. per-language sentiment sample) is written and read by
 **Python only**, via `@cache.secure(master_key=…)` in auto mode with `namespace="bluesky-thinking"`.
 Zero-knowledge: the backend (and L1) store ciphertext only. Cross-SDK encrypted reads are possible
 (interop mode + encryption verifies cross-SDK per the spec) but are **out of scope** for the demo —
-one SDK proving ciphertext-only storage satisfies the epic's AC-6.
+one SDK proving ciphertext-only storage is enough for the demo.
 
 ## SaaS namespace mapping — provisioning footgun, read this
 
@@ -108,8 +108,8 @@ The SaaS derives its server-side namespace from the **key prefix**, not from the
 - Python auto-mode keys (`ns:bluesky-thinking:func:…`, used by the secure cache) → server-side
   namespace **`bluesky-thinking`**.
 
-Therefore the demo API key must allow **both** namespaces. The existing demo key
-(`op://cachekit/ck-dev-bluesky-default`) is unrestricted inside its dedicated demo tenant (tenant
+Therefore the demo API key must allow **both** namespaces. The demo key is unrestricted inside
+its dedicated demo tenant (tenant
 isolation is the real boundary; a namespace allowlist adds nothing when the whole tenant is the
 demo) — verified: it round-trips both key classes. A key restricted to `bluesky-thinking` alone
 would reject every interop key the demo depends on.
@@ -119,49 +119,39 @@ every authenticated caller — locking is inherent to the backend, per `protocol
 
 ## Credentials
 
-Nothing to provision — the backend is the `dev.cachekit` instance and credentials already exist
-in 1Password at `op://cachekit/ck-dev-bluesky-default`:
+The demo runs against a dedicated CachekitIO demo tenant. Two values, both supplied through the
+environment from a secret manager at run or deploy time:
 
-- `credential` field → the API key → `CACHEKIT_API_KEY`
-- `encryption_key` field → 64-hex master key → `CACHEKIT_MASTER_KEY`
+- the tenant's API key → `CACHEKIT_API_KEY`
+- its 64-hex master key → `CACHEKIT_MASTER_KEY`
 
-Load both via `op run --env-file` (or `op read` for one-off shells) — never commit them, never
-echo them. The gitignored env-file templates the runbooks reference contain only `op://`
-references (no secret material); recreate them at the repo root as:
+Never commit them, never echo them. Evidence tooling that needs only the API key should get only
+the API key: with the master key in env, cachekit >= 0.21.0 refuses any cache that omits
+`encryption=`.
 
-```bash
-# .op.env — full ingester credentials
-CACHEKIT_API_KEY=op://cachekit/ck-dev-bluesky-default/credential
-CACHEKIT_MASTER_KEY=op://cachekit/ck-dev-bluesky-default/encryption_key
+The demo's endpoint is not in the SDKs' SSRF host allowlists, so every SDK needs its config-level
+custom-host override alongside the credentials:
 
-# .op.apikey.env — API key only (interop/evidence tooling; with the master key
-# in env, cachekit >= 0.21.0 refuses any cache that omits `encryption=`)
-CACHEKIT_API_KEY=op://cachekit/ck-dev-bluesky-default/credential
-```
-
-`api.dev.cachekit.io` is not in the SDKs' SSRF host allowlists, so every SDK needs its
-config-level custom-host override alongside the credentials:
-
-- Python: env `CACHEKIT_API_URL=https://api.dev.cachekit.io` + `CACHEKIT_ALLOW_CUSTOM_HOST=true`
+- Python: env `CACHEKIT_API_URL=<endpoint>` + `CACHEKIT_ALLOW_CUSTOM_HOST=true`
 - TS: `cachekitio({ apiUrl, allowCustomHost: true })`
 - Rust: `WorkersCachekitIO::builder().api_url(...).allow_custom_host(true)` (live since
-  cachekit-rs 0.7.0 fixed the wasm32 `SystemTime` panic, LAB-1079; the interim direct
-  `worker::Fetch` workaround was removed in LAB-1492)
+  cachekit-rs 0.7.0 fixed the wasm32 `SystemTime` panic; the interim direct `worker::Fetch`
+  workaround is gone)
 
-Round-trip verified end-to-end: `spike/roundtrip/roundtrip.py` (exists, runs against
-`api.dev.cachekit.io`; passed against the dev instance on 2026-07-29; also exercises `@cache.io`).
+Round-trip verified end-to-end: `spike/roundtrip/roundtrip.py` (passed against the live backend on
+2026-07-29; also exercises `@cache.io`).
 
 ## Hosting
 
 | Decision | Verified | Rationale |
 | :--- | :--- | :--- |
-| **Ingester → lab k3s cluster (current, LAB-2383)** | 2026-09-04 | Ray's Render account was permanently suspended, and on 2026-08-29 he ratified moving the ingester to his lab k3s cluster. Image: `ghcr.io/cachekit-io/skyline-ingester` (built by [`ingester-image.yml`](../.github/workflows/ingester-image.yml)); manifests + runbook: [`deploy/k3s/`](../deploy/k3s/). Render's two binding constraints dissolve — no 5 GB/month egress cap, no 512 MiB plan ceiling — but memory still bounds the Deployment — 320 Mi request / 512 Mi limit after LAB-2586 (the 128 Mi / 256 Mi first cut, sized from the LAB-1775 podman soaks, OOMKilled every ~22 h; the container working set plateaus at ~345–372 MiB once the 24 h window fills, see [`ingester/README.md`](../ingester/README.md#window-retention-and-memory)) — the checkpoint cadence stays at 300 s (nothing needs it tighter), and the dead-consumer restart moves from Render's health check to the `livenessProbe` (sustained 503 ⇒ restart). Egress-only: no Service, no Ingress, no keep-alive cron. Egress measured on-cluster over the LAB-2266 canary (cadvisor at the pod veth, 2026-08-30 → 09-04): **~312 MB/day**, of which ~70 % is TCP ACKs for the ~3.5 GB/day inbound Jetstream firehose (one 66-byte ACK per inbound segment, 300 s packet capture) and **~84 MB/day ≈ 2.5 GB/month** is application traffic to CachekitIO (checkpoint ≈ 46 MB/day, aggregate publishes + HTTP/TLS overhead ≈ 38 MB/day) — inside the LAB-1933 projection below. The lab is unmetered; the ACK share is a cost of consuming the firehose on any host. |
-| **Ingester → Render free web service (2026-07-24 → 2026-08-29, retired)** | 2026-08-29 | No billing info needed — ray already has a Render account. Constraint: free services spin down after 15 min without *inbound* traffic (an outbound Jetstream WebSocket doesn't count) — keep warm with a Cloudflare Worker cron trigger pinging every 10 min ($0). 750 instance-hrs/mo covers one always-on service. Restarts lose in-memory window state: mitigate by checkpointing aggregation state into CacheKit (more dogfood). **Bandwidth is the binding constraint at 5 GB/month outbound** (LAB-1894, superseding the earlier memory framing): Render meters egress only — inbound is free, so the ~3 GB/day Jetstream firehose costs nothing — and the CacheKit checkpoint was measured at ~97 % of egress (~49 GB/month at per-minute snapshots every 120 s, which suspended the workspace 2026-08-13). Snapshots therefore hour-coarsen buckets older than 1 h and write every 300 s (LAB-1933): measured ~159 KB/write ≈ 46 MB/day ≈ **~1.4 GB/month of checkpoint egress**, plus a **~1.2–1.5 GB/month** aggregate-publish residual this change does not touch (audit-derived, not re-measured), for **~2.6–2.9 GB/month total — ~52–58 % of the cap** — see [`ingester/README.md`](../ingester/README.md#checkpointing) for the component table. **Memory is the other binding constraint at 512 MiB** (LAB-1775): resident cost is *(retained minutes) × (distinct keys per minute)*, and at observed rates (~2,470 keys/min, ~299 B/key measured) 1,440 full-fidelity minutes project to ~1,050 MiB. Buckets aging past the full-fidelity horizon (the 5 m window plus future-skew slack) are therefore compacted to top-K, which measures 41.6 MiB steady / 48.0 MiB peak over a full 24 h window, and 110.8 MiB steady / 140.9 MiB peak in the measured worst case (a quiet tail then a burst into the uncompacted head, when the contribution ledger is empty and one minute can draw on all of it). That worst case holds only while event time advances with monotonic time; a feed that stalls event time can grow a single head bucket without bound, which needs a head admission cap to close — see [`ingester/README.md`](../ingester/README.md#window-retention-and-memory) and `ingester/tools/soak_memory.py`. |
-| **Oracle Cloud Always Free — earlier pick, rejected** | 2026-07-29 | Would have been 8× the ingester's needs, but signup requires a credit card and ray has no Oracle account; Render needs no new signup. |
-| **Fly.io — rejected** | 2026-07-24 | Free tier discontinued 2024; ~$2/mo minimum for an always-on machine breaks AC-8. |
-| **Edge → Cloudflare Workers free plan** | 2026-08-29 | 100k requests/day, 10 ms CPU/invocation — cached analytics reads are single-digit ms. Static dashboard via Workers Assets (free). Cron triggers included (used for history capture; formerly also the Render keep-alive). **Proven live by this spike**: `lab-735-skyline-spike.raywalker.workers.dev` (180 KiB gzipped upload, 2 ms startup, well under the 3 MB compressed script limit). |
+| **Ingester → self-hosted Kubernetes (current)** | 2026-09-04 | Moved off Render on 2026-08-29, when the free account was suspended. Image: `ghcr.io/cachekit-io/skyline-ingester` (built by [`ingester-image.yml`](../.github/workflows/ingester-image.yml)); manifests + runbook: [`deploy/k3s/`](../deploy/k3s/). Render's two binding constraints dissolve — no 5 GB/month egress cap, no 512 MiB plan ceiling — but memory still bounds the Deployment — 320 Mi request / 512 Mi limit (the 128 Mi / 256 Mi first cut, sized from podman soaks, OOMKilled every ~22 h; the container working set plateaus at ~345–372 MiB once the 24 h window fills, see [`ingester/README.md`](../ingester/README.md#window-retention-and-memory)) — the checkpoint cadence stays at 300 s (nothing needs it tighter), and the dead-consumer restart moves from Render's health check to the `livenessProbe` (sustained 503 ⇒ restart). Egress-only: no Service, no Ingress, no keep-alive cron. Egress measured over a canary (2026-08-30 → 09-04): **~312 MB/day**, of which ~70 % is TCP ACKs for the ~3.5 GB/day inbound Jetstream firehose (one 66-byte ACK per inbound segment, 300 s packet capture) and **~84 MB/day ≈ 2.5 GB/month** is application traffic to CachekitIO (checkpoint ≈ 46 MB/day, aggregate publishes + HTTP/TLS overhead ≈ 38 MB/day) — inside the checkpoint projection below. The ACK share is a cost of consuming the firehose on any host. |
+| **Ingester → Render free web service (2026-07-24 → 2026-08-29, retired)** | 2026-08-29 | No billing info needed. Constraint: free services spin down after 15 min without *inbound* traffic (an outbound Jetstream WebSocket doesn't count) — keep warm with a Cloudflare Worker cron trigger pinging every 10 min ($0). 750 instance-hrs/mo covers one always-on service. Restarts lose in-memory window state: mitigate by checkpointing aggregation state into CacheKit (more dogfood). **Bandwidth is the binding constraint at 5 GB/month outbound** (superseding the earlier memory framing): Render meters egress only — inbound is free, so the ~3 GB/day Jetstream firehose costs nothing — and the CacheKit checkpoint was measured at ~97 % of egress (~49 GB/month at per-minute snapshots every 120 s, which suspended the workspace 2026-08-13). Snapshots therefore hour-coarsen buckets older than 1 h and write every 300 s: measured ~159 KB/write ≈ 46 MB/day ≈ **~1.4 GB/month of checkpoint egress**, plus a **~1.2–1.5 GB/month** aggregate-publish residual this change does not touch (audit-derived, not re-measured), for **~2.6–2.9 GB/month total — ~52–58 % of the cap** — see [`ingester/README.md`](../ingester/README.md#checkpointing) for the component table. **Memory is the other binding constraint at 512 MiB**: resident cost is *(retained minutes) × (distinct keys per minute)*, and at observed rates (~2,470 keys/min, ~299 B/key measured) 1,440 full-fidelity minutes project to ~1,050 MiB. Buckets aging past the full-fidelity horizon (the 5 m window plus future-skew slack) are therefore compacted to top-K, which measures 41.6 MiB steady / 48.0 MiB peak over a full 24 h window, and 110.8 MiB steady / 140.9 MiB peak in the measured worst case (a quiet tail then a burst into the uncompacted head, when the contribution ledger is empty and one minute can draw on all of it). That worst case holds only while event time advances with monotonic time; a feed that stalls event time can grow a single head bucket without bound, which needs a head admission cap to close — see [`ingester/README.md`](../ingester/README.md#window-retention-and-memory) and `ingester/tools/soak_memory.py`. |
+| **Oracle Cloud Always Free — earlier pick, rejected** | 2026-07-29 | Would have been 8× the ingester's needs, but signup requires a credit card; Render needs none. |
+| **Fly.io — rejected** | 2026-07-24 | Free tier discontinued 2024; ~$2/mo minimum for an always-on machine breaks the $0/month goal. |
+| **Edge → Cloudflare Workers free plan** | 2026-08-29 | 100k requests/day, 10 ms CPU/invocation — cached analytics reads are single-digit ms. Static dashboard via Workers Assets (free). Cron triggers included (used for history capture; formerly also the Render keep-alive). **Proven live by the spike** (180 KiB gzipped upload, 2 ms startup, well under the 3 MB compressed script limit). |
 
-## Build-chain pins (from spike friction, so Stage 2 doesn't rediscover them)
+## Build-chain pins (from spike friction, so nobody rediscovers them)
 
 - `worker-build@^0.1` (0.2.x requires `worker` ≥ 0.8; `cachekit-rs` pins `worker` 0.4).
 - `wasm-bindgen-cli` 0.2.126 to match the crate graph — worker-build 0.1.x auto-downloads 0.2.105
@@ -171,20 +161,19 @@ Round-trip verified end-to-end: `spike/roundtrip/roundtrip.py` (exists, runs aga
   worker-build exactly for that reason, so the two must be bumped together; CI's exact incantation
   is in `.github/workflows/hotpath-qa.yml`.
 - On wasm32 the CachekitIO backend is `cachekit::backend::workers::WorkersCachekitIO` (CF Fetch
-  API); the reqwest-based `CachekitIO` does not implement `Backend` on that target. **LAB-1079**
-  (`SystemTime::now()` panic in its session headers, affected 0.2.0–0.6.0) was fixed in
-  cachekit-rs 0.7.0 — the hot path's interim direct `worker::Fetch` GET was removed in LAB-1492.
+  API); the reqwest-based `CachekitIO` does not implement `Backend` on that target. Its
+  `SystemTime::now()` panic in the session headers (affected 0.2.0–0.6.0) was fixed in
+  cachekit-rs 0.7.0, and the hot path's interim direct `worker::Fetch` GET is gone.
 - Workers builds: `--no-default-features --features workers,cachekitio`
   (`l1`/moka and `redis`/fred are native-only; `encryption`/`macros` were dropped in `dcb6da0` —
   the hot path never used them, see `hotpath/Cargo.toml`).
 
 ## Open items (flagged, not blocking the spec)
 
-1. ~~**CachekitIO credentials**~~ — resolved: creds exist at
-   `op://cachekit/ck-dev-bluesky-default`; `spike/roundtrip/roundtrip.py` round-trip verified
-   against `api.dev.cachekit.io` (2026-07-29), closing AC-1.
-2. ~~**Oracle account**~~ — resolved: Render account exists (ray, 2026-07-24); Oracle dropped.
-3. ~~**cachekit-rs crates.io publish**~~ — resolved by LAB-742: cachekit-rs publishes to
-   crates.io (latest `0.7.0`); hotpath builds against `0.7.0`.
+1. ~~**CachekitIO credentials**~~ — resolved: the demo tenant exists; `spike/roundtrip/roundtrip.py`
+   round-trip verified against the live backend (2026-07-29).
+2. ~~**Oracle account**~~ — resolved: Render chosen instead (2026-07-24); Oracle dropped.
+3. ~~**cachekit-rs crates.io publish**~~ — resolved: cachekit-rs publishes to crates.io (latest
+   `0.7.0`); hotpath builds against `0.7.0`.
 4. **protocol/spec/interop-mode.md status header** — says "NOT yet implemented in any SDK"; all
    three SDKs ship it. One-line doc fix for the protocol repo owners.

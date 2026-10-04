@@ -1,7 +1,8 @@
-# Skyline ingester on the lab k3s cluster
+# Skyline ingester on Kubernetes
 
-The ingester's deployment home (LAB-2383), replacing the Render free-tier
-blueprint that used to live at `/render.yaml`. The image is published by
+The ingester runs as a single self-hosted, egress-only container. These
+manifests target any conformant Kubernetes cluster (developed against k3s); the
+directory name is historical. The image is published by
 [`ingester-image.yml`](../../.github/workflows/ingester-image.yml) to
 `ghcr.io/cachekit-io/skyline-ingester`, tagged by commit SHA only, on every
 push to `main` that touches `ingester/**`. No `latest` tag is published —
@@ -9,27 +10,33 @@ nothing may reach the cluster under a mutable reference.
 
 ## Runbook
 
-Run on a machine with `kubectl` access to the lab cluster. Verify the context
-first — memory/MCP services live on `lab`, never `mem`:
+Run on a machine with `kubectl` access to the target cluster. Verify the
+context first, so nothing lands on the wrong cluster:
 
 ```bash
-kubectl config current-context   # must say: lab
+kubectl config current-context
 ```
 
-**1. Create the secret** (one-time; both values come from
-`op://cachekit/ck-dev-bluesky-default`). The ingester **fails closed** without
-both — live mode refuses to start rather than run with the secure sentiment
-cache disabled:
+**1. Create the secret** (first deploy, and again whenever a value rotates —
+the command is idempotent). It carries the CachekitIO endpoint and both
+credentials, supplied at deploy time from your secret manager: never
+committed, never echoed. The ingester **fails closed** without both
+credentials; live mode refuses to start rather than run with the secure
+sentiment cache disabled:
 
 ```bash
 kubectl create namespace skyline --dry-run=client -o yaml | kubectl apply -f -
 kubectl -n skyline create secret generic skyline-ingester \
-  --from-literal=CACHEKIT_API_KEY="$(op read 'op://cachekit/ck-dev-bluesky-default/credential')" \
-  --from-literal=CACHEKIT_MASTER_KEY="$(op read 'op://cachekit/ck-dev-bluesky-default/encryption_key')"
+  --from-literal=CACHEKIT_API_URL="$CACHEKIT_API_URL" \
+  --from-literal=CACHEKIT_API_KEY="$CACHEKIT_API_KEY" \
+  --from-literal=CACHEKIT_MASTER_KEY="$CACHEKIT_MASTER_KEY" \
+  --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-`CACHEKIT_MASTER_KEY` is the 64-hex `encryption_key` field; the ingester
-validates the format at startup.
+Export the three variables from your secret manager first, in the same
+shell. `CACHEKIT_MASTER_KEY` is a 64-hex key; the ingester validates the format
+at startup. The endpoint lives in the Secret rather than the manifest so the
+manifest stays environment-neutral.
 
 **2. Wire image-pull credentials** (one-time, and it *must* happen before the
 first apply). The `cachekit-io` org **disables public packages** (the
@@ -38,28 +45,25 @@ administrators"), so the image is private and every pull needs GHCR
 credentials — without them each apply ends in `ImagePullBackOff:
 unauthorized`.
 
-Copy the lab cluster's existing GHCR pull secret (`ghcr-creds` in
-`arc-runners`) into `skyline` and attach it to the namespace's **default
+Mint a **classic PAT carrying only `read:packages`** with access to
+`cachekit-io` packages (GHCR does not accept fine-grained PATs), store it as a
+`ghcr-creds` pull secret, and attach it to the namespace's **default
 ServiceAccount** rather than the Deployment: the ServiceAccount admission
 controller merges SA pull secrets into every pod at creation, so a later
 `kubectl apply` of this manifest can't strip them:
 
 ```bash
-kubectl -n arc-runners get secret ghcr-creds -o json \
-  | jq '.metadata = {name: "ghcr-creds", namespace: "skyline"}' \
-  | kubectl apply -f -
+kubectl -n skyline create secret docker-registry ghcr-creds \
+  --docker-server=ghcr.io --docker-username="$GHCR_USER" \
+  --docker-password="$GHCR_READ_PACKAGES_PAT"
 kubectl -n skyline patch serviceaccount default \
   -p '{"imagePullSecrets":[{"name":"ghcr-creds"}]}'
 ```
 
-No `ghcr-creds` to copy? Mint a **classic PAT carrying only
-`read:packages`** with access to `cachekit-io` packages (GHCR does not
-accept fine-grained PATs), feed it to `kubectl create secret
-docker-registry ghcr-creds --docker-server=ghcr.io ...`, then run the same
-`patch` line above. Never park a broad-scope session token (e.g.
-`gh auth token`) in a cluster secret: it outlives the shell, sits
-unencrypted in the k3s datastore, and its blast radius is the GitHub org —
-not this cluster.
+Never park a broad-scope session token (e.g. `gh auth token`) in a cluster
+secret: it outlives the shell, sits in the cluster datastore (unencrypted
+unless the cluster encrypts Secrets at rest), and its blast radius is the
+GitHub org — not this cluster.
 
 **3. Render the image SHA into the manifest and apply** — the manifest ships
 with the `SET-COMMIT-SHA` sentinel instead of a mutable tag, so *every* apply
@@ -75,12 +79,23 @@ run, not from `git rev-parse`:
 
 A missing run makes `sha` empty, which would render `skyline-ingester:` — an
 invalid reference that `Recreate` would apply *after* terminating the running
-pod, so validate before applying, never after:
+pod, so validate before applying, never after. A Secret missing one of the
+three keys fails the same way (`CreateContainerConfigError` after the old pod
+is gone), so the guard checks the key names too, without reading any value:
 
 ```bash
 sha="$(gh run list -R cachekit-io/bluesky-thinking -w ingester-image \
   -b main -e push -s success -L 1 --json headSha -q '.[0].headSha')"
-if [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+keys=" $(kubectl -n skyline get secret skyline-ingester \
+  -o go-template='{{range $k, $v := .data}}{{$k}} {{end}}') "
+missing=""
+for k in CACHEKIT_API_URL CACHEKIT_API_KEY CACHEKIT_MASTER_KEY; do
+  [[ "$keys" == *" $k "* ]] || missing+=" $k"
+done
+if [[ -n "$missing" ]]; then
+  echo "refusing to apply: Secret skyline-ingester lacks:${missing} (step 1)" >&2
+  false
+elif [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
   sed "s|skyline-ingester:SET-COMMIT-SHA|skyline-ingester:${sha}|" \
     deploy/k3s/skyline-ingester.yaml | kubectl apply -f -
 else
@@ -159,14 +174,15 @@ up the fix.
   the filesystem — the container runs with a read-only root fs to keep that
   honest. Restart staleness is bounded by `CHECKPOINT_INTERVAL_SECONDS`
   (300 s).
-- **Egress-only.** Outbound WebSocket to Jetstream + HTTPS to
-  `api.dev.cachekit.io`. No Service, no Ingress, nothing dials in. The old
+- **Egress-only.** Outbound WebSocket to Jetstream + HTTPS to the
+  CachekitIO endpoint. No Service, no Ingress, nothing dials in. The old
   Cloudflare keep-alive cron existed solely for Render's inbound-idle
   spin-down and is gone; the edge cron that remains (`0 * * * *`) is history
   capture only and never touches the ingester.
-- **Memory bounds are measured, not guessed.** Requests/limits encode the
-  LAB-2586 on-cluster findings (full-24h-window working set plus the glibc
-  transient high-water the publish ticks ratchet up, which the original
-  LAB-1775 / [#17](https://github.com/cachekit-io/bluesky-thinking/pull/17)
+- **Memory bounds are measured, not guessed.** Requests/limits encode
+  measurements taken in production against live Jetstream (full-24h-window
+  working set plus the glibc transient high-water the publish ticks ratchet
+  up, which the original
+  [#17](https://github.com/cachekit-io/bluesky-thinking/pull/17)
   minutes-scale measurement could not see) — see the comment block in
   [`skyline-ingester.yaml`](skyline-ingester.yaml).
