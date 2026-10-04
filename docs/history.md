@@ -3,8 +3,8 @@
 Skyline's live values are rolling 5m/1h/24h windows: once a window moves on, the
 prior state is gone, so nobody can tell whether a topic is rising, fading,
 recurring, or merely always large. This document is the design decision for the
-durable history store, plus the operating contract (privacy, retention,
-deletion, cost, restore) the acceptance criteria require.
+durable history store, plus its operating contract (privacy, retention,
+deletion, cost, restore).
 
 ## The decision
 
@@ -24,8 +24,8 @@ rejected on measured grounds, not taste:
   it. Any ingester-side history write would have made that worse; edge-side
   capture added **zero** ingester egress. (The cap dissolved when the ingester left
   Render — the isolation argument below is the rationale that still binds.)
-- **Failure isolation comes free.** The AC requires that history failure never
-  stops current aggregate publishing. With capture on the edge, the ingester
+- **Failure isolation comes free.** History failure must never stop current
+  aggregate publishing. With capture on the edge, the ingester
   does not even know history exists — the property holds by construction, and
   the reverse holds too (a dead ingester just leaves gaps).
 - **The aggregates are already on the edge.** The Worker reads the same
