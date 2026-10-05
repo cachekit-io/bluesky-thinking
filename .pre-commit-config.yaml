@@ -17,47 +17,25 @@ repos:
         stages: [pre-commit]
       - id: no-internal-references-commit-msg
         name: No internal references in commit message
-        # Same patterns. git hands this hook the raw message file: comment lines and the diff
-        # below the `git commit -v` scissors line (both marked with core.commentChar), and its
-        # own merge and revert subjects, which quote branch names and earlier subjects. Only the
-        # text the author wrote is checked; a merge or revert subject is skipped only while git
-        # is making that merge or revert.
+        # Same patterns. git hands this hook the raw message file: "# " comment lines, the diff
+        # below the `git commit -v` scissors line, and its own merge and revert subjects, which
+        # quote branch names and earlier subjects. Only the text the author wrote is checked.
         language: python
         entry: python -c
         args:
           - |
-            import os, re, subprocess, sys
+            import re, sys
             P = re.compile(r"\b(?i:LAB)-[0-9]+|op://|\.ts\.net|(?i:\bk3s[\s_-]+(?:cluster|node|host)s?\b)|dev\.cachekit\.io|\bStage [0-9]|\bAC-[0-9]|github\.com/cachekit(?![\w-])")
             KIND = r"(?:branch|branches|remote-tracking branch|remote-tracking branches|tag|tags|commit|commits)"
-            MERGE_SUBJECT = re.compile(rf"Merge {KIND} '[^']*'(?:(?:, |; | and ){KIND}? ?'[^']*')*(?: of \S+)?(?: into \S+)?")
-            REVERT_SUBJECT = re.compile(r"(?:Revert|Reapply) \".*\"")
-
-            def in_progress(ref):
-                # git keeps MERGE_HEAD / REVERT_HEAD while it commits its own merge or revert message.
-                r = subprocess.run(["git", "rev-parse", "--git-path", ref], capture_output=True, text=True)
-                return r.returncode == 0 and os.path.exists(r.stdout.strip())
-
-            def git_config(key):
-                r = subprocess.run(["git", "config", "--get", key], capture_output=True, text=True)
-                return r.stdout.rstrip("\n") if r.returncode == 0 else ""
+            GIT_SUBJECT = re.compile(rf"Merge {KIND} '[^']*'(?:(?:, |; | and ){KIND}? ?'[^']*')*(?: of \S+)?(?: into \S+)?|(?:Revert|Reapply) \".*\"")
             try:
                 with open(sys.argv[1], encoding="utf-8", errors="replace") as f:
                     text = f.read()
             except OSError as e:
                 sys.exit(f"{sys.argv[1]}: cannot read the commit message: {e}")
-            # git writes its comment and scissors lines with core.commentChar (core.commentString on
-            # newer git), "#" by default. "auto" picks a character per message: read it off git's own lines.
-            cc = git_config("core.commentString") or git_config("core.commentChar") or "#"
-            if cc == "auto":
-                m = re.search(r"^(\S) (?:Please enter the commit message|-{24} >8 -{24}$)", text, re.M)
-                cc = m.group(1) if m else "#"
-            text = text.split(f"{cc} ------------------------ >8 ------------------------")[0]
-            comment = re.compile(re.escape(cc) + r"(?:[ \t]|$)")
-            lines = [line for line in text.splitlines() if line.strip() and not comment.match(line)]
-            if lines and (
-                (MERGE_SUBJECT.fullmatch(lines[0]) and in_progress("MERGE_HEAD"))
-                or (REVERT_SUBJECT.fullmatch(lines[0]) and in_progress("REVERT_HEAD"))
-            ):
+            text = text.split("# ------------------------ >8 ------------------------")[0]
+            lines = [line for line in text.splitlines() if line.strip() and not re.match(r"#(?:[ \t]|$)", line)]
+            if lines and GIT_SUBJECT.fullmatch(lines[0]):
                 lines = lines[1:]
             bad = [line for line in lines if P.search(line)]
             for line in bad:
