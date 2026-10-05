@@ -7,7 +7,7 @@ five operations. The memo is best-effort: an add() landing mid-merge suppresses
 it (typical under live firehose load) and each caller then recomputes — correct
 either way, just without the shortcut.
 
-ponytail: merge-on-demand walks up to 1440 buckets per 24h publish (~every
+Deliberate simplification: merge-on-demand walks up to 1440 buckets per 24h publish (~every
 450 s). Move to incremental per-window running totals if that ever shows up
 in a profile.
 """
@@ -51,7 +51,7 @@ _MAX_CHECKPOINT_MAP_ENTRIES = 1_024
 _K_TAGS, _K_LINKS, _K_DOMAINS, _K_EMOJI = 20, 20, 20, 10
 _MAX_CHECKPOINT_COUNT = 10_000_000
 
-# Live compaction (LAB-1775). A bucket keeps every distinct key only while it is
+# Live compaction. A bucket keeps every distinct key only while it is
 # inside the full-fidelity horizon (the 5m window plus future-skew slack, see
 # below); once it ages past that it is truncated to its top-K entries, in place,
 # and re-truncated if it regrows. Rationale and the measurement behind it:
@@ -61,7 +61,7 @@ _MAX_CHECKPOINT_COUNT = 10_000_000
 #   Jetstream soak 2026-08-09: 2,472 distinct keys/minute, 298.7 B/key by
 #   RSS regression). Uncompacted, the 1,440-minute window projects to ~1,050
 #   MiB steady and ~2.1 GiB at the merge transient, against Render free's 512
-#   MiB -- which is the OOM this ticket chased.
+#   MiB -- which is the 24h-window OOM compaction exists to prevent.
 #
 #   The 1,440x multiplier is the whole problem, so compaction attacks it
 #   directly and leaves the 5m window -- the live view -- bit-exact. An
@@ -104,7 +104,7 @@ _MAX_CHECKPOINT_COUNT = 10_000_000
 #   reachable from a broken or hostile feed, not from a healthy Jetstream.
 #   _prune's retention cap bounds the bucket COUNT, not one bucket's key count,
 #   so it does not cover this. Closing it needs a head admission cap with
-#   explicit at-cap semantics -- a design decision with a panel gate on it, not
+#   explicit at-cap semantics -- a design decision that needs its own review, not
 #   something to slip into a remediation pass. Watch counter_keys on /health.
 #
 #   The horizon carries SLACK past the 5m window, and the slack is load-bearing.
@@ -114,7 +114,7 @@ _MAX_CHECKPOINT_COUNT = 10_000_000
 #   MAX_FUTURE_SKEW_SECONDS (300 s) ahead, so without slack a SINGLE accepted
 #   future-dated post drags the compaction floor into the live window and
 #   truncates it: measured 1,000 -> 100 distinct tags in merged("5m") from one
-#   +300 s frame, repeatable every minute (panel CRIT). Slack keeps compaction
+#   +300 s frame, repeatable every minute. Slack keeps compaction
 #   purely event-time anchored; clamping to wall-clock instead would hand a
 #   container whose clock runs behind the power to switch compaction off
 #   entirely and bring the OOM back. test_windows.py pins slack >= the skew.
@@ -326,12 +326,12 @@ class WindowStore:
             # live in-horizon tuple both re-credits an already-counted signal
             # and refills its source's per-source budget, so global pressure
             # from freely minted DIDs became a second flush path around the
-            # per-source refusal (round-10 CRIT). Only genuinely expired
+            # per-source refusal. Only genuinely expired
             # entries free capacity, via _expire_seen on every add(). The
             # anti-replay guarantee therefore holds under both ceilings, and
             # degradation is public: rate_limited_global_* exclusion counts.
             #
-            # ponytail: refuse-at-cap trades the round-10 integrity bug for a
+            # Trade-off: refuse-at-cap trades that integrity bug for a
             # bounded availability one — ~98 minted DIDs sustaining ~333
             # distinct tuples/s can hold the 100k ledger full and get every
             # source's *new* signals refused for the 5-min horizon. Accepted
@@ -449,10 +449,10 @@ class WindowStore:
     # buckets past the 5m window are truncated to top-K, so the retained window
     # is ~(5 x live cardinality) + (1,435 x ~194 keys) instead of 1,440 x live.
     # That is what took the 24h projection from ~1,050 MiB steady / ~2.1 GiB at
-    # the merge transient down under the 512 MiB Render free plan (LAB-1775;
-    # measured by tools/soak_memory.py, not estimated).
+    # the merge transient down under the 512 MiB Render free plan (measured
+    # by tools/soak_memory.py, not estimated).
     #
-    # ponytail: _copy_range still materialises a copy of EVERY bucket in range
+    # Known cost: _copy_range still materialises a copy of EVERY bucket in range
     # before merged() folds them, so a 24h publish tick peaks at roughly twice
     # the retained window plus the merge output. Compaction bought enough
     # headroom to leave that alone; stream the chunks into the accumulator
@@ -466,7 +466,7 @@ class WindowStore:
 
         Copy, don't reference: add() mutates hot buckets' Counters in place, and
         iterating a Counter that grows mid-merge raises "dictionary changed size
-        during iteration" (the round-1 bug class). Chunking bounds add()'s worst
+        during iteration". Chunking bounds add()'s worst
         stall to one bounded chunk's copy instead of a full-window copy; a bucket
         created or pruned between chunks simply lands in or out of this tick's view,
         which periodic analytics tolerates.
@@ -549,7 +549,7 @@ class WindowStore:
             # extract.normalize_language only ever emits real tokens into `langs`
             # (a matched BCP-47 primary subtag, or "und"); a residual key placed
             # inside that same map is always a string a post could also declare
-            # (LAB-1632: a real "other" token collided with and was clobbered by
+            # (a real "other" token once collided with and was clobbered by
             # the synthetic residual). Keeping it out of the map is what makes
             # the collision structural, not just a different magic string.
             total = sum(m.langs.values())
@@ -568,7 +568,7 @@ class WindowStore:
         return value
 
     def sentiment_value(self, window: str, now: float) -> dict:
-        """Value for the secure per-language sentiment cache (AC-6 groundwork)."""
+        """Value for the secure per-language sentiment cache."""
         m = self.merged(window, now)
         return {
             "window": window,
@@ -584,11 +584,11 @@ class WindowStore:
         language, and emoji counts are approximate after a restore; post and
         signal-candidate totals stay exact.
 
-        Buckets older than the 1h window are COARSENED (LAB-1933): each hour's
+        Buckets older than the 1h window are COARSENED: each hour's
         minutes fold into one unit keyed at the hour's first minute, so a full
         24h window serializes as ~85 units instead of ~1,445 — the checkpoint
         was ~97% of the ingester's outbound bandwidth and busted Render's 5 GB
-        free tier (LAB-1894). Aggregates only ever sum buckets, so live serving
+        free tier. Aggregates only ever sum buckets, so live serving
         is untouched; the cost appears only after a restore, where the 24h
         window's trailing edge expires in hour steps. Keying at the hour FLOOR
         makes that expiry early, never late: a restored 24h count can drop up

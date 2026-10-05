@@ -1,7 +1,7 @@
 [project]
 name = "skyline-ingester"
 version = "0.1.0"
-description = "Skyline Stage-2 Python ingester: Bluesky Jetstream -> sliding windows -> CacheKit interop/v1 aggregates"
+description = "Skyline Python ingester: Bluesky Jetstream -> sliding windows -> CacheKit interop/v1 aggregates"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"

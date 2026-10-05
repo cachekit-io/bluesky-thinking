@@ -11,10 +11,10 @@ byte-identical to what the TS edge API and Rust-WASM hot path read.
 cd ingester
 uv sync
 
-# Live: writes real CachekitIO entries. Creds per docs/architecture.md#credentials.
-# Replace <endpoint> with your CachekitIO endpoint URL first:
-CACHEKIT_API_URL="<endpoint>" CACHEKIT_ALLOW_CUSTOM_HOST=true \
-    op run --env-file=../.op.env -- uv run skyline-ingester
+# Live: writes real CachekitIO entries. Creds per docs/architecture.md#credentials:
+# export CACHEKIT_API_KEY and CACHEKIT_MASTER_KEY from your secret manager, then
+# replace <endpoint> with your CachekitIO endpoint URL:
+CACHEKIT_API_URL="<endpoint>" CACHEKIT_ALLOW_CUSTOM_HOST=true uv run skyline-ingester
 
 # Dry-run: no key -> same pipeline, in-process backend, every write logged
 uv run skyline-ingester
@@ -22,8 +22,9 @@ uv run skyline-ingester
 
 Configuration (env or `.env`, via pydantic-settings; secrets are `SecretStr`).
 In live mode the backend itself is built by the SDK's env-config path, so the
-`CACHEKIT_*` backend variables must be real process env vars (`op run`
-provides that) — the SDK does not read this service's `.env` file:
+`CACHEKIT_*` backend variables must be real process env vars (export them,
+or use your secret manager's run-with-environment command) — the SDK does not
+read this service's `.env` file:
 
 | Variable | Default | Meaning |
 | :--- | :--- | :--- |

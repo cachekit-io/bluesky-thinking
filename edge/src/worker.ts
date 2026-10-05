@@ -12,26 +12,40 @@ import { captureTick, handleHistoryApi, type D1Database } from './history.js';
 
 interface Env {
   CACHEKIT_API_KEY?: string;
-  /** Override for the dev instance / tests; defaults to https://api.cachekit.io. */
+  /** Backend endpoint. Required; backend routes 503 while it is unset. */
   CACHEKIT_API_URL?: string;
   /** Service binding to the Rust-WASM hot-path Worker (wrangler [[services]]). */
   HOTPATH?: HotpathBinding;
-  /** D1 snapshot-history store (wrangler [[d1_databases]], LAB-1616). */
+  /** D1 snapshot-history store (wrangler [[d1_databases]]). */
   HISTORY?: D1Database;
 }
 
 let backend: Backend | null = null;
 
-/** Lazy per-isolate backend singleton; requires env.CACHEKIT_API_KEY. */
+/**
+ * Name of the first unset backend secret, or null when both are set. Both are
+ * required: with no endpoint the SDK would fall back to its default production
+ * host and send this tenant's key there, so the Worker fails closed instead.
+ */
+function missingSecret(env: Env): string | null {
+  if (!env.CACHEKIT_API_KEY) return 'CACHEKIT_API_KEY';
+  if (!env.CACHEKIT_API_URL) return 'CACHEKIT_API_URL';
+  return null;
+}
+
+/** Lazy per-isolate backend singleton; requires both backend secrets. */
 function ensureBackend(env: Env): Backend {
-  // Callers gate on the key; this throw is a belt their try/catch wears.
-  if (!env.CACHEKIT_API_KEY) throw new Error('CACHEKIT_API_KEY secret is not set');
+  // Callers gate on missingSecret; this throw is a belt their try/catch wears.
+  if (!env.CACHEKIT_API_KEY || !env.CACHEKIT_API_URL) {
+    throw new Error(`${missingSecret(env)} secret is not set`);
+  }
   return (backend ??= cachekitio({
     apiKey: env.CACHEKIT_API_KEY,
-    // A non-default apiUrl (the dev instance) is outside the SDK's SSRF
-    // allowlist; the value comes from wrangler config, so opting out is
-    // an operator decision, not a request-time one.
-    ...(env.CACHEKIT_API_URL ? { apiUrl: env.CACHEKIT_API_URL, allowCustomHost: true } : {}),
+    // The demo's endpoint is outside the SDK's SSRF allowlist; the value is a
+    // deploy-time secret, so opting out is an operator decision, not a
+    // request-time one.
+    apiUrl: env.CACHEKIT_API_URL,
+    allowCustomHost: true,
   }));
 }
 
@@ -63,19 +77,21 @@ export default {
       );
     }
     const isHistory = url.pathname.startsWith('/api/history/');
-    // Live credentials are provisioned in Stage 3 (docs/architecture.md
-    // runbook); until the secret exists, fail loudly instead of throwing
-    // from the backend constructor. History is exempt: D1 is its source of
-    // truth and the CachekitIO layer is only its response cache, so a
-    // missing key degrades history to uncached D1 reads instead of a 503.
-    if (!env.CACHEKIT_API_KEY && !isHistory) {
+    // The backend key and endpoint are deploy-time secrets
+    // (docs/architecture.md#credentials); until both exist, fail loudly
+    // instead of throwing from the backend constructor. History is exempt: D1
+    // is its source of truth and the CachekitIO layer is only its response
+    // cache, so a missing secret degrades history to uncached D1 reads
+    // instead of a 503.
+    const missing = missingSecret(env);
+    if (missing && !isHistory) {
       return Response.json(
-        { error: 'not_configured', detail: 'CACHEKIT_API_KEY secret is not set' },
+        { error: 'not_configured', detail: `${missing} secret is not set` },
         { status: 503 },
       );
     }
 
-    // Miss-minting guard (Stage-3 panel finding, closed in LAB-738): these
+    // Miss-minting guard: these
     // URLs are public and the backend bills misses, so an unauthenticated
     // client must not be able to reach CachekitIO at will. Front every
     // aggregate read with the POP cache, 404s included (negative caching) —
@@ -102,7 +118,7 @@ export default {
         response = env.HISTORY
           ? await handleHistoryApi(url, {
               db: env.HISTORY,
-              backend: env.CACHEKIT_API_KEY ? ensureBackend(env) : null,
+              backend: missing ? null : ensureBackend(env),
               nowMs: Date.now(),
             })
           : Response.json(
@@ -134,17 +150,17 @@ export default {
   },
 
   /**
-   * History capture (LAB-1616), the cron's only job since LAB-2383: the
+   * History capture, the cron's only job since the ingester left Render: the
    * keep-alive ping existed solely for Render's free-tier inbound-idle
-   * spin-down, and the ingester now runs on the lab k3s cluster, which has
+   * spin-down, and the ingester now runs on self-hosted Kubernetes, which has
    * no such semantics (its restarts come from the Deployment's liveness
    * probe). The schedule is hourly (wrangler [triggers]) because captureTick
    * no-ops off minute 0 anyway — same set of effective fires as the old
    * every-10-minutes keep-alive schedule, minus the five no-ops an hour.
    */
   async scheduled(controller: unknown, env: Env): Promise<void> {
-    if (!env.HISTORY || !env.CACHEKIT_API_KEY) {
-      console.log('history: HISTORY binding or CACHEKIT_API_KEY not set, skipping capture');
+    if (!env.HISTORY || missingSecret(env)) {
+      console.log('history: HISTORY binding or a backend secret not set, skipping capture');
       return;
     }
     try {

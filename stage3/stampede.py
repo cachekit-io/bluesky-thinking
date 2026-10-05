@@ -1,4 +1,4 @@
-"""AC-5 (epic AC-5): the CachekitIO SaaS distributed lock prevents a stampede.
+"""The CachekitIO SaaS distributed lock prevents a stampede.
 
 N concurrent invocations hit one cold key; the SaaS lock
 (`POST /v1/cache/{key}/lock`) must serialize the recompute so exactly one
@@ -8,16 +8,16 @@ The cached function is **async**, and that is load-bearing: cachekit-py's
 sync wrapper does not do distributed locking at all ("Sync wrappers don't
 support distributed locking (backend protocol is async-only)" —
 decorators/wrapper.py). Only the async wrapper takes the
-`hasattr(backend, "acquire_lock")` path this AC exercises. Empirically
+`hasattr(backend, "acquire_lock")` path this probe exercises. Empirically
 confirmed on 0.15.0: the sync variant of this probe recorded 12/12
 recomputes and zero lock traffic.
 
-Instrumentation, per the AC:
+Instrumentation:
 - a recompute counter inside the cached function (must read exactly 1);
 - httpx request logging (INFO) — the actual `POST …/lock` / `DELETE …/lock`
   SaaS traffic, straight from the SDK's HTTP client, no mocking.
 
-Design notes (LAB-737 "two design gotchas"):
+Design notes (the two gotchas):
 - the wrapper's lock waiters block up to 5 s, and the lock self-expires at
   30 s — so the recompute sleeps well under 5 s. A slower recompute would
   make a *correct* system report > 1 execution.
@@ -26,10 +26,10 @@ Design notes (LAB-737 "two design gotchas"):
   double-checked locking is the property under test.
 
 Env: CACHEKIT_API_KEY (required), CACHEKIT_API_URL / CACHEKIT_ALLOW_CUSTOM_HOST
-for the dev instance.
+for a custom endpoint. Export them from your own secret manager first (see
+stage3/README.md).
 
-    op run --env-file=../.op.apikey.env -- \
-        uv run python ../stage3/stampede.py
+    uv run python ../stage3/stampede.py
 """
 
 from __future__ import annotations

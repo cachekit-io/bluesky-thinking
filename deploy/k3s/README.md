@@ -49,8 +49,8 @@ kubectl -n skyline create secret generic skyline-ingester \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-Environment variables from a Secret are fixed at container start, and
-re-applying an unchanged image SHA leaves the pod as it is, so a rotation
+Rotation only (skip on first deploy): environment variables from a Secret are
+fixed at container start, and re-applying an unchanged image SHA leaves the pod as it is, so a rotation
 takes effect only after a restart. `/health` checks only Jetstream: a revoked
 key fails every cache write while health stays 200. After rotating, restart:
 
@@ -170,6 +170,19 @@ port-forward race, so the retry budget absorbs both the startup window where
 Jetstream hasn't connected yet and a forwarder that isn't listening yet. A 503
 that survives it is a real dead consumer. No response at all means the pod
 isn't up — check `kubectl -n skyline logs deploy/skyline-ingester`.
+
+**Then check the endpoint.** `/health` checks only Jetstream, and the SDK
+logs backend errors without raising, so a wrong `CACHEKIT_API_URL` passes
+everything above while every cache write fails. This line confirms the pod
+picked up the Secret and shows the endpoint it publishes to:
+
+```bash
+kubectl -n skyline logs deploy/skyline-ingester | grep -F 'live mode: publishing to CachekitIO at'
+```
+
+The gate for a wrong endpoint is [`stage4/verify.sh`](../../stage4/verify.sh)
+after one TTL (60 s): its freshness check fails unless the ingester's
+aggregates reach the backend the edge reads.
 
 If GHCR image pulls fail with `unauthorized`, step 2 did not take. Three
 causes, in order of likelihood: the secret is missing from the `skyline`

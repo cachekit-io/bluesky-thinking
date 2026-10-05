@@ -2,7 +2,7 @@
 
 TypeScript Cloudflare Worker serving the five Skyline aggregates from the shared
 CachekitIO namespace via [interop/v1](../docs/architecture.md#locked-key-convention)
-reads (`@cachekit-io/cachekit` 0.1.3), plus a static dashboard on Workers Assets.
+reads (`@cachekit-io/cachekit` 0.1.5), plus a static dashboard on Workers Assets.
 For the live aggregates the edge is **read-only**: they are computed and written
 by the Python ingester; a cache miss here is surfaced (404 + `X-Cache: MISS`),
 never recomputed or faked. The edge's only writes are its own derived state:
@@ -36,18 +36,18 @@ verification have separate dashboard copy.
 
 ## API
 
-| Route                                        | Description                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| :------------------------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GET /api/{operation}?window={window}`       | Cached aggregate. `operation` ∈ `trending_hashtags` · `trending_links` · `lang_mix` · `posts_per_minute` · `top_emoji`; `window` ∈ `5m` · `1h` · `24h` (required — interop binding rules forbid default parameters).                                                                                                                                                                                                         |
-| `GET /api/stats`                             | Per-isolate `hits` / `misses` / `errors` / `hit_rate` + a `scope` string restating this: counters reset when Cloudflare recycles the isolate, and `hit_rate` is aggregate-key availability at this isolate — not an SDK L1 rate, and not the end-user rate (POP cache hits are served before the worker runs). Sent with `cache-control: no-store` — live counters are never replayed from a browser or intermediary cache.  |
-| `GET /api/history/{operation}?range={range}` | Snapshot history from D1: `range` ∈ `7d` (hourly points) · `30d` (daily points). Bounded, ascending series with a coverage block — absent buckets are gaps, never zeros. `x-history-source: cachekit\|d1\|d1-fallback` names the serving layer (responses are CacheKit-cached per bucket; cached bytes are validated before relay and only complete series are cached). Served from D1 alone if `CACHEKIT_API_KEY` is unset. |
-| `GET /api/history/status`                    | Capture health: per-tier row counts, newest bucket, `stale` flag. Separate from live freshness by design.                                                                                                                                                                                                                                                                                                                    |
-| `GET /`                                      | Static dashboard (Workers Assets).                                                                                                                                                                                                                                                                                                                                                                                           |
+| Route                                        | Description                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| :------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `GET /api/{operation}?window={window}`       | Cached aggregate. `operation` ∈ `trending_hashtags` · `trending_links` · `lang_mix` · `posts_per_minute` · `top_emoji`; `window` ∈ `5m` · `1h` · `24h` (required — interop binding rules forbid default parameters).                                                                                                                                                                                                            |
+| `GET /api/stats`                             | Per-isolate `hits` / `misses` / `errors` / `hit_rate` + a `scope` string restating this: counters reset when Cloudflare recycles the isolate, and `hit_rate` is aggregate-key availability at this isolate — not an SDK L1 rate, and not the end-user rate (POP cache hits are served before the worker runs). Sent with `cache-control: no-store` — live counters are never replayed from a browser or intermediary cache.     |
+| `GET /api/history/{operation}?range={range}` | Snapshot history from D1: `range` ∈ `7d` (hourly points) · `30d` (daily points). Bounded, ascending series with a coverage block — absent buckets are gaps, never zeros. `x-history-source: cachekit\|d1\|d1-fallback` names the serving layer (responses are CacheKit-cached per bucket; cached bytes are validated before relay and only complete series are cached). Served from D1 alone if either backend secret is unset. |
+| `GET /api/history/status`                    | Capture health: per-tier row counts, newest bucket, `stale` flag. Separate from live freshness by design.                                                                                                                                                                                                                                                                                                                       |
+| `GET /`                                      | Static dashboard (Workers Assets).                                                                                                                                                                                                                                                                                                                                                                                              |
 
 Every aggregate response carries `X-Cache: HIT|MISS`. Status codes: unknown
 operation → 404, missing/invalid window → 400 (both before any cache read),
 backend failure → 502, undecodable entry → 500, missing `CACHEKIT_API_KEY`
-secret → 503. Success body: `{ operation, window, data }` where `data` is the
+or `CACHEKIT_API_URL` secret → 503. Success body: `{ operation, window, data }` where `data` is the
 decoded interop/v1 MessagePack map as written by the ingester.
 
 Aggregate reads (not `/api/stats`) are additionally fronted by the Cloudflare
@@ -97,12 +97,31 @@ design + operating contract: [`docs/history.md`](../docs/history.md).
 
 ## Deploy
 
-`wrangler deploy`, then set the secret from your secret manager (creds per
+The Worker needs two secrets, both from your secret manager (creds per
 [docs/architecture.md#credentials](../docs/architecture.md#credentials)):
+`CACHEKIT_API_KEY`, the tenant's API key, and `CACHEKIT_API_URL`, the
+CachekitIO endpoint the tenant is provisioned on. Neither is committed.
+`wrangler.toml` lists both under `[secrets] required`, so `wrangler deploy`
+(wrangler >= 4.77) fails, naming the missing secret, until both are set on
+the Worker; at runtime the backend routes answer 503 while either is unset.
+
+On a Worker that already exists, set or rotate a secret in place:
 
 ```bash
-wrangler secret put CACHEKIT_API_KEY   # prompts for the demo tenant's API key
+npx wrangler secret put CACHEKIT_API_KEY   # prompts for the value
+npx wrangler secret put CACHEKIT_API_URL
 ```
+
+A new Worker, or the first deploy after `CACHEKIT_API_URL` moved out of
+`[vars]` (a plain variable blocks a secret of the same name), takes the
+secrets with the deploy itself, from a file outside the repository that you
+delete afterwards:
+
+```bash
+npx wrangler deploy --secrets-file /path/outside/the/repo/secrets.env   # NAME=value lines
+```
+
+Secrets already on the Worker and not in the file are kept.
 
 Any pending D1 migration must be applied **before** the deploy that expects it:
 
@@ -110,14 +129,8 @@ Any pending D1 migration must be applied **before** the deploy that expects it:
 npx wrangler d1 migrations apply skyline-history --remote
 ```
 
-Dev deployment: **https://skyline-edge.raywalker.workers.dev** (the backend
-endpoint is a `[vars]` entry, `CACHEKIT_API_URL`).
+Dev deployment: **https://skyline-edge.raywalker.workers.dev**
 
-Two build-time accommodations for `@cachekit-io/cachekit` 0.1.3 (both retire
-with the 0.1.5 WASM core — see `wrangler.toml` for the bump tracking): the
-`nodejs_compat` flag (transitive node builtins), and a wrangler `[alias]`
-stubbing the NAPI-native `@cachekit-io/cachekit-core-ts` — the edge never
-runs that path (interop reads only, no ByteStorage envelope), and the stub
-throws if that ever stops being true. Any new code path that needs the
-native core (ByteStorage envelopes, encryption) compiles fine and **throws
-at runtime**. Do not target 0.1.4 — it is abandoned and uninstallable.
+`@cachekit-io/cachekit` 0.1.5 ships a WASM core that bundles for Workers as
+is: no `nodejs_compat` flag, no build-time alias. Do not target 0.1.4 — it is
+abandoned and uninstallable.

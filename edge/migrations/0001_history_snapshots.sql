@@ -1,4 +1,4 @@
--- LAB-1616: aggregate-only snapshot history (docs/history.md).
+-- Aggregate-only snapshot history (docs/history.md).
 -- One row per (operation, tier, bucket). The primary key IS the idempotency
 -- guarantee: a re-fired capture for an already-recorded bucket is an
 -- INSERT OR IGNORE no-op, so duplicate publishes cannot create duplicate

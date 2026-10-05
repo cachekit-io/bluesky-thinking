@@ -84,14 +84,14 @@ function rankedRows(items, nameKey, valueKey, { percent = false, links = false }
     .join('')}</ol>`;
 }
 
-/** @param {AggregatePayload} langs @param {number} [otherShare] long-tail residual, a sibling of `langs` (LAB-1632) */
+/** @param {AggregatePayload} langs @param {number} [otherShare] long-tail residual, a sibling of `langs` */
 function languageRows(langs, otherShare) {
   const rows = Object.entries(langs).flatMap(([lang, share]) =>
     isNumber(share) ? [{ lang, share }] : [],
   );
   if (isNumber(otherShare)) {
     // reserve one of rankedRows' MAX_ROWS slots so the residual survives the cut, and fold
-    // any evicted languages' shares into it — "Other languages" means everything not shown (LAB-2077)
+    // any evicted languages' shares into it — "Other languages" means everything not shown
     rows.sort((a, b) => b.share - a.share);
     for (const evicted of rows.splice(MAX_ROWS - 1)) otherShare += evicted.share;
     rows.push({ lang: 'Other languages', share: otherShare });
@@ -226,7 +226,7 @@ export function renderCardMarkup(title, state, selectedWindow) {
 }
 
 /**
- * Render the history panel (LAB-1616). One series, so no legend — the title
+ * Render the history panel. One series, so no legend — the title
  * names it. Present buckets are amber bars; an absent bucket renders NO bar:
  * a gap in collection is a visible hole, never interpolated and never zero.
  * The coverage line states when history began and how complete the range is.
@@ -419,7 +419,7 @@ function initDashboard() {
       if (version !== refreshVersion) return;
       const rate = stats.hit_rate === null ? '—' : `${(stats.hit_rate * 100).toFixed(1)}%`;
       dashboardTiles.innerHTML = [
-        // LAB-1618 copy: this is aggregate-key availability seen by one
+        // Honest-scope copy: this is aggregate-key availability seen by one
         // worker isolate (counters reset on recycle) — not an SDK L1 rate,
         // and POP cache hits never reach the isolate at all.
         ['Key availability (this isolate)', rate],

@@ -1,4 +1,4 @@
-# Skyline ingester container (LAB-2383): the k3s replacement for the Render
+# Skyline ingester container: the k3s replacement for the Render
 # blueprint that used to live in /render.yaml. Build context is ingester/.
 #
 # Multi-stage per the uv docs' recommended pattern: the builder image carries

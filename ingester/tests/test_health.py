@@ -1,4 +1,4 @@
-"""AC-0 (LAB-738): the /health listener — status codes, liveness body, routing."""
+"""The /health listener — status codes, liveness body, routing."""
 
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ def test_snapshot_connected_reports_ages() -> None:
 
 
 def test_snapshot_never_leaks_payload_or_keys() -> None:
-    # AC-0: liveness only — no aggregate data, no key material. Pin the exact
+    # Liveness only — no aggregate data, no key material. Pin the exact
     # key set so a future field addition is a conscious decision.
     state, _ = make_state()
     _, body = state.snapshot()
@@ -52,7 +52,7 @@ def test_snapshot_never_leaks_payload_or_keys() -> None:
         "last_event_age_seconds",
         "last_publish_age_seconds",
         "uptime_seconds",
-        # LAB-1775 AC-6, added deliberately: memory diagnostics, no aggregate
+        # Added deliberately: memory diagnostics, no aggregate
         # content. rss_mib is None off Linux, hence still present as a key.
         "rss_mib",
         "rss_peak_mib",
@@ -60,9 +60,9 @@ def test_snapshot_never_leaks_payload_or_keys() -> None:
 
 
 def test_snapshot_reports_store_sizes_without_their_contents() -> None:
-    # LAB-1775 AC-6: the store-backed fields are SIZES. A count of counter keys
+    # The store-backed fields are SIZES. A count of counter keys
     # is diagnosable; the keys themselves would turn the liveness endpoint into
-    # an unauthenticated read of the aggregates AC-0 keeps off it.
+    # an unauthenticated read of the aggregates the endpoint keeps off it.
     store = WindowStore()
     store.add(
         PostFeatures(
@@ -139,7 +139,7 @@ async def _server_end_to_end() -> None:
 
         # Oversized request line: the reader limit turns it into a ValueError
         # inside the handler, which must close the connection quietly instead
-        # of escaping as an unretrieved task exception (expert-panel finding).
+        # of escaping as an unretrieved task exception.
         reader, writer = await asyncio.open_connection("127.0.0.1", port)
         writer.write(b"GET /" + b"a" * 16384 + b" HTTP/1.1\r\n\r\n")
         await writer.drain()

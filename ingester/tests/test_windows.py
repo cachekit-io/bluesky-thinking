@@ -29,11 +29,11 @@ from .conftest import FIXTURE_TOTALS, NOW, NOW_MIN
 
 
 def test_restore_bounds_backtracking_hostile_emoji_keys():
-    # Round-10 CRIT: an ambiguous EMOJI_RE made the ANCHORED fullmatch in the
+    # An ambiguous EMOJI_RE made the ANCHORED fullmatch in the
     # checkpoint emoji validator backtrack exponentially — 100 hostile keys
     # blocked restore() for ~7.7 s while holding the store lock, and restore()
     # runs before the health port binds, so a poisoned 26h-TTL checkpoint was
-    # a permanent boot loop. Hostile shape (panel): CORE (ZWJ CORE EXT)^k + "x",
+    # a permanent boot loop. Hostile shape: CORE (ZWJ CORE EXT)^k + "x",
     # k=20, inside the 64-codepoint cap so MAX_EMOJI_LENGTH cannot mitigate it.
     hostile = {chr(0x1F300 + index) + "‍\U0001f600\U0001f3fb" * 20 + "x": 1 for index in range(100)}
     snap = {
@@ -90,7 +90,7 @@ def test_lang_mix_shares_sum_to_one(store):
 
 
 def test_lang_mix_real_other_token_survives_the_residual():
-    # LAB-1632 panel reproduction: a real `other` token (a post can declare any
+    # Reproduction: a real `other` token (a post can declare any
     # 2-8 char lowercase primary subtag, "other" included — extract.py has no
     # vocabulary check) held a top-25 share of 1000/1036 ~= 0.9652. Pre-fix,
     # the synthetic residual was written into langs["other"] AFTER the top-25
@@ -149,7 +149,7 @@ def test_global_ledger_cap_refuses_new_contributions(monkeypatch):
     store = WindowStore(dedupe_key=b"x" * 32)
     # Distinct sources: the global cap must refuse the newcomer, never evict a
     # live tuple — eviction both re-credited an already-counted signal and
-    # refilled its source's per-source budget (round-10 CRIT).
+    # refilled its source's per-source budget.
     for index in range(3):
         assert store._accept_signal(bytes([index]) * 16, "tag", f"tag{index}", float(index)) is None
     assert store._accept_signal(bytes([3]) * 16, "tag", "tag3", 3.0) == "rate_limited_global_tag"
@@ -165,7 +165,7 @@ def test_global_ledger_cap_refuses_new_contributions(monkeypatch):
 
 
 def test_global_cap_pressure_cannot_recredit_capped_source(monkeypatch):
-    # Round-10 CRIT reproduction (frozen clock, so nothing expires): source A
+    # Reproduction (frozen clock, so nothing expires): source A
     # fills its per-source cap, 600 other DIDs push the global cap, and A's
     # live tuples must NOT be re-credited nor its per-source budget refilled.
     monkeypatch.setattr("skyline_ingester.windows.MAX_SOURCE_LEDGER_ENTRIES_PER_SOURCE", 8)
@@ -224,7 +224,7 @@ def test_per_source_ledger_cap_refuses_instead_of_evicting(monkeypatch):
 
 
 def test_source_cannot_flush_own_ledger_to_replay_a_signal(monkeypatch):
-    # Round-9 CRIT reproducer: with own-oldest eviction, 40 boost posts
+    # Reproducer: with own-oldest eviction, 40 boost posts
     # interleaved with junk each re-credited the same tag (count 40). With
     # refuse-at-cap the boost tuple survives and the count stays 1.
     monkeypatch.setattr("skyline_ingester.windows.MAX_SOURCE_LEDGER_ENTRIES_PER_SOURCE", 4)
@@ -408,7 +408,7 @@ def test_concurrent_add_and_read_is_race_free():
     assert not errors, f"race detected: {errors[:3]}"
 
 
-# --- LAB-1775: age-based compaction bounds the retained window -----------------
+# --- Age-based compaction bounds the retained window ---------------------------
 
 
 def _post(minute, *, tags=(), links=(), domains=(), lang="en", sentiment=None, labels=None):
@@ -438,7 +438,7 @@ def _age_out(store, minute):
 
 
 def test_aged_buckets_compact_while_the_5m_window_stays_exact():
-    # The whole LAB-1775 fix in one assertion: resident cost is
+    # The whole compaction fix in one assertion: resident cost is
     # (retained minutes x keys per minute), so the 1,435 minutes nobody reads at
     # full fidelity get truncated and the 5 the live view reads do not.
     store = WindowStore()
@@ -516,7 +516,7 @@ def test_an_aged_bucket_that_regrows_is_recompacted():
 
 def test_compaction_bounds_langs_and_sent_together():
     # sent is keyed by language, so leaving it out of compaction would just move
-    # the unbounded axis one field to the right (the round-9 lesson).
+    # the unbounded axis one field to the right.
     store = WindowStore()
     aged = NOW_MIN - 10
     for index in range(200):
@@ -527,7 +527,7 @@ def test_compaction_bounds_langs_and_sent_together():
         bucket = store._buckets[aged]
         # Literal, not just the constant: `== _COMPACT_LANGS` alone still passes
         # if someone raises it past the 200-language fill, i.e. with langs
-        # compaction effectively switched off (panel finding).
+        # compaction effectively switched off.
         assert len(bucket.langs) == 32 == _COMPACT_LANGS
         assert set(bucket.sent) <= set(bucket.langs)
 
@@ -552,7 +552,7 @@ def test_full_ledger_stops_new_counter_keys_from_being_minted(monkeypatch):
     # The head of the window (the uncompacted minutes) is bounded by the GLOBAL
     # contribution ledger, not by a second cap: at most MAX_SOURCE_LEDGER_ENTRIES
     # accepted contributions per SOURCE_DEDUPE_SECONDS. Raising that constant
-    # without redoing the memory arithmetic reopens LAB-1775, so pin the
+    # without redoing the memory arithmetic reopens the unbounded-memory bug, so pin the
     # behaviour rather than the number.
     #
     # Count EVERY family the accepted contribution mints, not just tags: one
@@ -635,7 +635,7 @@ def test_compaction_can_never_reach_into_the_live_5m_window():
 
 
 def test_one_future_dated_post_cannot_truncate_the_live_5m_window():
-    # Panel CRIT (LAB-1775): jetstream accepts events up to MAX_FUTURE_SKEW_SECONDS
+    # Jetstream accepts events up to MAX_FUTURE_SKEW_SECONDS
     # ahead, so before the horizon carried slack a SINGLE such post dragged
     # compact_floor into the live window — measured 1,000 -> 100 distinct tags,
     # repeatable every minute, silently falsifying "the 5m window is bit-exact".
@@ -702,8 +702,8 @@ def test_backfill_inside_the_horizon_is_still_accepted():
 def test_checkpoint_round_trip_preserves_the_compaction_language_bound():
     # The live store and the checkpoint must agree on how many languages a
     # bucket keeps. They did not: live kept 32, a checkpoint round-trip silently
-    # dropped it to 15 — on the restart path this whole ticket exists to
-    # survive, and against two doc surfaces that state 32 (panel finding).
+    # dropped it to 15 — on the restart path compaction must survive, and
+    # against two doc surfaces that state 32.
     store = WindowStore()
     aged = NOW_MIN - 20
     for index in range(200):
@@ -722,7 +722,7 @@ def test_checkpoint_round_trip_preserves_the_compaction_language_bound():
 
 
 def test_a_full_24h_window_stays_inside_its_absolute_key_budget():
-    # THE bound this ticket delivers, asserted as an absolute number rather than
+    # THE 24h key budget, asserted as an absolute number rather than
     # against the constants that produce it. `len(x) == _K_TAGS` passes for any
     # _K_TAGS; this fails if any per-family K is raised, if a new Bucket counter
     # family is added uncapped, or if compaction is disabled outright.

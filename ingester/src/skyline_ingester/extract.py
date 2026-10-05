@@ -37,7 +37,7 @@ _EMOJI_CORE = (
 _EXT = "[️\U0001f3fb-\U0001f3ff]"
 EMOJI_RE = re.compile(f"[{_EMOJI_CORE}](?:{_EXT}|‍[{_EMOJI_CORE}])*")
 
-# ponytail: ~40-word lexicon + emoji valence — demo-grade sentiment. Swap for a
+# Deliberate simplification: ~40-word lexicon + emoji valence — demo-grade sentiment. Swap for a
 # real model (e.g. vader / a small transformer) if the secure cache ever matters.
 _POSITIVE = frozenset(
     [

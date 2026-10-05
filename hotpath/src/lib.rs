@@ -1,8 +1,8 @@
-//! Skyline hot-path Worker (LAB-746) — the Rust-WASM leg of the edge.
+//! Skyline hot-path Worker — the Rust-WASM leg of the edge.
 //!
 //! Pure compute lives in [`compute`] (target-independent, natively tested);
 //! everything below the cfg line is the Cloudflare Workers HTTP surface that
-//! Stage 3 binds into the TS serving path.
+//! the TS edge binds into its serving path.
 //!
 //! Endpoints:
 //! - `GET  /` — service info + locked contract summary
@@ -10,8 +10,8 @@
 //! - `POST /v1/verify[?expected=<16-hex>]` — xxHash3-64 + interop validity of the raw body
 //! - `POST /v1/merge` — merge count-map window slices (JSON: `{slices: [base64…], top}`)
 //! - `GET  /v1/cache/:operation/:window` — derive key, fetch via
-//!   `WorkersCachekitIO`, verify + decode (503 until the Stage-3
-//!   `CACHEKIT_API_KEY` secret exists)
+//!   `WorkersCachekitIO`, verify + decode (503 while the `CACHEKIT_API_KEY`
+//!   or `CACHEKIT_API_URL` secret is unset)
 
 pub mod compute;
 
@@ -153,16 +153,20 @@ mod edge {
                 "CACHEKIT_API_KEY secret not configured — see docs/architecture.md#credentials",
             );
         };
-        let api_url = ctx
-            .var("CACHEKIT_API_URL")
-            .map(|v| v.to_string())
-            .unwrap_or_else(|_| "https://api.cachekit.io".to_string());
-        // allow_custom_host: CACHEKIT_API_URL is trusted operator config (the
-        // dev instance is outside the SDK's SSRF allowlist); HTTPS + private-IP
+        // Fail closed: with no endpoint the SDK default is the production host,
+        // and this tenant's key must never be sent there.
+        let Ok(api_url) = ctx.secret("CACHEKIT_API_URL") else {
+            return json_error(
+                503,
+                "CACHEKIT_API_URL secret not configured — see docs/architecture.md#credentials",
+            );
+        };
+        // allow_custom_host: the endpoint is trusted operator config (the
+        // demo's is outside the SDK's SSRF allowlist); HTTPS + private-IP
         // checks still apply.
         let backend = match WorkersCachekitIO::builder()
             .api_key(api_key.to_string())
-            .api_url(api_url)
+            .api_url(api_url.to_string())
             .allow_custom_host(true)
             .build()
         {

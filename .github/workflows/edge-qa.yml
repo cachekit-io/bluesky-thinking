@@ -29,7 +29,7 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: edge/package-lock.json
-      # Lockfile-respecting install — LAB-831: a PR editing package.json without
+      # Lockfile-respecting install: a PR editing package.json without
       # the lockfile (or pinning an uninstallable version) must fail here.
       - name: Install (locked)
         run: npm ci

@@ -1,52 +1,29 @@
-# Skyline edge API + dashboard. Production routing is Stage 4; this config
-# deploys the dev worker on the free plan.
-# The CACHEKIT_API_KEY secret comes from op://cachekit/ck-dev-bluesky-default
-# (docs/architecture.md#credentials):
-#   op read "op://cachekit/ck-dev-bluesky-default/credential" | wrangler secret put CACHEKIT_API_KEY
+# Skyline edge API + dashboard, deployed on the Workers free plan.
 name = "skyline-edge"
 main = "src/worker.ts"
 compatibility_date = "2026-07-01"
-# nodejs_compat: @cachekit-io/cachekit 0.1.3 transitively requires node
-# builtins (string_decoder via redis-parser) that esbuild can't resolve
-# for Workers without it. 0.1.5's workerd export pulls in no node builtins,
-# so drop this flag together with the [alias] below when Renovate PR #7 lands.
-compatibility_flags = ["nodejs_compat"]
 
-# @cachekit-io/cachekit 0.1.3 statically imports its NAPI core (.node
-# binaries — unbundleable and unrunnable on Workers). The edge never executes
-# that path (interop reads only); alias it to a throwing stub. FAILURE MODE:
-# add any code path that needs the native core (ByteStorage envelopes,
-# encryption) and the edge throws at RUNTIME, not build time. 0.1.5 fixes
-# this properly with a WASM core (LAB-831); the bump is Renovate PR #7 —
-# drop this alias and the stub when it lands. 0.1.4 is abandoned and
-# uninstallable; never target it.
-[alias]
-"@cachekit-io/cachekit-core-ts" = "./src/core-ts-stub.ts"
+# Set from your secret manager, never this file: see edge/README.md#deploy.
+[secrets]
+required = ["CACHEKIT_API_KEY", "CACHEKIT_API_URL"]
 
-[vars]
-# The dev.cachekit instance. Not in the SDK's SSRF host allowlist, hence the
-# explicit config-level opt-out (trusted operator config, same trust model as
-# the Python CACHEKIT_ALLOW_CUSTOM_HOST env var).
-CACHEKIT_API_URL = "https://api.dev.cachekit.io"
-
-# Snapshot-history capture (LAB-1616, docs/history.md): hourly, because
-# captureTick only acts at minute 0 (daily tier + retention sweep at UTC
-# midnight ride the same fire). This cron used to be the Render keep-alive
-# ping every 10 minutes; the ingester now runs on the lab k3s cluster
-# (deploy/k3s/), which never idles it out, so the ping is gone (LAB-2383)
-# and capture — previously a passenger — owns the schedule.
+# Snapshot-history capture (docs/history.md): hourly, because captureTick only
+# acts at minute 0 (daily tier + retention sweep at UTC midnight ride the same
+# fire). This cron used to be the Render keep-alive ping every 10 minutes; the
+# ingester now runs on self-hosted Kubernetes (deploy/k3s/), which never idles
+# it out, so the ping is gone and capture owns the schedule.
 [triggers]
 crons = ["0 * * * *"]
 
-# Stage 3 (AC-3): the Rust-WASM hot path, reached via service binding — not
-# a public URL. Every served aggregate is integrity-checked there first.
+# The Rust-WASM hot path, reached via service binding — not a public URL.
+# Every served aggregate is integrity-checked there first.
 [[services]]
 binding = "HOTPATH"
 service = "skyline-hotpath"
 
-# Snapshot-history store (LAB-1616, docs/history.md), fed by the hourly cron
-# above (one expression of the free plan's five per ACCOUNT, shared with
-# every other Worker). Schema changes ship as files in ./migrations; apply with
+# Snapshot-history store (docs/history.md), fed by the hourly cron above (one
+# expression of the free plan's five per ACCOUNT, shared with every other
+# Worker). Schema changes ship as files in ./migrations; apply with
 #   npx wrangler d1 migrations apply skyline-history --remote
 # BEFORE deploying a Worker that depends on them.
 [[d1_databases]]

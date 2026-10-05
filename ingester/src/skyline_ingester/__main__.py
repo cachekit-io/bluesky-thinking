@@ -24,14 +24,14 @@ logger = logging.getLogger("skyline_ingester")
 
 def build_publisher(settings: Settings, store: WindowStore) -> Publisher:
     if settings.cachekit_api_key is not None:
-        # Fail closed (epic decision, ray 2026-07-24): the AC-6 secure cache is part
+        # Fail closed (design decision, 2026-07-24): the secure cache is part
         # of the demo, so a live deploy without its master key must not come up.
         if settings.cachekit_master_key is None:
             raise RuntimeError("CACHEKIT_MASTER_KEY is required in live mode: the secure sentiment cache must fail closed")
         from cachekit.backends.cachekitio import CachekitIOBackend
 
         # No-args = the SDK's env-config path (CACHEKIT_API_KEY, plus optional
-        # CACHEKIT_API_URL / CACHEKIT_ALLOW_CUSTOM_HOST for the dev instance).
+        # CACHEKIT_API_URL / CACHEKIT_ALLOW_CUSTOM_HOST for a custom endpoint).
         # Passing api_key alone is rejected by the SDK ("Both api_url and
         # api_key required if using manual config"), so live mode never came up
         # before this fix.

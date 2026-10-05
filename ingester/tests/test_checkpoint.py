@@ -61,7 +61,7 @@ def test_restore_rejects_unknown_version(store):
 
 
 def test_restore_ignores_legacy_sent():
-    # ZK (panel round 3): the plaintext checkpoint is operator-poisonable, so a
+    # ZK: the plaintext checkpoint is operator-poisonable, so a
     # restored `sent` would let the backend operator choose the plaintext of the
     # next @cache.secure publish. Sentiment must come from live ingestion only.
     good = int(NOW // 60)
@@ -128,7 +128,7 @@ def test_restore_tolerates_malformed_checkpoints(caplog):
 
 
 def test_restore_drops_only_poisoned_entries_and_keeps_the_bucket():
-    # Panel round-2 MAJ: a structurally valid checkpoint with a non-numeric counter
+    # A structurally valid checkpoint with a non-numeric counter
     # VALUE used to pass restore() and detonate later in merged()/most_common(),
     # where the publisher's except turns it into silent misses for up to 24h.
     # Each unsafe entry must be omitted without erasing unrelated minute totals.
@@ -268,7 +268,7 @@ def test_restore_rejects_overlong_emoji_keys():
     assert merged.excluded["checkpoint_invalid_emoji"] == 1
 
 
-# --- Hour-coarsening (LAB-1933): aged minutes fold into hour units at snapshot time ---
+# --- Hour-coarsening: aged minutes fold into hour units at snapshot time ---
 
 
 def _minute_post(minute: int, *, tags=(), lang="en") -> PostFeatures:
@@ -297,10 +297,10 @@ def _day_store(span_minutes: int = WINDOW_MINUTES["24h"]) -> WindowStore:
 
 
 def test_snapshot_coarsens_aged_buckets_to_hour_units():
-    # THE bound this ticket delivers: a full 24h window serializes as ~85 units
+    # THE checkpoint-size bound: a full 24h window serializes as ~85 units
     # (last hour minute-keyed + one unit per aged hour), not ~1,441 — the size
-    # cut that was sized against Render's 5 GB/month egress allowance. The lab
-    # k3s cluster is unmetered, but the bound still holds and still matters:
+    # cut that was sized against Render's 5 GB/month egress allowance. The
+    # self-hosted cluster is unmetered, but the bound still holds and still matters:
     # it is what keeps the checkpoint small enough to write every 300 s.
     store = _day_store()
     snap = store.snapshot(NOW)

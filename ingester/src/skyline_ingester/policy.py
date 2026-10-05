@@ -114,7 +114,7 @@ _DNS_LABEL_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 # Syntactic class rule for the ONE attacker move enumeration cannot outrun:
 # registering a local/loopback-themed name under an arbitrary new TLD
 # (localdev.<newTLD>, <x>local.<tld>, loopback.<tld>) and pointing it at a
-# private address for ~ten dollars (round-10 verdict). Matched as a substring
+# private address for ~ten dollars. Matched as a substring
 # against every DNS label, so it also catches embeddings (devlocal, mylocal,
 # localhost, lokalhost). Tokens are limited to the four DISTINCTIVE stems of
 # that family — bare short tokens like `home`/`lcl`/`lvh`/`intern`/`127` were

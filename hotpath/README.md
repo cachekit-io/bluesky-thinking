@@ -13,7 +13,7 @@ Dev deployment: **https://skyline-hotpath.raywalker.workers.dev**
 | interop/v1 key derivation | `GET /v1/key/:operation/:window` | The five locked operations × `5m`/`1h`/`24h` (contract: [`docs/architecture.md`](../docs/architecture.md)). Returns the key + locked TTL. Off-contract input → 400. |
 | Payload integrity | `POST /v1/verify[?expected=<16-hex>]` | Body = raw cached payload. Returns xxHash3-64 (big-endian hex, the `StorageEnvelope` convention) + strict interop/v1 validity (single MessagePack document, no trailing bytes, CK frames flagged with a diagnostic). |
 | Window-slice aggregation | `POST /v1/merge` | JSON `{"slices": ["<base64 msgpack {str:int} doc>", …], "top": 50}` → merged top-N counts (count desc, key asc) + the canonical interop/v1 MessagePack of the result, ready to write back byte-identically. |
-| Cache read + verify | `GET /v1/cache/:operation/:window` | Derives the key, fetches the live backend via `WorkersCachekitIO` (the wasm32 `SystemTime` panic was fixed in cachekit-rs 0.7.0; the direct `worker::Fetch` workaround is gone), checksums + strict-decodes the payload. Failure statuses: 503 if the `CACHEKIT_API_KEY` secret is missing, 500 if the backend config is invalid, 502 if the backend request fails. |
+| Cache read + verify | `GET /v1/cache/:operation/:window` | Derives the key, fetches the live backend via `WorkersCachekitIO` (the wasm32 `SystemTime` panic was fixed in cachekit-rs 0.7.0; the direct `worker::Fetch` workaround is gone), checksums + strict-decodes the payload. Failure statuses: 503 if the `CACHEKIT_API_KEY` or `CACHEKIT_API_URL` secret is unset, 500 if the backend config is invalid, 502 if the backend request fails. |
 | Service info | `GET /` | Contract summary + endpoint list; doubles as a health check. |
 
 Example — the byte-locked spike vector, derived live on the edge:
@@ -45,16 +45,22 @@ $ cargo test                                     # native: contract + vector tes
 $ cargo clippy --all-targets -- -D warnings      # native lint
 $ cargo clippy --target wasm32-unknown-unknown -- -D warnings
 $ worker-build --release                         # reproducible wasm32 build (the one-liner)
-$ npx wrangler deploy                            # runs worker-build itself, then uploads
+$ npx wrangler@4.114.0 deploy                    # runs worker-build itself, then uploads
 ```
 
 CI ([`hotpath-qa`](../.github/workflows/hotpath-qa.yml)) gates every PR and push touching
 `hotpath/` — everything above except the deploy.
 
-Secrets: `CACHEKIT_API_KEY` via `wrangler secret put CACHEKIT_API_KEY`, from your secret manager
-([docs/architecture.md#credentials](../docs/architecture.md#credentials)).
-Config: `CACHEKIT_API_URL` (`wrangler.toml [vars]`) points at the demo's CachekitIO
-endpoint. Nothing else is configurable.
+## Secrets
+
+Two secrets, both from your secret manager
+([docs/architecture.md#credentials](../docs/architecture.md#credentials)):
+`CACHEKIT_API_KEY`, the tenant's API key, and `CACHEKIT_API_URL`, the CachekitIO endpoint the
+tenant is provisioned on. Nothing else is configurable. `wrangler.toml` lists both under
+`[secrets] required`, so `wrangler deploy` fails, naming the missing secret, until both are set
+on the Worker; the cache route answers 503 while either is unset. Setting, rotating and the
+first-deploy procedure are the same as the edge's: [`edge/README.md`](../edge/README.md#deploy),
+with `npx wrangler@4.114.0` here (no `package.json` pins it).
 
 The TS edge binds this Worker into its serving path: the edge
 holds a service binding (`env.HOTPATH`) and `POST /v1/verify`s every payload

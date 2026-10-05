@@ -1,7 +1,7 @@
-"""$PORT health endpoint (LAB-738 AC-0).
+"""$PORT health endpoint.
 
 Originated as a Render free-tier web-service requirement (answer HTTP on
-$PORT or the deploy's port scan fails); since the k3s move (LAB-2383) it is
+$PORT or the deploy's port scan fails); since the k3s move it is
 the livenessProbe's target (deploy/k3s/). This module is the ingester's whole
 HTTP surface: ``GET /health``, liveness only — no aggregate data, no key
 material.
@@ -33,7 +33,7 @@ _REASONS = {200: "OK", 404: "Not Found", 405: "Method Not Allowed", 503: "Servic
 # One deadline for the whole exchange (read + respond). Per-line timeouts
 # alone let a client drip one header every few seconds and hold the
 # connection — and its task on the shared ingest loop — open forever
-# (expert-panel finding, CWE-400).
+# (CWE-400).
 _EXCHANGE_DEADLINE_SECONDS = 10.0
 # Line length is enforced by the StreamReader limit= (readline raises
 # ValueError past it); this also bounds per-connection buffer memory.
@@ -116,7 +116,7 @@ class HealthState:
             "last_publish_age_seconds": age(self.last_publish_at),
             "uptime_seconds": round(now - self.started_at, 1),
         }
-        # Additive only (LAB-1775 AC-6): the k8s livenessProbe reads the
+        # Additive only: the k8s livenessProbe reads the
         # status code, never the body. These make an OOM recurrence
         # diagnosable from the endpoint alone — memory growth and its cause
         # (bucket/key counts) in one payload — without cluster access, which

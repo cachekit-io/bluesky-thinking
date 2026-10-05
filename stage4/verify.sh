@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
-# Stage-4 verification harness (LAB-738): probe the live deployment for the
-# epic's AC-1/AC-3/AC-4 evidence — reachability, X-Cache: HIT, payload
-# freshness, hit-rate counters. Read-only; needs curl + python3, no secrets.
+# Live-deployment verification harness: probe the live deployment for
+# reachability, X-Cache: HIT, payload freshness and hit-rate counters. Read-only; needs curl + python3, no secrets.
 #
 #   ./verify.sh              one full probe pass
-#   ./verify.sh hitrate 3600 sample /api/stats for N seconds (AC-4 fallback;
+#   ./verify.sh hitrate 3600 sample /api/stats for N seconds (hit-rate fallback;
 #                            counters are PER-ISOLATE and reset on recycle —
 #                            state that scope next to any number you quote)
 set -euo pipefail
@@ -35,7 +34,7 @@ hitrate() {
 fail=0
 skipped=0
 
-echo "== ingester /health (AC-1: alive, Jetstream connected)"
+echo "== ingester /health (alive, Jetstream connected)"
 if [ -z "$INGESTER" ]; then
     echo "SKIP: INGESTER_URL not set (the k3s ingester has no public URL — see the port-forward note above)"
     skipped=$((skipped + 1))
@@ -60,7 +59,7 @@ else
     rm -f "$health_body"
 fi
 
-echo "== edge serves real data (epic AC-1: 200 + X-Cache: HIT from a non-origin POP)"
+echo "== edge serves real data (200 + X-Cache: HIT from a non-origin POP)"
 headers=$(mktemp)
 if body=$(curl -fsS -D "$headers" "$EDGE/api/posts_per_minute?window=$WINDOW"); then
     echo "$body"
@@ -68,8 +67,8 @@ if body=$(curl -fsS -D "$headers" "$EDGE/api/posts_per_minute?window=$WINDOW"); 
     grep -iq '^x-cache: *hit' "$headers" || { echo "FAIL: expected X-Cache: HIT"; fail=$((fail + 1)); }
     # cf-ray's trailing colo code is the serving POP, printed as evidence of
     # edge distribution. (It used to be read as "served outside the origin
-    # region" — that was Render's Oregon; the ingester is now in Ray's
-    # homelab and is not an origin the edge ever dials.)
+    # region" — that was Render's Oregon; the ingester is now self-hosted
+    # and is not an origin the edge ever dials.)
     grep -i '^cf-ray:' "$headers" || true
 else
     echo "FAIL: $EDGE/api/posts_per_minute?window=$WINDOW did not return 200"
@@ -77,7 +76,7 @@ else
 fi
 rm -f "$headers"
 
-echo "== freshness (epic AC-3: payload generated_at, not response timing)"
+echo "== freshness (payload generated_at, not response timing)"
 if [ -n "${body:-}" ]; then
     echo "$body" | python3 -c "
 import json, sys, time
@@ -88,7 +87,7 @@ sys.exit(0 if age <= ${MAX_AGE_SECONDS} and v['total_posts'] > 0 else 1)
 " || { echo "FAIL: stale or empty aggregate — a green pipeline serving nothing proves nothing"; fail=$((fail + 1)); }
 fi
 
-echo "== hit/miss counters (epic AC-4 raw material; per-isolate scope)"
+echo "== hit/miss counters (hit-rate raw material; per-isolate scope)"
 curl -fsS "$EDGE/api/stats" || { echo "FAIL: /api/stats unreachable"; fail=$((fail + 1)); }
 echo
 
@@ -97,8 +96,8 @@ if [ "$fail" -ne 0 ]; then
     exit 1
 elif [ "$skipped" -ne 0 ]; then
     # Never print a pass for a run that didn't check. Losing the ingester is
-    # precisely the failure this script exists to catch, and AC-1 is the only
-    # check that looks at it — a green banner over a skipped AC-1 is the
+    # precisely the failure this script exists to catch, and the /health probe
+    # is the only check that looks at it — a green banner over a skipped one is the
     # report you'd most regret trusting. Port-forward and set INGESTER_URL.
     echo "INCOMPLETE: $skipped check(s) SKIPPED, the rest passed"
     exit 1

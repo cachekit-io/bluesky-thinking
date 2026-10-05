@@ -1,4 +1,4 @@
-"""Memory soak harness for WindowStore (LAB-1775).
+"""Memory soak harness for WindowStore.
 
 Two modes, both stdlib + the ingester's own modules — no CacheKit credentials:
 the publisher path is not exercised, only extract -> WindowStore, which is the
@@ -246,7 +246,7 @@ class _SimulatedClock:
 
 def run_saturate(minutes: int, per_bucket: int, *, compaction: bool = True, head_per_bucket: int = 0) -> None:
     if not compaction:
-        # The pre-LAB-1775 shape, measured rather than extrapolated: push the
+        # The pre-compaction shape, measured rather than extrapolated: push the
         # full-fidelity horizon past the whole window so nothing ever compacts.
         windows._FULL_FIDELITY_MINUTES = minutes + 1
     print(f"# saturate: {minutes} buckets x {per_bucket} offered posts/bucket (compaction={compaction})", flush=True)
@@ -329,7 +329,7 @@ def main() -> None:
     sat = sub.add_parser("saturate", help="synthetic worst-case bucket fill")
     sat.add_argument("--minutes", type=int, default=WINDOW_MINUTES["24h"])
     sat.add_argument("--per-bucket", type=int, default=200)
-    sat.add_argument("--no-compaction", action="store_true", help="measure the pre-LAB-1775 shape")
+    sat.add_argument("--no-compaction", action="store_true", help="measure the pre-compaction shape")
     sat.add_argument(
         "--head-per-bucket",
         type=int,
