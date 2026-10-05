@@ -138,6 +138,9 @@ custom-host override alongside the credentials:
   cachekit-rs 0.7.0 fixed the wasm32 `SystemTime` panic; the interim direct `worker::Fetch`
   workaround is gone)
 
+The two Workers take the endpoint as a deploy-time secret, `CACHEKIT_API_URL`, next to the API
+key; `wrangler deploy` refuses to run until both are set (see [`edge/README.md`](../edge/README.md#deploy)).
+
 Round-trip verified end-to-end: `spike/roundtrip/roundtrip.py` (passed against the live backend on
 2026-07-29; also exercises `@cache.io`).
 
