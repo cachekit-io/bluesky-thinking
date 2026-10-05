@@ -1,8 +1,8 @@
-//! Skyline hot-path Worker (LAB-746) — the Rust-WASM leg of the edge.
+//! Skyline hot-path Worker — the Rust-WASM leg of the edge.
 //!
 //! Pure compute lives in [`compute`] (target-independent, natively tested);
 //! everything below the cfg line is the Cloudflare Workers HTTP surface that
-//! Stage 3 binds into the TS serving path.
+//! the TS edge binds into its serving path.
 //!
 //! Endpoints:
 //! - `GET  /` — service info + locked contract summary
@@ -10,7 +10,7 @@
 //! - `POST /v1/verify[?expected=<16-hex>]` — xxHash3-64 + interop validity of the raw body
 //! - `POST /v1/merge` — merge count-map window slices (JSON: `{slices: [base64…], top}`)
 //! - `GET  /v1/cache/:operation/:window` — derive key, fetch via
-//!   `WorkersCachekitIO`, verify + decode (503 until the Stage-3
+//!   `WorkersCachekitIO`, verify + decode (503 until the
 //!   `CACHEKIT_API_KEY` secret exists)
 
 pub mod compute;
@@ -154,12 +154,13 @@ mod edge {
             );
         };
         let api_url = ctx
-            .var("CACHEKIT_API_URL")
+            .secret("CACHEKIT_API_URL")
             .map(|v| v.to_string())
             .unwrap_or_else(|_| "https://api.cachekit.io".to_string());
-        // allow_custom_host: CACHEKIT_API_URL is trusted operator config (the
-        // dev instance is outside the SDK's SSRF allowlist); HTTPS + private-IP
-        // checks still apply.
+        // CACHEKIT_API_URL is a deploy-time secret (wrangler.toml [secrets]
+        // required), so the fallback only serves local runs. allow_custom_host:
+        // the value is trusted operator config (the demo's endpoint is outside
+        // the SDK's SSRF allowlist); HTTPS + private-IP checks still apply.
         let backend = match WorkersCachekitIO::builder()
             .api_key(api_key.to_string())
             .api_url(api_url)

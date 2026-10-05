@@ -1,7 +1,7 @@
 //! Pure hot-path compute, target-independent so `cargo test` proves it
 //! natively — no network, no credentials, no Workers runtime.
 //!
-//! Three jobs (LAB-746):
+//! Three jobs:
 //! 1. interop/v1 key derivation for the five locked Skyline operations
 //! 2. xxHash3-64 integrity verification of cached payloads
 //! 3. in-edge aggregation: merging count-map window slices
@@ -164,7 +164,7 @@ mod tests {
 
     #[test]
     fn derives_byte_locked_keys() {
-        // Verified 3-way in the LAB-735 spike (py 0.15.0, ts 0.1.3, rs 0.4.0).
+        // Verified 3-way in the spike (py 0.15.0, ts 0.1.3, rs 0.4.0).
         let locked = [
             (
                 "trending_hashtags",
@@ -220,10 +220,10 @@ mod tests {
 
     // ── Integrity verification ────────────────────────────────────────────────
 
-    // Byte-locked checksum vectors (LAB-1602): expected values are hard-coded
+    // Byte-locked checksum vectors: expected values are hard-coded
     // literals, same discipline as `derives_byte_locked_keys`, so a
     // cachekit-core bump that moves the xxHash3-64 primitive fails here
-    // instead of needing a human to hand-diff crate sources (LAB-1492).
+    // instead of needing a human to hand-diff crate sources.
     /// xxHash3-64 of the canonical interop msgpack for `{"rust": 42}`.
     const RUST_42_XXH3: &str = "573a48b587ebc7b9";
 

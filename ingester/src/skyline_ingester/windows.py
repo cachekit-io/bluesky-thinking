@@ -51,7 +51,7 @@ _MAX_CHECKPOINT_MAP_ENTRIES = 1_024
 _K_TAGS, _K_LINKS, _K_DOMAINS, _K_EMOJI = 20, 20, 20, 10
 _MAX_CHECKPOINT_COUNT = 10_000_000
 
-# Live compaction (LAB-1775). A bucket keeps every distinct key only while it is
+# Live compaction. A bucket keeps every distinct key only while it is
 # inside the full-fidelity horizon (the 5m window plus future-skew slack, see
 # below); once it ages past that it is truncated to its top-K entries, in place,
 # and re-truncated if it regrows. Rationale and the measurement behind it:
@@ -449,8 +449,8 @@ class WindowStore:
     # buckets past the 5m window are truncated to top-K, so the retained window
     # is ~(5 x live cardinality) + (1,435 x ~194 keys) instead of 1,440 x live.
     # That is what took the 24h projection from ~1,050 MiB steady / ~2.1 GiB at
-    # the merge transient down under the 512 MiB Render free plan (LAB-1775;
-    # measured by tools/soak_memory.py, not estimated).
+    # the merge transient down under the 512 MiB Render free plan (measured
+    # by tools/soak_memory.py, not estimated).
     #
     # ponytail: _copy_range still materialises a copy of EVERY bucket in range
     # before merged() folds them, so a 24h publish tick peaks at roughly twice
@@ -549,7 +549,7 @@ class WindowStore:
             # extract.normalize_language only ever emits real tokens into `langs`
             # (a matched BCP-47 primary subtag, or "und"); a residual key placed
             # inside that same map is always a string a post could also declare
-            # (LAB-1632: a real "other" token collided with and was clobbered by
+            # (a real "other" token once collided with and was clobbered by
             # the synthetic residual). Keeping it out of the map is what makes
             # the collision structural, not just a different magic string.
             total = sum(m.langs.values())
@@ -568,7 +568,7 @@ class WindowStore:
         return value
 
     def sentiment_value(self, window: str, now: float) -> dict:
-        """Value for the secure per-language sentiment cache (AC-6 groundwork)."""
+        """Value for the secure per-language sentiment cache."""
         m = self.merged(window, now)
         return {
             "window": window,
@@ -584,11 +584,11 @@ class WindowStore:
         language, and emoji counts are approximate after a restore; post and
         signal-candidate totals stay exact.
 
-        Buckets older than the 1h window are COARSENED (LAB-1933): each hour's
+        Buckets older than the 1h window are COARSENED: each hour's
         minutes fold into one unit keyed at the hour's first minute, so a full
         24h window serializes as ~85 units instead of ~1,445 — the checkpoint
         was ~97% of the ingester's outbound bandwidth and busted Render's 5 GB
-        free tier (LAB-1894). Aggregates only ever sum buckets, so live serving
+        free tier. Aggregates only ever sum buckets, so live serving
         is untouched; the cost appears only after a restore, where the 24h
         window's trailing edge expires in hour steps. Keying at the hour FLOOR
         makes that expiry early, never late: a restored 24h count can drop up

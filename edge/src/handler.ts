@@ -6,7 +6,7 @@
  * means the ingester hasn't written (or the TTL expired), and the honest
  * answer is 404 + X-Cache: MISS, not fabricated data.
  *
- * Contract: docs/architecture.md (locked, Stage 1). Keys are interop/v1 —
+ * Contract: docs/architecture.md (locked). Keys are interop/v1 —
  * `bluesky-thinking:{operation}:{blake2b256(msgpack([window]))}` — byte-
  * identical across the Python, Rust and TS SDKs. The window argument is
  * always explicit (interop binding rules: no default parameters).
@@ -36,8 +36,8 @@ export const WINDOWS = ['5m', '1h', '24h'] as const;
 export type Window = (typeof WINDOWS)[number];
 
 /**
- * Per-isolate hit/miss counters — the raw material for the epic's HIT proof
- * (AC-1) and hit-rate metric (AC-4). Module state resets when Cloudflare
+ * Per-isolate hit/miss counters — the raw material for the demo's HIT proof
+ * and hit-rate metric. Module state resets when Cloudflare
  * recycles the isolate; good enough for a live demo, exposed at /api/stats.
  */
 export interface Stats {
@@ -145,7 +145,7 @@ function isWindow(value: string | null): value is Window {
  *
  * Unknown operation → 404, missing/invalid window → 400 — both before any
  * cache read. Backend failures → 502, undecodable entries → 500; errors are
- * surfaced, never masked with fake data. Stage 3: hot-path integrity-check
+ * surfaced, never masked with fake data. Hot-path integrity-check
  * failure → 500 (integrity_check_failed); hot path unreachable or binding
  * missing → served with x-hotpath: unavailable.
  */
@@ -165,7 +165,7 @@ export async function handleApi(
         misses: stats.misses,
         errors: stats.errors,
         hit_rate: reads === 0 ? null : stats.hits / reads,
-        // Honest scope, in the payload itself (LAB-1618): these are per-isolate
+        // Honest scope, in the payload itself: these are per-isolate
         // counters, and hit_rate is aggregate-KEY availability at this isolate —
         // not an SDK L1 rate (the edge reads the backend directly, no L1), and
         // not what end users see (Cloudflare POP cache hits never reach here).
@@ -222,7 +222,7 @@ export async function handleApi(
     );
   }
 
-  // Stage 3 (AC-3): every payload served through the edge is integrity-checked
+  // Every payload served through the edge is integrity-checked
   // on the Rust-WASM hot path first. 'invalid' is a hard stop — a corrupt entry
   // must never be served; 'unavailable' degrades honestly: the aggregate is
   // real (it came from the backend), it just goes out unverified and says so.

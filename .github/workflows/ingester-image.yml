@@ -1,4 +1,4 @@
-# Builds the Skyline ingester container (LAB-2383). On pull requests the image
+# Builds the Skyline ingester container. On pull requests the image
 # is built but never pushed, so reviewers see the Dockerfile proven green
 # before merge; on pushes to main it is published to GHCR under the commit SHA,
 # which is what deploy/k3s/ pins against for deploys and rollbacks.

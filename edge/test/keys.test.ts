@@ -1,5 +1,5 @@
 /**
- * Byte-locked key vectors from docs/architecture.md (Stage 1, verified
+ * Byte-locked key vectors from docs/architecture.md (verified
  * 3-way across the Python, Rust and TS SDKs). If this test fails, the edge
  * would read keys the ingester never writes — do not "fix" the vectors,
  * find what changed in key derivation.

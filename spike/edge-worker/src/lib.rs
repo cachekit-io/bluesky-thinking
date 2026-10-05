@@ -1,4 +1,4 @@
-//! LAB-735 spike: hello-world Worker proving cachekit-rs on wasm32 / CF Workers.
+//! Spike: hello-world Worker proving cachekit-rs on wasm32 / CF Workers.
 //!
 //! Two modes, so the deploy proves the target even before CachekitIO
 //! credentials exist:
@@ -22,7 +22,7 @@ async fn fetch(_req: Request, env: Env, _ctx: Context) -> Result<Response> {
 
     let Ok(api_key) = env.secret("CACHEKIT_API_KEY") else {
         return Response::ok(format!(
-            "LAB-735 spike (no CACHEKIT_API_KEY yet)\nedge-computed interop key: {key}\n"
+            "Skyline spike (no CACHEKIT_API_KEY yet)\nedge-computed interop key: {key}\n"
         ));
     };
 
@@ -45,5 +45,5 @@ async fn fetch(_req: Request, env: Env, _ctx: Context) -> Result<Response> {
         .await
         .map_err(|e| Error::RustError(e.to_string()))?;
 
-    Response::ok(format!("LAB-735 spike\nkey={key}\nroundtrip={got:?}\n"))
+    Response::ok(format!("Skyline spike\nkey={key}\nroundtrip={got:?}\n"))
 }

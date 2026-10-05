@@ -57,7 +57,7 @@ describe('Skyline dashboard payload renderers', () => {
     expect(renderOperation(operation, payload)).toContain(expected);
   });
 
-  it('renders a real "other" language token distinct from the long-tail other_share sibling (LAB-1632)', () => {
+  it('renders a real "other" language token distinct from the long-tail other_share sibling', () => {
     const markup = renderOperation('lang_mix', {
       window: '5m',
       generated_at,
@@ -72,7 +72,7 @@ describe('Skyline dashboard payload renderers', () => {
     expect(markup).toContain('Other languages');
   });
 
-  it('keeps the other_share row visible when ten real languages outrank it (LAB-2077)', () => {
+  it('keeps the other_share row visible when ten real languages outrank it', () => {
     const langs = Object.fromEntries(
       ['en', 'ja', 'pt', 'de', 'es', 'fr', 'ko', 'nl', 'it', 'pl'].map((lang, i) => [
         lang,

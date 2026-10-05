@@ -12,11 +12,14 @@ import { captureTick, handleHistoryApi, type D1Database } from './history.js';
 
 interface Env {
   CACHEKIT_API_KEY?: string;
-  /** Override for the dev instance / tests; defaults to https://api.cachekit.io. */
+  /**
+   * Backend endpoint. Deploys must set it (wrangler.toml [secrets] required);
+   * unset only under tests and the node demo, where the SDK default applies.
+   */
   CACHEKIT_API_URL?: string;
   /** Service binding to the Rust-WASM hot-path Worker (wrangler [[services]]). */
   HOTPATH?: HotpathBinding;
-  /** D1 snapshot-history store (wrangler [[d1_databases]], LAB-1616). */
+  /** D1 snapshot-history store (wrangler [[d1_databases]]). */
   HISTORY?: D1Database;
 }
 
@@ -28,9 +31,9 @@ function ensureBackend(env: Env): Backend {
   if (!env.CACHEKIT_API_KEY) throw new Error('CACHEKIT_API_KEY secret is not set');
   return (backend ??= cachekitio({
     apiKey: env.CACHEKIT_API_KEY,
-    // A non-default apiUrl (the dev instance) is outside the SDK's SSRF
-    // allowlist; the value comes from wrangler config, so opting out is
-    // an operator decision, not a request-time one.
+    // A non-default apiUrl (the demo's endpoint) is outside the SDK's SSRF
+    // allowlist; the value is a deploy-time secret, so opting out is an
+    // operator decision, not a request-time one.
     ...(env.CACHEKIT_API_URL ? { apiUrl: env.CACHEKIT_API_URL, allowCustomHost: true } : {}),
   }));
 }
@@ -63,8 +66,8 @@ export default {
       );
     }
     const isHistory = url.pathname.startsWith('/api/history/');
-    // Live credentials are provisioned in Stage 3 (docs/architecture.md
-    // runbook); until the secret exists, fail loudly instead of throwing
+    // Live credentials are deploy-time secrets (docs/architecture.md#credentials);
+    // until the secret exists, fail loudly instead of throwing
     // from the backend constructor. History is exempt: D1 is its source of
     // truth and the CachekitIO layer is only its response cache, so a
     // missing key degrades history to uncached D1 reads instead of a 503.
@@ -75,7 +78,7 @@ export default {
       );
     }
 
-    // Miss-minting guard (Stage-3 panel finding, closed in LAB-738): these
+    // Miss-minting guard (a security review finding): these
     // URLs are public and the backend bills misses, so an unauthenticated
     // client must not be able to reach CachekitIO at will. Front every
     // aggregate read with the POP cache, 404s included (negative caching) —
@@ -134,9 +137,9 @@ export default {
   },
 
   /**
-   * History capture (LAB-1616), the cron's only job since LAB-2383: the
+   * History capture, the cron's only job since the ingester left Render: the
    * keep-alive ping existed solely for Render's free-tier inbound-idle
-   * spin-down, and the ingester now runs on the lab k3s cluster, which has
+   * spin-down, and the ingester now runs on self-hosted Kubernetes, which has
    * no such semantics (its restarts come from the Deployment's liveness
    * probe). The schedule is hourly (wrangler [triggers]) because captureTick
    * no-ops off minute 0 anyway — same set of effective fires as the old

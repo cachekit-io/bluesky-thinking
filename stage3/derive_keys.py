@@ -1,4 +1,4 @@
-"""Print every cache key the ingester writes (LAB-737 evidence tooling).
+"""Print every cache key the ingester writes (evidence tooling).
 
 Drives the real Publisher against the in-process bytes backend, so the keys
 come from the same decorator machinery the live service uses — the 15

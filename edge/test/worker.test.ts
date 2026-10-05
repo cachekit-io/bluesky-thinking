@@ -1,5 +1,5 @@
 /**
- * Scheduled-handler containment (LAB-1616, LAB-2383): the cron's only job is
+ * Scheduled-handler containment: the cron's only job is
  * history capture, and a capture failure must die inside the handler — a
  * scheduled() rejection would surface as a Worker error on every boundary
  * fire. Global fetch is stubbed — no network, no creds, same as every other

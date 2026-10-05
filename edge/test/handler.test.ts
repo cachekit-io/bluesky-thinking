@@ -1,6 +1,6 @@
 /**
  * Handler tests against a mocked Backend — no network, no CACHEKIT_API_KEY
- * (Stage 2 AC-1; live integration is Stage 3). Payloads are produced with
+ * (live integration is proven by stage3/ and stage4/). Payloads are produced with
  * the SDK's own interop value codec, so what the mock serves is what the
  * Python ingester writes.
  */
@@ -185,7 +185,7 @@ describe('GET /api/stats', () => {
     });
   });
 
-  // LAB-1618: the payload must say what its own numbers mean — per-isolate
+  // The payload must say what its own numbers mean — per-isolate
   // counters that reset on recycle, and a hit_rate that is aggregate-key
   // availability, NOT an SDK L1 rate or the end-user (POP-cached) rate.
   it('scope names the reset semantics and disclaims SDK-L1 / end-user readings', async () => {
@@ -202,7 +202,7 @@ describe('GET /api/stats', () => {
   });
 });
 
-describe('hot-path integrity verification (Stage 3, AC-3)', () => {
+describe('hot-path integrity verification', () => {
   const aggregate = { window: '5m', ppm: 42.0 };
   const key = generateInteropKey(NAMESPACE, 'posts_per_minute', ['5m']);
   const backend = () => storeOf({ [key]: aggregate });

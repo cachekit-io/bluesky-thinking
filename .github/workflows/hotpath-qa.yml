@@ -36,7 +36,7 @@ jobs:
       - name: Clippy (native)
         run: cargo clippy --all-targets --locked -- -D warnings
 
-  # wasm32 must BUILD, not just lint — LAB-1079 reached a deployed Worker
+  # wasm32 must BUILD, not just lint — a wasm32 SDK panic once reached a deployed Worker
   # because clippy-only coverage compiles a runtime panic happily.
   wasm32:
     runs-on: ubuntu-latest

@@ -1,4 +1,4 @@
-"""AC-6 groundwork: the secure sentiment cache stores ciphertext only."""
+"""The secure sentiment cache stores ciphertext only."""
 
 import pytest
 from pydantic import SecretStr
@@ -39,8 +39,8 @@ def test_no_master_key_disables_secure_cache(store, backend):
 
 
 def test_live_mode_without_master_key_fails_closed():
-    """Epic decision (ray, 2026-07-24): a live deploy missing the secure-cache
-    master key must refuse to start, not come up with AC-6 silently absent."""
+    """Design decision (2026-07-24): a live deploy missing the secure-cache
+    master key must refuse to start, not come up with the secure cache silently absent."""
     settings = Settings(cachekit_api_key=SecretStr("ck_test_not_a_real_key"), cachekit_master_key=None)
     with pytest.raises(RuntimeError, match="fail closed"):
         build_publisher(settings, WindowStore())  # raises before any backend is constructed
@@ -49,14 +49,14 @@ def test_live_mode_without_master_key_fails_closed():
 def test_live_mode_builds_backend_from_env(monkeypatch):
     """Live mode must construct CachekitIOBackend via the SDK's env-config path.
 
-    Regression (LAB-737): passing api_key alone to the constructor raises
+    Regression: passing api_key alone to the constructor raises
     "Both api_url and api_key required if using manual config", so the
-    pre-Stage-3 live path could never start. Env config also carries the
-    CACHEKIT_API_URL / CACHEKIT_ALLOW_CUSTOM_HOST overrides the dev instance
-    (api.dev.cachekit.io — not in the SDK's SSRF host allowlist) needs.
+    original live path could never start. Env config also carries the
+    CACHEKIT_API_URL / CACHEKIT_ALLOW_CUSTOM_HOST overrides a custom endpoint
+    (one outside the SDK's SSRF host allowlist, as the demo's is) needs.
     """
     monkeypatch.setenv("CACHEKIT_API_KEY", "ck_test_not_a_real_key")
-    monkeypatch.setenv("CACHEKIT_API_URL", "https://api.dev.cachekit.io")
+    monkeypatch.setenv("CACHEKIT_API_URL", "https://cachekit.example.com")
     monkeypatch.setenv("CACHEKIT_ALLOW_CUSTOM_HOST", "true")
     settings = Settings(
         cachekit_api_key=SecretStr("ck_test_not_a_real_key"),
@@ -70,7 +70,7 @@ def test_live_mode_builds_backend_from_env(monkeypatch):
 def test_live_mode_requires_key_in_process_env(monkeypatch):
     """A .env-only key selects live mode but the SDK's env config reads process
     env only — the guard must fail with a clear message, not the SDK's
-    misleading "api_key Field required" (panel finding, LAB-737)."""
+    misleading "api_key Field required" (review finding)."""
     monkeypatch.delenv("CACHEKIT_API_KEY", raising=False)
     settings = Settings(
         cachekit_api_key=SecretStr("ck_test_from_dotenv_only"),

@@ -1,4 +1,4 @@
-"""LAB-735 AC-3 spike: prove @cache.production / @cache.io / @cache.secure run on cachekit==0.15.0."""
+"""Spike: prove @cache.production / @cache.io / @cache.secure run on cachekit==0.15.0."""
 import os
 from cachekit import cache
 

@@ -3,7 +3,7 @@ name = "skyline-edge-spike"
 version = "0.1.0"
 edition = "2021"
 
-# LAB-735 spike: proves a downstream Worker can build against cachekit-rs on
+# Spike: proves a downstream Worker can build against cachekit-rs on
 # wasm32. Git tag dep because crates.io max is 0.3.0 (no interop) — the
 # v0.4.0 publish failed in CI; see spike findings.
 [lib]

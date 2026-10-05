@@ -1,4 +1,4 @@
-/** History panel renderer (LAB-1616): gaps stay visible, coverage stays honest. */
+/** History panel renderer: gaps stay visible, coverage stays honest. */
 import { describe, expect, it } from 'vitest';
 import { renderHistoryMarkup } from '../public/dashboard.js';
 

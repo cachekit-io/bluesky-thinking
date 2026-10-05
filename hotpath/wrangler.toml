@@ -1,5 +1,4 @@
-# Skyline hot-path Worker (LAB-746). Stage 3 wires this into the TS serving
-# path via a service binding; until then it deploys standalone.
+# Skyline hot-path Worker. The TS edge reaches it through a service binding.
 name = "skyline-hotpath"
 main = "build/worker/shim.mjs"
 compatibility_date = "2026-07-01"
@@ -7,13 +6,12 @@ compatibility_date = "2026-07-01"
 [build]
 command = "worker-build --release"
 
-[vars]
-# The dev.cachekit instance (docs/architecture.md#credentials). Outside the
-# SDK's SSRF host allowlist, so lib.rs builds WorkersCachekitIO with
-# `.allow_custom_host(true)` — this value is trusted operator config, a
-# deploy-time decision.
-CACHEKIT_API_URL = "https://api.dev.cachekit.io"
-
-# Secrets (set via `wrangler secret put`, never in this file):
-# - CACHEKIT_API_KEY — activates GET /v1/cache/…; from
-#   op://cachekit/ck-dev-bluesky-default/credential (docs/architecture.md#credentials).
+# Both values come from your secret manager at deploy time, never this file
+# (docs/architecture.md#credentials; hotpath/README.md#secrets). CACHEKIT_API_URL
+# is a secret rather than a [vars] entry so the endpoint is a deploy-time
+# decision: lib.rs falls back to the SDK's default production host when it is
+# unset, and this list makes `wrangler deploy` fail instead. The endpoint is
+# trusted operator config, so lib.rs builds WorkersCachekitIO with
+# `.allow_custom_host(true)`.
+[secrets]
+required = ["CACHEKIT_API_KEY", "CACHEKIT_API_URL"]

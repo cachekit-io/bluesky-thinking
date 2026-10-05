@@ -1,5 +1,5 @@
 /**
- * History capture + range-query tests (LAB-1616) — no network, no creds.
+ * History capture + range-query tests — no network, no creds.
  *
  * D1 is SQLite, so the D1 binding is shimmed over node:sqlite (Node ≥22.13,
  * in core — no new dependency) running the REAL migration file: the SQL,
@@ -391,7 +391,7 @@ describe('trimPayload value-level allowlist', () => {
     });
   });
 
-  it('drops record keys that are not their field vocabulary — the LAB-1613 round-4 class', () => {
+  it('drops record keys that are not their field vocabulary — the unvalidated-key-name class', () => {
     // A snapshot retains for up to 400 days what the live cache expired in an
     // hour, so an unvalidated key name is strictly worse here than upstream.
     const langs = trimPayload('lang_mix', {

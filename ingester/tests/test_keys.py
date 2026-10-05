@@ -7,7 +7,7 @@ from cachekit import generate_interop_key
 from skyline_ingester import NAMESPACE
 from skyline_ingester.windows import OPERATIONS, WINDOW_TTLS
 
-# Verified 3-way (py/ts/rs) by the LAB-735 spike; locked in docs/architecture.md.
+# Verified 3-way (py/ts/rs) by the spike; locked in docs/architecture.md.
 LOCKED_VECTORS = {
     (
         "trending_hashtags",

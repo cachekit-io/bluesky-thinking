@@ -90,7 +90,7 @@ def test_lang_mix_shares_sum_to_one(store):
 
 
 def test_lang_mix_real_other_token_survives_the_residual():
-    # LAB-1632 panel reproduction: a real `other` token (a post can declare any
+    # Review-finding reproduction: a real `other` token (a post can declare any
     # 2-8 char lowercase primary subtag, "other" included — extract.py has no
     # vocabulary check) held a top-25 share of 1000/1036 ~= 0.9652. Pre-fix,
     # the synthetic residual was written into langs["other"] AFTER the top-25
@@ -408,7 +408,7 @@ def test_concurrent_add_and_read_is_race_free():
     assert not errors, f"race detected: {errors[:3]}"
 
 
-# --- LAB-1775: age-based compaction bounds the retained window -----------------
+# --- Age-based compaction bounds the retained window ---------------------------
 
 
 def _post(minute, *, tags=(), links=(), domains=(), lang="en", sentiment=None, labels=None):
@@ -438,7 +438,7 @@ def _age_out(store, minute):
 
 
 def test_aged_buckets_compact_while_the_5m_window_stays_exact():
-    # The whole LAB-1775 fix in one assertion: resident cost is
+    # The whole compaction fix in one assertion: resident cost is
     # (retained minutes x keys per minute), so the 1,435 minutes nobody reads at
     # full fidelity get truncated and the 5 the live view reads do not.
     store = WindowStore()
@@ -552,7 +552,7 @@ def test_full_ledger_stops_new_counter_keys_from_being_minted(monkeypatch):
     # The head of the window (the uncompacted minutes) is bounded by the GLOBAL
     # contribution ledger, not by a second cap: at most MAX_SOURCE_LEDGER_ENTRIES
     # accepted contributions per SOURCE_DEDUPE_SECONDS. Raising that constant
-    # without redoing the memory arithmetic reopens LAB-1775, so pin the
+    # without redoing the memory arithmetic reopens the unbounded-memory bug, so pin the
     # behaviour rather than the number.
     #
     # Count EVERY family the accepted contribution mints, not just tags: one
@@ -635,7 +635,7 @@ def test_compaction_can_never_reach_into_the_live_5m_window():
 
 
 def test_one_future_dated_post_cannot_truncate_the_live_5m_window():
-    # Panel CRIT (LAB-1775): jetstream accepts events up to MAX_FUTURE_SKEW_SECONDS
+    # Review finding (critical): jetstream accepts events up to MAX_FUTURE_SKEW_SECONDS
     # ahead, so before the horizon carried slack a SINGLE such post dragged
     # compact_floor into the live window — measured 1,000 -> 100 distinct tags,
     # repeatable every minute, silently falsifying "the 5m window is bit-exact".

@@ -2,7 +2,7 @@
 
 TypeScript Cloudflare Worker serving the five Skyline aggregates from the shared
 CachekitIO namespace via [interop/v1](../docs/architecture.md#locked-key-convention)
-reads (`@cachekit-io/cachekit` 0.1.3), plus a static dashboard on Workers Assets.
+reads (`@cachekit-io/cachekit` 0.1.5), plus a static dashboard on Workers Assets.
 For the live aggregates the edge is **read-only**: they are computed and written
 by the Python ingester; a cache miss here is surfaced (404 + `X-Cache: MISS`),
 never recomputed or faked. The edge's only writes are its own derived state:
@@ -97,12 +97,35 @@ design + operating contract: [`docs/history.md`](../docs/history.md).
 
 ## Deploy
 
-`wrangler deploy`, then set the secret from your secret manager (creds per
+The Worker needs two secrets, both from your secret manager (creds per
 [docs/architecture.md#credentials](../docs/architecture.md#credentials)):
+`CACHEKIT_API_KEY`, the tenant's API key, and `CACHEKIT_API_URL`, the
+CachekitIO endpoint the tenant is provisioned on. `wrangler.toml` lists both
+under `[secrets] required`, so `wrangler deploy` fails, naming the missing
+secret, until both are set on the Worker. Neither is committed: without the
+guard, an unset `CACHEKIT_API_URL` would silently send the demo to the SDK's
+default production host.
+
+On a Worker that already exists, set or rotate a secret in place:
 
 ```bash
-wrangler secret put CACHEKIT_API_KEY   # prompts for the demo tenant's API key
+npx wrangler secret put CACHEKIT_API_KEY   # prompts for the value
+npx wrangler secret put CACHEKIT_API_URL
 ```
+
+The first deploy of a new Worker, and the first deploy after upgrading from a
+config that set `CACHEKIT_API_URL` as a plain `[vars]` entry, must upload the
+secrets with the deploy itself. A new Worker has nowhere to `secret put` to
+yet, and on an existing one the plain variable still holds the name until a
+deploy without `[vars]` removes it. Write the values to a file outside the
+repository, deploy, then delete the file:
+
+```bash
+# secrets.env holds CACHEKIT_API_URL=… (and CACHEKIT_API_KEY=… for a new Worker)
+npx wrangler deploy --secrets-file /path/outside/the/repo/secrets.env
+```
+
+Secrets already on the Worker and not in the file are kept.
 
 Any pending D1 migration must be applied **before** the deploy that expects it:
 
@@ -110,14 +133,8 @@ Any pending D1 migration must be applied **before** the deploy that expects it:
 npx wrangler d1 migrations apply skyline-history --remote
 ```
 
-Dev deployment: **https://skyline-edge.raywalker.workers.dev** (the backend
-endpoint is a `[vars]` entry, `CACHEKIT_API_URL`).
+Dev deployment: **https://skyline-edge.raywalker.workers.dev**
 
-Two build-time accommodations for `@cachekit-io/cachekit` 0.1.3 (both retire
-with the 0.1.5 WASM core — see `wrangler.toml` for the bump tracking): the
-`nodejs_compat` flag (transitive node builtins), and a wrangler `[alias]`
-stubbing the NAPI-native `@cachekit-io/cachekit-core-ts` — the edge never
-runs that path (interop reads only, no ByteStorage envelope), and the stub
-throws if that ever stops being true. Any new code path that needs the
-native core (ByteStorage envelopes, encryption) compiles fine and **throws
-at runtime**. Do not target 0.1.4 — it is abandoned and uninstallable.
+`@cachekit-io/cachekit` 0.1.5 ships a WASM core that bundles for Workers as
+is: no `nodejs_compat` flag, no build-time alias. Do not target 0.1.4 — it is
+abandoned and uninstallable.

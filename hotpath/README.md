@@ -51,10 +51,33 @@ $ npx wrangler deploy                            # runs worker-build itself, the
 CI ([`hotpath-qa`](../.github/workflows/hotpath-qa.yml)) gates every PR and push touching
 `hotpath/` — everything above except the deploy.
 
-Secrets: `CACHEKIT_API_KEY` via `wrangler secret put CACHEKIT_API_KEY`, from your secret manager
-([docs/architecture.md#credentials](../docs/architecture.md#credentials)).
-Config: `CACHEKIT_API_URL` (`wrangler.toml [vars]`) points at the demo's CachekitIO
-endpoint. Nothing else is configurable.
+## Secrets
+
+Two secrets, both from your secret manager
+([docs/architecture.md#credentials](../docs/architecture.md#credentials)):
+`CACHEKIT_API_KEY`, the tenant's API key, and `CACHEKIT_API_URL`, the CachekitIO endpoint the
+tenant is provisioned on. Nothing else is configurable. `wrangler.toml` lists both under
+`[secrets] required`, so `wrangler deploy` fails, naming the missing secret, until both are set
+on the Worker; an unset `CACHEKIT_API_URL` would otherwise send the cache route to the SDK's
+default production host.
+
+On a Worker that already exists, set or rotate a secret in place:
+
+```console
+$ npx wrangler secret put CACHEKIT_API_KEY        # prompts for the value
+$ npx wrangler secret put CACHEKIT_API_URL
+```
+
+The first deploy of a new Worker, and the first deploy after upgrading from a config that set
+`CACHEKIT_API_URL` as a plain `[vars]` entry, must upload the secrets with the deploy itself: a
+new Worker has nowhere to `secret put` to yet, and on an existing one the plain variable still
+holds the name until a deploy without `[vars]` removes it. Write the values to a file outside the
+repository, deploy, then delete the file. Secrets already on the Worker and not in the file are
+kept:
+
+```console
+$ npx wrangler deploy --secrets-file /path/outside/the/repo/secrets.env   # CACHEKIT_API_URL=…
+```
 
 The TS edge binds this Worker into its serving path: the edge
 holds a service binding (`env.HOTPATH`) and `POST /v1/verify`s every payload

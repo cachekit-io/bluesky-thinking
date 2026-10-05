@@ -1,21 +1,21 @@
-"""Independent raw reader for Stage-3 evidence (LAB-737).
+"""Independent raw reader for live-integration evidence.
 
 Fetches cache entries straight off the SaaS HTTP API — no SDK, no decorator,
 no decryption — so what it prints is exactly what the backend stores. Used
 for three proofs:
 
-- AC-2: the namespace is clean before the first live run (`--expect absent`)
-- AC-4: the payload bytes a reader fetches are what the ingester wrote
+- the namespace is clean before the first live run (`--expect absent`)
+- the payload bytes a reader fetches are what the ingester wrote
   (prints xxHash3-64 big-endian hex, the StorageEnvelope convention)
-- AC-6: the @cache.secure value is ciphertext (`--expect ciphertext` asserts
+- the @cache.secure value is ciphertext (`--expect ciphertext` asserts
   the bytes are NOT a valid MessagePack document and contain none of the
   `--forbid` plaintext markers)
 
 Env: CACHEKIT_API_KEY (required), CACHEKIT_API_URL (default api.cachekit.io).
+Export them from your own secret manager first (see stage3/README.md).
 
     # from ingester/ (matches stage3/README.md; SDK-free — deps come from --with)
-    op run --env-file=../.op.apikey.env -- \
-        uv run --with httpx --with xxhash --with msgpack \
+    uv run --with httpx --with xxhash --with msgpack \
         python ../stage3/raw_read.py [--expect absent|present|ciphertext] \
                                      [--forbid TEXT ...] [--hexdump N] KEY [KEY ...]
 
@@ -88,7 +88,7 @@ def main() -> int:
     parser.add_argument("--expect", choices=["absent", "present", "ciphertext"], default="present")
     parser.add_argument("--forbid", action="append", default=[], help="plaintext that must NOT appear in stored bytes")
     parser.add_argument("--hexdump", type=int, default=0, metavar="N", help="print first N stored bytes as hex")
-    parser.add_argument("--delete", action="store_true", help="DELETE the keys instead of reading them (AC-2 cleanup)")
+    parser.add_argument("--delete", action="store_true", help="DELETE the keys instead of reading them (cleanup)")
     args = parser.parse_args()
 
     api_key = os.environ.get("CACHEKIT_API_KEY")
