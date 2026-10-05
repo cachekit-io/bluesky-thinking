@@ -11,8 +11,9 @@ class Settings(BaseSettings):
 
     # CACHEKIT_API_KEY: present -> live CachekitIO writes; absent -> dry-run mode.
     cachekit_api_key: SecretStr | None = None
-    # CACHEKIT_MASTER_KEY: 64-hex master key for the @cache.secure sentiment cache
-    # Absent -> the secure cache is disabled, everything else runs.
+    # CACHEKIT_MASTER_KEY: 64-hex master key for the @cache.secure sentiment cache.
+    # Required in live mode (startup fails closed without it); absent in dry-run
+    # -> the secure cache is disabled, everything else runs.
     cachekit_master_key: SecretStr | None = None
 
     # PORT: the /health listener port. The default matches the
