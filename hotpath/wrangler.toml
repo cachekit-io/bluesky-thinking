@@ -6,12 +6,6 @@ compatibility_date = "2026-07-01"
 [build]
 command = "worker-build --release"
 
-# Both values come from your secret manager at deploy time, never this file
-# (docs/architecture.md#credentials; hotpath/README.md#secrets). CACHEKIT_API_URL
-# is a secret rather than a [vars] entry so the endpoint is a deploy-time
-# decision: lib.rs falls back to the SDK's default production host when it is
-# unset, and this list makes `wrangler deploy` fail instead. The endpoint is
-# trusted operator config, so lib.rs builds WorkersCachekitIO with
-# `.allow_custom_host(true)`.
+# Set from your secret manager, never this file: see hotpath/README.md#secrets.
 [secrets]
 required = ["CACHEKIT_API_KEY", "CACHEKIT_API_URL"]

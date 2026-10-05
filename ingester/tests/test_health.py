@@ -139,7 +139,7 @@ async def _server_end_to_end() -> None:
 
         # Oversized request line: the reader limit turns it into a ValueError
         # inside the handler, which must close the connection quietly instead
-        # of escaping as an unretrieved task exception (expert-panel finding).
+        # of escaping as an unretrieved task exception.
         reader, writer = await asyncio.open_connection("127.0.0.1", port)
         writer.write(b"GET /" + b"a" * 16384 + b" HTTP/1.1\r\n\r\n")
         await writer.drain()

@@ -10,8 +10,8 @@
 //! - `POST /v1/verify[?expected=<16-hex>]` — xxHash3-64 + interop validity of the raw body
 //! - `POST /v1/merge` — merge count-map window slices (JSON: `{slices: [base64…], top}`)
 //! - `GET  /v1/cache/:operation/:window` — derive key, fetch via
-//!   `WorkersCachekitIO`, verify + decode (503 until the
-//!   `CACHEKIT_API_KEY` secret exists)
+//!   `WorkersCachekitIO`, verify + decode (503 while the `CACHEKIT_API_KEY`
+//!   or `CACHEKIT_API_URL` secret is unset)
 
 pub mod compute;
 
@@ -153,17 +153,20 @@ mod edge {
                 "CACHEKIT_API_KEY secret not configured — see docs/architecture.md#credentials",
             );
         };
-        let api_url = ctx
-            .secret("CACHEKIT_API_URL")
-            .map(|v| v.to_string())
-            .unwrap_or_else(|_| "https://api.cachekit.io".to_string());
-        // CACHEKIT_API_URL is a deploy-time secret (wrangler.toml [secrets]
-        // required), so the fallback only serves local runs. allow_custom_host:
-        // the value is trusted operator config (the demo's endpoint is outside
-        // the SDK's SSRF allowlist); HTTPS + private-IP checks still apply.
+        // Fail closed: with no endpoint the SDK default is the production host,
+        // and this tenant's key must never be sent there.
+        let Ok(api_url) = ctx.secret("CACHEKIT_API_URL") else {
+            return json_error(
+                503,
+                "CACHEKIT_API_URL secret not configured — see docs/architecture.md#credentials",
+            );
+        };
+        // allow_custom_host: the endpoint is trusted operator config (the
+        // demo's is outside the SDK's SSRF allowlist); HTTPS + private-IP
+        // checks still apply.
         let backend = match WorkersCachekitIO::builder()
             .api_key(api_key.to_string())
-            .api_url(api_url)
+            .api_url(api_url.to_string())
             .allow_custom_host(true)
             .build()
         {

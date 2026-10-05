@@ -179,7 +179,7 @@ def subscribe_url(base: str, cursor: int | None = None) -> str:
 async def consume(base_url: str, store: WindowStore, health: HealthState) -> None:
     """Consume forever, reconnecting with backoff and resuming from the last cursor.
 
-    ponytail: resumes at the last seen time_us with no rewind — a reconnect can
+    Deliberate simplification: resumes at the last seen time_us with no rewind — a reconnect can
     drop the in-flight events. Rewind the cursor a few seconds (and dedupe) if
     exact counts ever matter more than simplicity.
     """
@@ -205,9 +205,9 @@ async def consume(base_url: str, store: WindowStore, health: HealthState) -> Non
             logger.warning("Jetstream connection lost (%s: %s); reconnecting in %.0fs", type(exc).__name__, exc, backoff)
         # Both exits land here — error AND clean close (the async-for ends
         # without raising). Backing off both plugs the zero-delay reconnect
-        # spin a drain/policy close would otherwise cause (expert-panel
-        # finding), and the flag drops BEFORE the sleep so /health goes 503
-        # the moment the socket dies, not after the backoff.
+        # spin a drain/policy close would otherwise cause, and the flag drops
+        # BEFORE the sleep so /health goes 503 the moment the socket dies, not
+        # after the backoff.
         health.jetstream_connected = False
         await asyncio.sleep(backoff)
         backoff = min(backoff * 2, MAX_BACKOFF)

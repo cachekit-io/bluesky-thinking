@@ -129,7 +129,7 @@ def test_emoji_are_deduped_and_capped_per_post(fixture_lines):
     assert features.emoji == distinct[:16]
     assert features.exclusions["candidate_limit_emoji"] == 2
 
-    # Round-10 CRIT: a beyond-cap emoji is charged candidate_limit_emoji ONCE
+    # A beyond-cap emoji is charged candidate_limit_emoji ONCE
     # per distinct token; repeats fall to duplicate_in_event_emoji. Charging
     # per occurrence let one 4,096-character post add 4,096 to the public
     # total_signal_candidates denominator against a fixture whose total is 34.
@@ -181,7 +181,7 @@ def test_ingest_raw_advances_cursor_past_recursive_or_downstream_poison(monkeypa
 
 
 def test_ingest_raw_drops_future_dated_events(fixture_lines):
-    # Panel round-2 CRIT: one far-future time_us sets a retention floor in _prune
+    # One far-future time_us sets a retention floor in _prune
     # that wipes every real bucket (and, as a cursor, would skip everything on the
     # next reconnect). Future-dated frames are dropped whole at the ingest boundary.
     import json

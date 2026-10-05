@@ -70,7 +70,7 @@ def test_live_mode_builds_backend_from_env(monkeypatch):
 def test_live_mode_requires_key_in_process_env(monkeypatch):
     """A .env-only key selects live mode but the SDK's env config reads process
     env only — the guard must fail with a clear message, not the SDK's
-    misleading "api_key Field required" (review finding)."""
+    misleading "api_key Field required"."""
     monkeypatch.delenv("CACHEKIT_API_KEY", raising=False)
     settings = Settings(
         cachekit_api_key=SecretStr("ck_test_from_dotenv_only"),

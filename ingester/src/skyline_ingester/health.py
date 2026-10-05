@@ -33,7 +33,7 @@ _REASONS = {200: "OK", 404: "Not Found", 405: "Method Not Allowed", 503: "Servic
 # One deadline for the whole exchange (read + respond). Per-line timeouts
 # alone let a client drip one header every few seconds and hold the
 # connection — and its task on the shared ingest loop — open forever
-# (expert-panel finding, CWE-400).
+# (CWE-400).
 _EXCHANGE_DEADLINE_SECONDS = 10.0
 # Line length is enforced by the StreamReader limit= (readline raises
 # ValueError past it); this also bounds per-connection buffer memory.

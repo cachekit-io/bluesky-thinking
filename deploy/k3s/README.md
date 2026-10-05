@@ -171,27 +171,18 @@ Jetstream hasn't connected yet and a forwarder that isn't listening yet. A 503
 that survives it is a real dead consumer. No response at all means the pod
 isn't up — check `kubectl -n skyline logs deploy/skyline-ingester`.
 
-**Then confirm the endpoint.** `/health` checks only Jetstream, and the SDK
+**Then check the endpoint.** `/health` checks only Jetstream, and the SDK
 logs backend errors without raising, so a wrong `CACHEKIT_API_URL` passes
-everything above while every cache write fails. The ingester logs its
-endpoint once at startup (`live mode: publishing to CachekitIO at <url>`);
-compare it with the endpoint you expect, exported as in step 1:
+everything above while every cache write fails. This line confirms the pod
+picked up the Secret and shows the endpoint it publishes to:
 
 ```bash
-: "${CACHEKIT_API_URL:?}" &&
-line="$(kubectl -n skyline logs deploy/skyline-ingester |
-  grep -F 'live mode: publishing to CachekitIO at ' | tail -n 1)"
-if [[ "$line" == *" at ${CACHEKIT_API_URL}" ]]; then
-  echo "endpoint OK"
-else
-  echo "WRONG ENDPOINT or not in live mode: '${line}'" >&2
-fi
+kubectl -n skyline logs deploy/skyline-ingester | grep -F 'live mode: publishing to CachekitIO at'
 ```
 
-For end-to-end proof that writes land, run
-[`stage4/verify.sh`](../../stage4/verify.sh) once the 5m TTL (60 s) has
-passed: its freshness check fails if the ingester's aggregates are not
-reaching the backend the edge reads.
+The gate for a wrong endpoint is [`stage4/verify.sh`](../../stage4/verify.sh)
+after one TTL (60 s): its freshness check fails unless the ingester's
+aggregates reach the backend the edge reads.
 
 If GHCR image pulls fail with `unauthorized`, step 2 did not take. Three
 causes, in order of likelihood: the secret is missing from the `skyline`

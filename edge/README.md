@@ -36,18 +36,18 @@ verification have separate dashboard copy.
 
 ## API
 
-| Route                                        | Description                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| :------------------------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GET /api/{operation}?window={window}`       | Cached aggregate. `operation` ∈ `trending_hashtags` · `trending_links` · `lang_mix` · `posts_per_minute` · `top_emoji`; `window` ∈ `5m` · `1h` · `24h` (required — interop binding rules forbid default parameters).                                                                                                                                                                                                         |
-| `GET /api/stats`                             | Per-isolate `hits` / `misses` / `errors` / `hit_rate` + a `scope` string restating this: counters reset when Cloudflare recycles the isolate, and `hit_rate` is aggregate-key availability at this isolate — not an SDK L1 rate, and not the end-user rate (POP cache hits are served before the worker runs). Sent with `cache-control: no-store` — live counters are never replayed from a browser or intermediary cache.  |
-| `GET /api/history/{operation}?range={range}` | Snapshot history from D1: `range` ∈ `7d` (hourly points) · `30d` (daily points). Bounded, ascending series with a coverage block — absent buckets are gaps, never zeros. `x-history-source: cachekit\|d1\|d1-fallback` names the serving layer (responses are CacheKit-cached per bucket; cached bytes are validated before relay and only complete series are cached). Served from D1 alone if `CACHEKIT_API_KEY` is unset. |
-| `GET /api/history/status`                    | Capture health: per-tier row counts, newest bucket, `stale` flag. Separate from live freshness by design.                                                                                                                                                                                                                                                                                                                    |
-| `GET /`                                      | Static dashboard (Workers Assets).                                                                                                                                                                                                                                                                                                                                                                                           |
+| Route                                        | Description                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| :------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `GET /api/{operation}?window={window}`       | Cached aggregate. `operation` ∈ `trending_hashtags` · `trending_links` · `lang_mix` · `posts_per_minute` · `top_emoji`; `window` ∈ `5m` · `1h` · `24h` (required — interop binding rules forbid default parameters).                                                                                                                                                                                                            |
+| `GET /api/stats`                             | Per-isolate `hits` / `misses` / `errors` / `hit_rate` + a `scope` string restating this: counters reset when Cloudflare recycles the isolate, and `hit_rate` is aggregate-key availability at this isolate — not an SDK L1 rate, and not the end-user rate (POP cache hits are served before the worker runs). Sent with `cache-control: no-store` — live counters are never replayed from a browser or intermediary cache.     |
+| `GET /api/history/{operation}?range={range}` | Snapshot history from D1: `range` ∈ `7d` (hourly points) · `30d` (daily points). Bounded, ascending series with a coverage block — absent buckets are gaps, never zeros. `x-history-source: cachekit\|d1\|d1-fallback` names the serving layer (responses are CacheKit-cached per bucket; cached bytes are validated before relay and only complete series are cached). Served from D1 alone if either backend secret is unset. |
+| `GET /api/history/status`                    | Capture health: per-tier row counts, newest bucket, `stale` flag. Separate from live freshness by design.                                                                                                                                                                                                                                                                                                                       |
+| `GET /`                                      | Static dashboard (Workers Assets).                                                                                                                                                                                                                                                                                                                                                                                              |
 
 Every aggregate response carries `X-Cache: HIT|MISS`. Status codes: unknown
 operation → 404, missing/invalid window → 400 (both before any cache read),
 backend failure → 502, undecodable entry → 500, missing `CACHEKIT_API_KEY`
-secret → 503. Success body: `{ operation, window, data }` where `data` is the
+or `CACHEKIT_API_URL` secret → 503. Success body: `{ operation, window, data }` where `data` is the
 decoded interop/v1 MessagePack map as written by the ingester.
 
 Aggregate reads (not `/api/stats`) are additionally fronted by the Cloudflare
@@ -100,11 +100,10 @@ design + operating contract: [`docs/history.md`](../docs/history.md).
 The Worker needs two secrets, both from your secret manager (creds per
 [docs/architecture.md#credentials](../docs/architecture.md#credentials)):
 `CACHEKIT_API_KEY`, the tenant's API key, and `CACHEKIT_API_URL`, the
-CachekitIO endpoint the tenant is provisioned on. `wrangler.toml` lists both
-under `[secrets] required`, so `wrangler deploy` fails, naming the missing
-secret, until both are set on the Worker. Neither is committed: without the
-guard, an unset `CACHEKIT_API_URL` would silently send the demo to the SDK's
-default production host.
+CachekitIO endpoint the tenant is provisioned on. Neither is committed.
+`wrangler.toml` lists both under `[secrets] required`, so `wrangler deploy`
+(wrangler >= 4.77) fails, naming the missing secret, until both are set on
+the Worker; at runtime the backend routes answer 503 while either is unset.
 
 On a Worker that already exists, set or rotate a secret in place:
 
@@ -113,16 +112,13 @@ npx wrangler secret put CACHEKIT_API_KEY   # prompts for the value
 npx wrangler secret put CACHEKIT_API_URL
 ```
 
-The first deploy of a new Worker, and the first deploy after upgrading from a
-config that set `CACHEKIT_API_URL` as a plain `[vars]` entry, must upload the
-secrets with the deploy itself. A new Worker has nowhere to `secret put` to
-yet, and on an existing one the plain variable still holds the name until a
-deploy without `[vars]` removes it. Write the values to a file outside the
-repository, deploy, then delete the file:
+A new Worker, or the first deploy after `CACHEKIT_API_URL` moved out of
+`[vars]` (a plain variable blocks a secret of the same name), takes the
+secrets with the deploy itself, from a file outside the repository that you
+delete afterwards:
 
 ```bash
-# secrets.env holds CACHEKIT_API_URL=… (and CACHEKIT_API_KEY=… for a new Worker)
-npx wrangler deploy --secrets-file /path/outside/the/repo/secrets.env
+npx wrangler deploy --secrets-file /path/outside/the/repo/secrets.env   # NAME=value lines
 ```
 
 Secrets already on the Worker and not in the file are kept.

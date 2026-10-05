@@ -105,8 +105,8 @@ export const MAX_RECORD_KEYS = 64;
  * Exclusion-reason names are the publisher's closed vocabulary, every one
  * lowercase_with_underscores (ingester policy.py EXCLUSION_REASONS). This is
  * a syntactic rule rather than a copy of those 29 strings on purpose: a
- * duplicated list drifts the moment either side adds a reason, and an earlier review
- * already ruled that enumeration cannot converge for this codebase.
+ * duplicated list drifts the moment either side adds a reason, and enumeration cannot
+ * converge for this codebase.
  */
 const REASON_KEY_RE = /^[a-z][a-z0-9_]{0,63}$/;
 
@@ -201,10 +201,10 @@ function canonicalJson(value: unknown): string {
  * them. Anything else is dropped. Counts-by-name is these fields' contract,
  * and enforcing it value-level at write time is what makes the "no post text
  * ever reaches storage" promise a property of the code rather than trust in
- * the operator-writable source cache (review finding, major).
+ * the operator-writable source cache.
  *
  * The key PATTERN is the part that took two goes. Capping key length alone
- * left an earlier review finding open on the edge — `langs` and
+ * left a hole open on the edge — `langs` and
  * `excluded_count_by_reason` were the only counters reaching storage with no
  * key validator, so `{'<script>alert(1)</script>': 0.9}` was retained
  * verbatim — and history made it worse than the original: the live cache
@@ -433,7 +433,7 @@ async function captureTier(
       // Byte length, not string length: .length counts UTF-16 code units,
       // and emoji / non-Latin hashtags are multi-byte by construction, so
       // counting units would let the real ceiling drift to ~3× the
-      // documented cap (review finding, major).
+      // documented cap.
       if (new TextEncoder().encode(payload).length > MAX_PAYLOAD_BYTES) {
         counts.invalid += 1;
         console.error('history_gap', { tier, operation, bucketTs, reason: 'payload_too_large' });
@@ -634,7 +634,7 @@ async function historyStatus(db: D1Database, nowMs: number): Promise<Response> {
   } catch (err) {
     // Same failure shape as the range path: the endpoint documented as
     // "capture health" must name its own outage, not fall through to the
-    // Worker's generic edge_unhandled 500 (review finding, major).
+    // Worker's generic edge_unhandled 500.
     console.error('history_status_failed', { err: String(err) });
     return json(500, { error: 'history_unavailable', detail: 'history store query failed' });
   }
@@ -824,7 +824,7 @@ export async function handleHistoryApi(url: URL, deps: HistoryDeps): Promise<Res
   // the missing row may land moments later — but it must still be cached
   // BRIEFLY: never caching it means the response cache is defeated in
   // exactly the state where every request pays full D1, and capture-down is
-  // when that recompute load is self-sustaining (review finding, critical).
+  // when that recompute load is self-sustaining.
   // The write also honours the read path's size cap: storing a response the
   // read side would reject poisons the key into a permanent reject-
   // recompute-rewrite loop, so an over-limit response stays uncached.
@@ -862,7 +862,7 @@ export async function handleHistoryApi(url: URL, deps: HistoryDeps): Promise<Res
  * leading (the PK starts at operation, the secondary index at tier), so it
  * walks every row — linear in table size and billed per row read, which at
  * steady state (~6,200 rows) turns each uncached range request into ~37×
- * its documented read budget (review finding, critical). Binding tier lets
+ * its documented read budget. Binding tier lets
  * SQLite satisfy MIN straight off the (tier, bucket_ts) index.
  *
  * Folding the two seeks into one `GROUP BY tier` was measured and rejected,
@@ -872,7 +872,7 @@ export async function handleHistoryApi(url: URL, deps: HistoryDeps): Promise<Res
  * apply through GROUP BY. A scan reads every index row — ~6,200 at steady
  * state, against a documented ~170/query and only a ~3× worst-case margin on
  * the 5M rows/day tier — so it reintroduces exactly the amplification the
- * panel's CRIT finding removed, to save one round trip. The seek count is
+ * per-tier seek removed, to save one round trip. The seek count is
  * fixed at TIERS.length and cannot grow with the data.
  */
 async function firstBucket(db: D1Database): Promise<number | null> {

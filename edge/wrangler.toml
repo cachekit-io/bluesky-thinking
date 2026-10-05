@@ -3,11 +3,7 @@ name = "skyline-edge"
 main = "src/worker.ts"
 compatibility_date = "2026-07-01"
 
-# Both values come from your secret manager at deploy time, never this file
-# (docs/architecture.md#credentials; edge/README.md#deploy). CACHEKIT_API_URL
-# is a secret rather than a [vars] entry so the endpoint is a deploy-time
-# decision: worker.ts falls back to the SDK's default production host when it
-# is unset, and this list makes `wrangler deploy` fail instead.
+# Set from your secret manager, never this file: see edge/README.md#deploy.
 [secrets]
 required = ["CACHEKIT_API_KEY", "CACHEKIT_API_URL"]
 

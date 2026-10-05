@@ -209,7 +209,7 @@ def test_unenumerated_local_class_labels_are_denied(value):
 
 
 def test_local_label_class_rule_is_scoped_to_the_local_loopback_family():
-    # Round-11: the class rule is deliberately narrowed to the four distinctive
+    # The class rule is deliberately narrowed to the four distinctive
     # stems. Short ambiguous tokens (home/lcl/lvh/intern/127) were reverted —
     # they cannot be told from legitimate public hosts by syntax, and those
     # specific classic dev domains live in the enumerated _LOCAL_HOSTS backstop

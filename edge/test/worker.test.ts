@@ -19,6 +19,8 @@ const explodingDb: D1Database = {
 // truthiness, global fetch is stubbed, and a real-looking literal would trip
 // secret scanners for no test value.
 const TEST_API_KEY = 'unit-test-api-key';
+// RFC 2606 reserved name; global fetch is stubbed, so nothing resolves it.
+const TEST_API_URL = 'https://cachekit.example.com';
 
 function stubFetch(status = 200): ReturnType<typeof vi.fn> {
   const mock = vi.fn(async () => new Response('ok', { status }));
@@ -36,6 +38,7 @@ describe('scheduled: history capture is contained', () => {
         { scheduledTime: Date.UTC(2026, 7, 14, 14, 0, 0) },
         {
           CACHEKIT_API_KEY: TEST_API_KEY,
+          CACHEKIT_API_URL: TEST_API_URL,
           HISTORY: explodingDb,
         },
       ),
@@ -56,9 +59,35 @@ describe('scheduled: history capture is contained', () => {
       { scheduledTime: Date.UTC(2026, 7, 14, 14, 10, 0) },
       {
         CACHEKIT_API_KEY: TEST_API_KEY,
+        CACHEKIT_API_URL: TEST_API_URL,
         HISTORY: explodingDb,
       },
     );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('skips capture without an endpoint instead of using the SDK default host', async () => {
+    const fetchMock = stubFetch();
+    await worker.scheduled(
+      { scheduledTime: Date.UTC(2026, 7, 14, 14, 0, 0) },
+      { CACHEKIT_API_KEY: TEST_API_KEY, HISTORY: explodingDb },
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('fetch: backend routes fail closed', () => {
+  it('503s naming CACHEKIT_API_URL when only the key is set, with no backend call', async () => {
+    const fetchMock = stubFetch();
+    const response = await worker.fetch(
+      new Request('https://edge.test/api/posts_per_minute?window=5m'),
+      { CACHEKIT_API_KEY: TEST_API_KEY },
+    );
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({
+      error: 'not_configured',
+      detail: 'CACHEKIT_API_URL secret is not set',
+    });
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });
