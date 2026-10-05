@@ -7,7 +7,7 @@ For the live aggregates the edge is **read-only**: they are computed and written
 by the Python ingester; a cache miss here is surfaced (404 + `X-Cache: MISS`),
 never recomputed or faked. The edge's only writes are its own derived state:
 hourly/daily snapshot rows into the `HISTORY` D1 store, CacheKit-cached
-history responses (LAB-1616, below), and short-lived aggregate responses in the
+history responses (below), and short-lived aggregate responses in the
 Cloudflare POP cache (`caches.default`, see API) — never the interop aggregate
 keys.
 
@@ -21,7 +21,7 @@ its selected 5m / 1h / 24h window, rank and proportional bar where applicable,
 and the posts/minute card also shows its sample size. The selection is retained in
 the `?window=` URL parameter.
 
-A history panel (LAB-1616) charts posts-per-minute over 7d/30d from
+A history panel charts posts-per-minute over 7d/30d from
 `/api/history`: one amber bar per present bucket, absent buckets rendered as
 holes, with a coverage line stating when history began and how many points the
 range actually holds ("missing points are gaps in collection, not zero
@@ -36,13 +36,13 @@ verification have separate dashboard copy.
 
 ## API
 
-| Route                                        | Description                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| :------------------------------------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GET /api/{operation}?window={window}`       | Cached aggregate. `operation` ∈ `trending_hashtags` · `trending_links` · `lang_mix` · `posts_per_minute` · `top_emoji`; `window` ∈ `5m` · `1h` · `24h` (required — interop binding rules forbid default parameters).                                                                                                                                                                                                                    |
-| `GET /api/stats`                             | Per-isolate `hits` / `misses` / `errors` / `hit_rate` + a `scope` string restating this: counters reset when Cloudflare recycles the isolate, and `hit_rate` is aggregate-key availability at this isolate — not an SDK L1 rate, and not the end-user rate (POP cache hits are served before the worker runs). Sent with `cache-control: no-store` — live counters are never replayed from a browser or intermediary cache.             |
-| `GET /api/history/{operation}?range={range}` | Snapshot history from D1 (LAB-1616): `range` ∈ `7d` (hourly points) · `30d` (daily points). Bounded, ascending series with a coverage block — absent buckets are gaps, never zeros. `x-history-source: cachekit\|d1\|d1-fallback` names the serving layer (responses are CacheKit-cached per bucket; cached bytes are validated before relay and only complete series are cached). Served from D1 alone if `CACHEKIT_API_KEY` is unset. |
-| `GET /api/history/status`                    | Capture health: per-tier row counts, newest bucket, `stale` flag. Separate from live freshness by design.                                                                                                                                                                                                                                                                                                                               |
-| `GET /`                                      | Static dashboard (Workers Assets).                                                                                                                                                                                                                                                                                                                                                                                                      |
+| Route                                        | Description                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| :------------------------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /api/{operation}?window={window}`       | Cached aggregate. `operation` ∈ `trending_hashtags` · `trending_links` · `lang_mix` · `posts_per_minute` · `top_emoji`; `window` ∈ `5m` · `1h` · `24h` (required — interop binding rules forbid default parameters).                                                                                                                                                                                                         |
+| `GET /api/stats`                             | Per-isolate `hits` / `misses` / `errors` / `hit_rate` + a `scope` string restating this: counters reset when Cloudflare recycles the isolate, and `hit_rate` is aggregate-key availability at this isolate — not an SDK L1 rate, and not the end-user rate (POP cache hits are served before the worker runs). Sent with `cache-control: no-store` — live counters are never replayed from a browser or intermediary cache.  |
+| `GET /api/history/{operation}?range={range}` | Snapshot history from D1: `range` ∈ `7d` (hourly points) · `30d` (daily points). Bounded, ascending series with a coverage block — absent buckets are gaps, never zeros. `x-history-source: cachekit\|d1\|d1-fallback` names the serving layer (responses are CacheKit-cached per bucket; cached bytes are validated before relay and only complete series are cached). Served from D1 alone if `CACHEKIT_API_KEY` is unset. |
+| `GET /api/history/status`                    | Capture health: per-tier row counts, newest bucket, `stale` flag. Separate from live freshness by design.                                                                                                                                                                                                                                                                                                                    |
+| `GET /`                                      | Static dashboard (Workers Assets).                                                                                                                                                                                                                                                                                                                                                                                           |
 
 Every aggregate response carries `X-Cache: HIT|MISS`. Status codes: unknown
 operation → 404, missing/invalid window → 400 (both before any cache read),
@@ -53,7 +53,7 @@ decoded interop/v1 MessagePack map as written by the ingester.
 Aggregate reads (not `/api/stats`) are additionally fronted by the Cloudflare
 POP cache — 200s for 15 s, 404s for 10 s (negative caching) — so unauthenticated
 public traffic can't mint billable misses against the metered CachekitIO
-backend at will (Stage-3 panel finding, closed in LAB-738). A POP-cached
+backend at will. A POP-cached
 response replays the stored `X-Cache` header; per-POP scope means at most one
 backend read per URL per POP per TTL.
 
@@ -73,7 +73,7 @@ CI ([`edge-qa`](../.github/workflows/edge-qa.yml)) gates every PR and push touch
 if it fails, key derivation drifted from the cross-SDK contract — fix the drift,
 not the vectors.
 
-## Hot-path integration (Stage 3)
+## Hot-path integration
 
 The Worker holds a **service binding** to the Rust-WASM hot path
 (`wrangler.toml [[services]]`, `env.HOTPATH` → `skyline-hotpath`). Every
@@ -87,21 +87,21 @@ payload served through `/api/{operation}` is first integrity-checked there
 
 Misses never call the hot path: 404 + `X-Cache: MISS`, unchanged.
 
-History capture (LAB-1616) is the hourly cron's only job (the Render
-keep-alive ping it used to share the schedule with died with the Render
-deployment, LAB-2383): at each top of hour the scheduled handler snapshots the
-five `1h` aggregates into the `HISTORY` D1 binding (daily tier + retention
-sweep at UTC midnight). Capture failures produce gaps plus structured
+History capture is the hourly cron's only job (the Render keep-alive ping
+it used to share the schedule with died with the Render deployment): at each
+top of hour the scheduled handler snapshots the five `1h` aggregates into the
+`HISTORY` D1 binding (daily tier + retention sweep at UTC midnight). Capture
+failures produce gaps plus structured
 `history_gap` / `history_capture_failed` logs — never invented points. Full
 design + operating contract: [`docs/history.md`](../docs/history.md).
 
 ## Deploy
 
-`wrangler deploy`, then set the secret (creds per
+`wrangler deploy`, then set the secret from your secret manager (creds per
 [docs/architecture.md#credentials](../docs/architecture.md#credentials)):
 
 ```bash
-op read "op://cachekit/ck-dev-bluesky-default/credential" | wrangler secret put CACHEKIT_API_KEY
+wrangler secret put CACHEKIT_API_KEY   # prompts for the demo tenant's API key
 ```
 
 Any pending D1 migration must be applied **before** the deploy that expects it:
@@ -110,9 +110,8 @@ Any pending D1 migration must be applied **before** the deploy that expects it:
 npx wrangler d1 migrations apply skyline-history --remote
 ```
 
-Dev deployment: **https://skyline-edge.raywalker.workers.dev** (the dev
-instance URL is a `[vars]` entry, `CACHEKIT_API_URL`). Production routing and
-a custom domain are Stage 4.
+Dev deployment: **https://skyline-edge.raywalker.workers.dev** (the backend
+endpoint is a `[vars]` entry, `CACHEKIT_API_URL`).
 
 Two build-time accommodations for `@cachekit-io/cachekit` 0.1.3 (both retire
 with the 0.1.5 WASM core — see `wrangler.toml` for the bump tracking): the

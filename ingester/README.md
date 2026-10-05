@@ -1,4 +1,4 @@
-# Skyline ingester (Stage 2, Python — LAB-744)
+# Skyline ingester (Python)
 
 Consumes the [Bluesky Jetstream](https://github.com/bluesky-social/jetstream), maintains 5m/1h/24h
 sliding windows in minute buckets, and publishes the five locked analytics aggregates to CacheKit
@@ -11,8 +11,9 @@ byte-identical to what the TS edge API and Rust-WASM hot path read.
 cd ingester
 uv sync
 
-# Live: writes real CachekitIO entries. Creds per docs/architecture.md#credentials:
-CACHEKIT_API_URL=https://api.dev.cachekit.io CACHEKIT_ALLOW_CUSTOM_HOST=true \
+# Live: writes real CachekitIO entries. Creds per docs/architecture.md#credentials.
+# Replace <endpoint> with your CachekitIO endpoint URL first:
+CACHEKIT_API_URL="<endpoint>" CACHEKIT_ALLOW_CUSTOM_HOST=true \
     op run --env-file=../.op.env -- uv run skyline-ingester
 
 # Dry-run: no key -> same pipeline, in-process backend, every write logged
@@ -28,18 +29,18 @@ provides that) — the SDK does not read this service's `.env` file:
 | :--- | :--- | :--- |
 | `CACHEKIT_API_KEY` | unset | CachekitIO key. Unset → dry-run mode. |
 | `CACHEKIT_MASTER_KEY` | unset | 64-hex master key for the `@cache.secure` sentiment cache. **Required in live mode** (fail closed — a live deploy without it refuses to start); unset in dry-run → secure cache disabled with a warning. |
-| `CACHEKIT_API_URL` | `https://api.cachekit.io` | Backend endpoint (the demo uses the dev instance, `https://api.dev.cachekit.io`). |
-| `CACHEKIT_ALLOW_CUSTOM_HOST` | unset | Required `true` for the dev instance — its hostname is outside the SDK's SSRF allowlist. |
+| `CACHEKIT_API_URL` | `https://api.cachekit.io` | Backend endpoint. |
+| `CACHEKIT_ALLOW_CUSTOM_HOST` | unset | Required `true` when `CACHEKIT_API_URL` is outside the SDK's SSRF host allowlist, as the demo's endpoint is. |
 | `JETSTREAM_URL` | `wss://jetstream2.us-east.bsky.network/subscribe` | Jetstream endpoint. |
-| `PORT` | `8080` | `/health` listener port (the k3s liveness probe targets it). |
+| `PORT` | `8080` | `/health` listener port (the Kubernetes liveness probe targets it). |
 | `PUBLISH_TICK_SECONDS` | `15` | Publish-loop poll interval. |
-| `CHECKPOINT_INTERVAL_SECONDS` | `300` | Window-state checkpoint cadence — also the restart staleness bound. 300 s was originally sized to fit Render's 5 GB/month egress allowance (see *Checkpointing*); the lab cluster has no egress cap, but the cadence stays — nothing needs it tighter. |
+| `CHECKPOINT_INTERVAL_SECONDS` | `300` | Window-state checkpoint cadence — also the restart staleness bound. 300 s was originally sized to fit Render's 5 GB/month egress allowance (see *Checkpointing*); the self-hosted cluster has no egress cap, but the cadence stays — nothing needs it tighter. |
 | `TOP_N` | `50` | Entries kept in trending lists. |
 
-## Health endpoint (Stage 4, LAB-738)
+## Health endpoint
 
 The ingester's whole HTTP surface is `GET /health` on `$PORT` (it originated as a Render
-free-tier web-service requirement; today it is the k3s liveness probe's target). Liveness only,
+free-tier web-service requirement; today it is the Kubernetes liveness probe's target). Liveness only,
 no aggregate data, no key material:
 
 ```json
@@ -51,26 +52,27 @@ no aggregate data, no key material:
 ```
 
 Returns **503** whenever the Jetstream socket is down, so a dead consumer inside a live process is
-visible from outside — the k3s `livenessProbe` turns a sustained 503 (~3 min) into a container
+visible from outside — the Kubernetes `livenessProbe` turns a sustained 503 (~3 min) into a container
 restart, and the CacheKit checkpoint makes that restart safe. Deployment manifests and runbook:
 [`../deploy/k3s/`](../deploy/k3s/).
 
-The last five fields are memory diagnostics (LAB-1775). They are **sizes, never contents** — a
+The last five fields are memory diagnostics. They are **sizes, never contents** — a
 count of live counter keys, not the keys — so the endpoint stays liveness-only. `rss_mib` is the
 current resident set (`/proc/self/statm`, `null` off Linux) and `rss_peak_mib` the high-water mark
 (`resource.getrusage`); both are stdlib, no new dependency. The two come from different kernel
 accounting paths and `ru_maxrss` updates lazily, so `rss_mib` can read a little *above*
 `rss_peak_mib` — that is expected, not a bug. They exist so that an OOM recurrence is
 diagnosable from the endpoint alone, without the host's memory graph (Render's dashboard then,
-the lab cluster's VictoriaMetrics now): `counter_keys` climbing without bound is the signature of
-the LAB-1775 regression returning.
+the cluster's metrics now): `counter_keys` climbing without bound is the signature of the
+window-memory regression below returning.
 
 ## Window retention and memory
 
 The store keeps one counter bucket per minute for 24 h. Resident cost is therefore
 *(retained minutes) × (distinct keys per minute)*, and at observed firehose rates a minute carries
 ~2,470 distinct keys — so 1,440 full-fidelity minutes projected to **~1,050 MiB**, against the
-512 MiB of the Render free plan. That is the OOM restart LAB-1775 chased down.
+512 MiB of the Render free plan. That is what caused the ingester's OOM restarts; the compaction
+below bounds it.
 
 A bucket keeps every distinct key while it is inside the **full-fidelity horizon** — the 5 m
 window plus 5 minutes of slack, 10 minutes in total. Once it ages past that it is truncated in
@@ -116,16 +118,16 @@ At a full 1,440-bucket window and observed live cardinality that is **41.6 MiB s
 peak** including the `merged()` transient, versus **438.5 MiB / 634.2 MiB** with compaction
 disabled (`--no-compaction`) — the latter over the 512 MiB limit on retained structure alone.
 
-> **On-cluster reality check (LAB-2586).** The soak figures above measure retained structure plus
-> one merge transient, single-threaded, over minutes. On the lab k3s deployment the container
+> **On-cluster reality check.** The soak figures above measure retained structure plus
+> one merge transient, single-threaded, over minutes. On the Kubernetes deployment the container
 > working set is larger and grows for the whole first 24 h: live counter keys match the model
 > (159k keys ≈ 45 MiB at the measured ~299 B/key, at hour 14.5, via `/health`), but each publish
 > tick's full-window copy + merge fold runs in an `asyncio.to_thread` worker, and glibc keeps each
 > worker heap at its transient high-water — measured ~2.4× live window state, a ratchet that
 > plateaus only once the window stops growing. Observed on the cluster at the 512 MiB limit
-> (LAB-2266 canary, two pods, 2026-09-01 → 09-04): 298–319 MiB at 24 h, then ~345–372 MiB from
+> (canary, two pods, 2026-09-01 → 09-04): 298–319 MiB at 24 h, then ~345–372 MiB from
 > hour 26 to hour 46, creeping ~1.4 → 0.5 MiB/h and decelerating — ~20 % above the ~260–310 MiB
-> the LAB-2586 probes projected, with zero OOMKills.
+> earlier probes projected, with zero OOMKills.
 > [`deploy/k3s/skyline-ingester.yaml`](../deploy/k3s/skyline-ingester.yaml) sizes for that
 > on-cluster reality, not for these single-threaded soak numbers.
 
@@ -177,7 +179,7 @@ Values are interop/v1 plain MessagePack, top-level maps with string keys. All ca
 | `posts_per_minute` | `ppm`: float |
 | `top_emoji` | `emoji`: `[{emoji, count}]`, top 25 (ZWJ sequences count once) |
 
-### Secure cache (AC-6 groundwork)
+### Secure cache
 
 `language_sentiment(window="1h")` — per-language lexicon sentiment `{lang: {avg, n}}` — is written
 via `@cache.secure(master_key=…)` auto mode, `namespace="bluesky-thinking"`. Its key is the
@@ -186,8 +188,8 @@ only (asserted in tests). Zero-knowledge holds end-to-end: the sentiment value i
 its plaintext source is never written to any other key (the checkpoint omits it — see below), so the
 backend never sees it in the clear. Its secure value contains only the window, generation time,
 normalization version, and live per-language sentiment; public transparency counters derived from
-the operator-writable checkpoint are deliberately excluded. Ciphertext-only verification against
-the live SaaS is Stage 3.
+the operator-writable checkpoint are deliberately excluded. The [`stage3/`](../stage3/) harness
+verifies ciphertext-only storage against the live backend (`raw_read.py --expect ciphertext`).
 
 ### Checkpointing
 
@@ -197,10 +199,10 @@ window (the spec's Render-restart mitigation). Per-minute counters are truncated
 entries in the snapshot — long-tail trending, language, and emoji counts are approximate after a
 restore; `posts_per_minute` and `total_signal_candidates` stay exact.
 
-The checkpoint is also the ingester's dominant **egress** path: LAB-1894 measured it at ~97 % of
+The checkpoint is also the ingester's dominant **egress** path, measured at ~97 % of
 outbound bandwidth — ~2.3 MB wire × 720 writes/day ≈ 49 GB/month at per-minute snapshots on a
 120 s cadence, which is what exhausted Render's 5 GB/month free allowance and suspended the
-workspace (2026-08-13). Two changes fit it back inside (LAB-1933): buckets older than the 1 h
+workspace (2026-08-13). Two changes fit it back inside: buckets older than the 1 h
 window are **hour-coarsened** at snapshot time — each aged hour folds into one unit keyed at the
 hour's first minute, so a full 24 h window serializes as ~85 units instead of ~1,445 — and the
 default cadence stretched from 120 s to 300 s. Measured with the audit's soak methodology (600 s
