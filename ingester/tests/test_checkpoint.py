@@ -61,7 +61,7 @@ def test_restore_rejects_unknown_version(store):
 
 
 def test_restore_ignores_legacy_sent():
-    # ZK: the plaintext checkpoint is operator-poisonable, so a
+    # Zero-knowledge: the plaintext checkpoint is operator-poisonable, so a
     # restored `sent` would let the backend operator choose the plaintext of the
     # next @cache.secure publish. Sentiment must come from live ingestion only.
     good = int(NOW // 60)
@@ -92,7 +92,7 @@ def test_restore_checkpoint_never_crashes_startup(publisher, backend, monkeypatc
 
 
 def test_snapshot_omits_sentiment_for_zero_knowledge(store):
-    # ZK: `sent` is the cleartext source of the @cache.secure value; the plaintext
+    # Zero-knowledge: `sent` is the cleartext source of the @cache.secure value; the plaintext
     # checkpoint must not carry it, or the backend reconstructs avg = sum / count.
     snap = store.snapshot(NOW)
     assert snap["buckets"], "fixture stream should produce buckets"

@@ -30,8 +30,8 @@ def build_publisher(settings: Settings, store: WindowStore) -> Publisher:
             raise RuntimeError("CACHEKIT_MASTER_KEY is required in live mode: the secure sentiment cache must fail closed")
         from cachekit.backends.cachekitio import CachekitIOBackend
 
-        # No-args = the SDK's env-config path (CACHEKIT_API_KEY, plus optional
-        # CACHEKIT_API_URL / CACHEKIT_ALLOW_CUSTOM_HOST for a custom endpoint).
+        # No-args = the SDK's env-config path (CACHEKIT_API_KEY and
+        # CACHEKIT_API_URL, plus CACHEKIT_ALLOW_CUSTOM_HOST for a custom endpoint).
         # Passing api_key alone is rejected by the SDK ("Both api_url and
         # api_key required if using manual config"), so live mode never came up
         # before this fix.
@@ -40,8 +40,12 @@ def build_publisher(settings: Settings, store: WindowStore) -> Publisher:
             # Without this guard a .env-only key selects live mode and then dies
             # in the SDK with a misleading "api_key Field required".
             raise RuntimeError("CACHEKIT_API_KEY must be a real environment variable in live mode (the SDK does not read .env)")
+        if not os.environ.get("CACHEKIT_API_URL"):
+            # Without an explicit endpoint the SDK falls back to its default
+            # production host and would send this tenant's key there.
+            raise RuntimeError("CACHEKIT_API_URL is required in live mode: without it the SDK sends the key to its default host")
         backend = CachekitIOBackend()
-        logger.info("live mode: publishing to CachekitIO at %s", os.environ.get("CACHEKIT_API_URL", "https://api.cachekit.io"))
+        logger.info("live mode: publishing to CachekitIO at %s", os.environ["CACHEKIT_API_URL"])
     else:
         backend = MemoryBytesBackend(log_writes=True)
         logger.warning("CACHEKIT_API_KEY not set — dry-run mode, writes are logged only")

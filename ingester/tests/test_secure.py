@@ -78,3 +78,21 @@ def test_live_mode_requires_key_in_process_env(monkeypatch):
     )
     with pytest.raises(RuntimeError, match="real environment variable"):
         build_publisher(settings, WindowStore())
+
+
+@pytest.mark.parametrize("url", [None, ""])
+def test_live_mode_without_api_url_fails_closed(monkeypatch, url):
+    """Without an explicit endpoint the SDK falls back to its default production
+    host, so a local run with a key and no URL would send the key there: live
+    mode must refuse to start instead."""
+    monkeypatch.setenv("CACHEKIT_API_KEY", "ck_test_not_a_real_key")
+    if url is None:
+        monkeypatch.delenv("CACHEKIT_API_URL", raising=False)
+    else:
+        monkeypatch.setenv("CACHEKIT_API_URL", url)
+    settings = Settings(
+        cachekit_api_key=SecretStr("ck_test_not_a_real_key"),
+        cachekit_master_key=SecretStr("a" * 64),
+    )
+    with pytest.raises(RuntimeError, match="CACHEKIT_API_URL is required"):
+        build_publisher(settings, WindowStore())

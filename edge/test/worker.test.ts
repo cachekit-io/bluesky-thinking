@@ -90,4 +90,28 @@ describe('fetch: backend routes fail closed', () => {
     });
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it('serves history from D1 when only the key is set, with no backend call', async () => {
+    const fetchMock = stubFetch();
+    const sql: string[] = [];
+    const emptyDb: D1Database = {
+      prepare(query: string) {
+        sql.push(query);
+        const statement = {
+          bind: () => statement,
+          all: async () => ({ results: [] }),
+          run: async () => ({ meta: { changes: 0 } }),
+        };
+        return statement;
+      },
+    };
+    const response = await worker.fetch(
+      new Request('https://edge.test/api/history/posts_per_minute?range=7d'),
+      { CACHEKIT_API_KEY: TEST_API_KEY, HISTORY: emptyDb },
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get('x-history-source')).toBe('d1');
+    expect(sql.length).toBeGreaterThan(0);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 });

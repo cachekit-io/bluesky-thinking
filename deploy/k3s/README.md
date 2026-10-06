@@ -181,7 +181,8 @@ kubectl -n skyline logs deploy/skyline-ingester | grep -F 'live mode: publishing
 ```
 
 The gate for a wrong endpoint is [`stage4/verify.sh`](../../stage4/verify.sh)
-after one TTL (60 s): its freshness check fails unless the ingester's
+after 75 s (the 60 s TTL plus the edge's 15 s POP cache): its freshness check
+fails unless the ingester's
 aggregates reach the backend the edge reads.
 
 If GHCR image pulls fail with `unauthorized`, step 2 did not take. Three
