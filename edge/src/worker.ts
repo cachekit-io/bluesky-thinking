@@ -14,8 +14,8 @@ interface Env {
   CACHEKIT_API_KEY?: string;
   /**
    * Backend endpoint. Required: while it or the key is unset, the aggregate
-   * routes and /api/stats answer 503, history serves uncached D1 reads, and
-   * hourly capture is skipped.
+   * routes and /api/stats answer 503, /api/history/* reads D1 directly without
+   * the CachekitIO response cache, and hourly capture is skipped.
    */
   CACHEKIT_API_URL?: string;
   /** Service binding to the Rust-WASM hot-path Worker (wrangler [[services]]). */

@@ -51,9 +51,9 @@ def test_live_mode_builds_backend_from_env(monkeypatch):
 
     Regression: passing api_key alone to the constructor raises
     "Both api_url and api_key required if using manual config", so the
-    original live path could never start. Env config also carries the
-    CACHEKIT_API_URL / CACHEKIT_ALLOW_CUSTOM_HOST overrides a custom endpoint
-    (one outside the SDK's SSRF host allowlist, as the demo's is) needs.
+    original live path could never start. Env config carries the required
+    CACHEKIT_API_URL, plus CACHEKIT_ALLOW_CUSTOM_HOST for an endpoint outside
+    the SDK's host allowlist (as the demo's is).
     """
     monkeypatch.setenv("CACHEKIT_API_KEY", "ck_test_not_a_real_key")
     monkeypatch.setenv("CACHEKIT_API_URL", "https://cachekit.example.com")
@@ -62,7 +62,7 @@ def test_live_mode_builds_backend_from_env(monkeypatch):
         cachekit_api_key=SecretStr("ck_test_not_a_real_key"),
         cachekit_master_key=SecretStr("a" * 64),
     )
-    # Old code raised ValueError here; construction makes no network calls.
+    # Construction makes no network calls.
     publisher = build_publisher(settings, WindowStore())
     assert publisher.secure_enabled
 
