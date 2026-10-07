@@ -12,7 +12,11 @@ import { captureTick, handleHistoryApi, type D1Database } from './history.js';
 
 interface Env {
   CACHEKIT_API_KEY?: string;
-  /** Backend endpoint. Required; backend routes 503 while it is unset. */
+  /**
+   * Backend endpoint. Required: while it or the key is unset, the aggregate
+   * routes and /api/stats answer 503, /api/history/* reads D1 directly without
+   * the CachekitIO response cache, and hourly capture is skipped.
+   */
   CACHEKIT_API_URL?: string;
   /** Service binding to the Rust-WASM hot-path Worker (wrangler [[services]]). */
   HOTPATH?: HotpathBinding;
@@ -91,16 +95,15 @@ export default {
       );
     }
 
-    // Miss-minting guard: these
-    // URLs are public and the backend bills misses, so an unauthenticated
-    // client must not be able to reach CachekitIO at will. Front every
-    // aggregate read with the POP cache, 404s included (negative caching) —
-    // repeat requests cost a Cloudflare cache hit, not a billable miss.
-    // /api/stats stays uncached: it's per-isolate module state, no backend
-    // call to protect, and caching it would blind the dashboard's counters.
-    // Scope note: caches.default is per-POP, so this bounds minting to one
-    // backend read per URL per POP per TTL rather than eliminating it.
-    // absent under vitest / the node demo script
+    // Miss-minting guard: these URLs are public and the backend bills misses,
+    // so an unauthenticated client must not be able to reach CachekitIO at
+    // will. Front every aggregate read with the POP cache, 404s included
+    // (negative caching) — repeat requests cost a Cloudflare cache hit, not a
+    // billable miss. /api/stats stays uncached: it's per-isolate module state,
+    // no backend call to protect, and caching it would blind the dashboard's
+    // counters. Scope note: caches.default is per-POP, so this bounds minting
+    // to one backend read per URL per POP per TTL rather than eliminating it.
+    // caches.default is absent under vitest / the node demo script.
     const edgeCache = (globalThis as { caches?: { default?: EdgeCache } }).caches?.default;
     const cacheable = edgeCache !== undefined && url.pathname !== '/api/stats';
     if (cacheable) {

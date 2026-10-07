@@ -30,7 +30,7 @@ read this service's `.env` file:
 | :--- | :--- | :--- |
 | `CACHEKIT_API_KEY` | unset | CachekitIO key. Unset → dry-run mode. |
 | `CACHEKIT_MASTER_KEY` | unset | 64-hex master key for the `@cache.secure` sentiment cache. **Required in live mode** (fail closed — a live deploy without it refuses to start); unset in dry-run → secure cache disabled with a warning. |
-| `CACHEKIT_API_URL` | `https://api.cachekit.io` | Backend endpoint. |
+| `CACHEKIT_API_URL` | unset | Backend endpoint. **Required in live mode** (fail closed — without it the SDK would send the key to its default host, so the ingester refuses to start). |
 | `CACHEKIT_ALLOW_CUSTOM_HOST` | unset | Required `true` when `CACHEKIT_API_URL` is outside the SDK's SSRF host allowlist, as the demo's endpoint is. |
 | `JETSTREAM_URL` | `wss://jetstream2.us-east.bsky.network/subscribe` | Jetstream endpoint. |
 | `PORT` | `8080` | `/health` listener port (the Kubernetes liveness probe targets it). |

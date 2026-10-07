@@ -181,8 +181,9 @@ kubectl -n skyline logs deploy/skyline-ingester | grep -F 'live mode: publishing
 ```
 
 The gate for a wrong endpoint is [`stage4/verify.sh`](../../stage4/verify.sh)
-after one TTL (60 s): its freshness check fails unless the ingester's
-aggregates reach the backend the edge reads.
+after 75 s (the 60 s TTL plus the edge's 15 s POP cache): if the ingester's
+aggregates do not reach the backend the edge reads, its 200 check fails once
+the last good entry expires.
 
 If GHCR image pulls fail with `unauthorized`, step 2 did not take. Three
 causes, in order of likelihood: the secret is missing from the `skyline`

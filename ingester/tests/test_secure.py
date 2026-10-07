@@ -51,9 +51,9 @@ def test_live_mode_builds_backend_from_env(monkeypatch):
 
     Regression: passing api_key alone to the constructor raises
     "Both api_url and api_key required if using manual config", so the
-    original live path could never start. Env config also carries the
-    CACHEKIT_API_URL / CACHEKIT_ALLOW_CUSTOM_HOST overrides a custom endpoint
-    (one outside the SDK's SSRF host allowlist, as the demo's is) needs.
+    original live path could never start. Env config carries the required
+    CACHEKIT_API_URL, plus CACHEKIT_ALLOW_CUSTOM_HOST for an endpoint outside
+    the SDK's host allowlist (as the demo's is).
     """
     monkeypatch.setenv("CACHEKIT_API_KEY", "ck_test_not_a_real_key")
     monkeypatch.setenv("CACHEKIT_API_URL", "https://cachekit.example.com")
@@ -62,7 +62,7 @@ def test_live_mode_builds_backend_from_env(monkeypatch):
         cachekit_api_key=SecretStr("ck_test_not_a_real_key"),
         cachekit_master_key=SecretStr("a" * 64),
     )
-    # Old code raised ValueError here; construction makes no network calls.
+    # Construction makes no network calls.
     publisher = build_publisher(settings, WindowStore())
     assert publisher.secure_enabled
 
@@ -77,4 +77,22 @@ def test_live_mode_requires_key_in_process_env(monkeypatch):
         cachekit_master_key=SecretStr("a" * 64),
     )
     with pytest.raises(RuntimeError, match="real environment variable"):
+        build_publisher(settings, WindowStore())
+
+
+@pytest.mark.parametrize("url", [None, ""])
+def test_live_mode_without_api_url_fails_closed(monkeypatch, url):
+    """Without an explicit endpoint the SDK falls back to its default production
+    host, so a local run with a key and no URL would send the key there: live
+    mode must refuse to start instead."""
+    monkeypatch.setenv("CACHEKIT_API_KEY", "ck_test_not_a_real_key")
+    if url is None:
+        monkeypatch.delenv("CACHEKIT_API_URL", raising=False)
+    else:
+        monkeypatch.setenv("CACHEKIT_API_URL", url)
+    settings = Settings(
+        cachekit_api_key=SecretStr("ck_test_not_a_real_key"),
+        cachekit_master_key=SecretStr("a" * 64),
+    )
+    with pytest.raises(RuntimeError, match="CACHEKIT_API_URL is required"):
         build_publisher(settings, WindowStore())

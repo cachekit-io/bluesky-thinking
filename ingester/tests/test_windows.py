@@ -656,14 +656,14 @@ def test_one_future_dated_post_cannot_truncate_the_live_5m_window():
 
 
 def test_descending_stale_timestamps_cannot_grow_the_bucket_map():
-    # The mirror image of the future-skew CRIT above, and the reason add() has a
-    # staleness floor at all. ingest_raw bounds event time from ABOVE
-    # (MAX_FUTURE_SKEW_SECONDS) but from below only by time_us >= 0, while
-    # _prune's retention floor is anchored on the minute being ADDED — so an
-    # OLDER minute lowered the floor instead of being caught by it. A descending
-    # run of stale timestamps therefore minted one retained bucket per minute
-    # that no later prune could ever reach, and snapshot() copies every bucket
-    # into the checkpoint: unbounded on exactly the axis this module bounds.
+    # The mirror image of test_one_future_dated_post_cannot_truncate_the_live_5m_window
+    # above, and the reason add() has a staleness floor at all. ingest_raw bounds event
+    # time from ABOVE (MAX_FUTURE_SKEW_SECONDS) but from below only by time_us >= 0,
+    # while _prune's retention floor is anchored on the minute being ADDED — so an OLDER
+    # minute lowered the floor instead of being caught by it. A descending run of stale
+    # timestamps therefore minted one retained bucket per minute that no later prune
+    # could ever reach, and snapshot() copies every bucket into the checkpoint:
+    # unbounded on exactly the axis this module bounds.
     #
     # Asserted as the invariant, not a count: every add() either leaves a
     # retained bucket behind or is refused and counted, and the retained set

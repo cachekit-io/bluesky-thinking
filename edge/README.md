@@ -103,7 +103,9 @@ The Worker needs two secrets, both from your secret manager (creds per
 CachekitIO endpoint the tenant is provisioned on. Neither is committed.
 `wrangler.toml` lists both under `[secrets] required`, so `wrangler deploy`
 (wrangler >= 4.77) fails, naming the missing secret, until both are set on
-the Worker; at runtime the backend routes answer 503 while either is unset.
+the Worker. At runtime, while either is unset, the aggregate routes and
+`/api/stats` answer 503, `/api/history/*` reads D1 directly without the
+CachekitIO response cache, and the hourly history capture is skipped.
 
 On a Worker that already exists, set or rotate a secret in place:
 
