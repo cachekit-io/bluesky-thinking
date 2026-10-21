@@ -7,7 +7,7 @@ requires-python = ">=3.11"
 license = "MIT"
 dependencies = [
     "cachekit==0.21.0",
-    "websockets>=13",
+    "websockets>=15",
     "pydantic-settings>=2.6",
     "certifi>=2026.10.19",
 ]

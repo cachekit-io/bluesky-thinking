@@ -8,6 +8,7 @@ import logging
 import ssl
 import time
 from collections.abc import Callable
+from typing import Any
 from urllib.parse import urlencode, urlsplit
 
 import certifi
@@ -178,15 +179,21 @@ def subscribe_url(base: str, cursor: int | None = None) -> str:
     return base + ("&" if "?" in base else "?") + urlencode(params)
 
 
-def tls_context(url: str) -> ssl.SSLContext | None:
-    """certifi-backed TLS for a ``wss://`` Jetstream URL; None for ``ws://``, where websockets rejects any ``ssl=``.
+def connect_options(url: str) -> dict[str, Any]:
+    """``websockets.connect`` options for a Jetstream URL: trust certifi only, and connect directly.
 
     Trust certifi, not the OS store: websockets' default context reads the
     base image's CA store, which can still carry a root certifi has already
     distrusted, while certifi is pinned in uv.lock. SSL_CERT_FILE alone would
-    not do it: OpenSSL still searches the default cert directory.
+    not do it: OpenSSL still searches the default cert directory. ``ws://``
+    gets ``ssl=None`` because websockets rejects any ``ssl=`` there.
+
+    ``proxy=None``: websockets >= 15 otherwise picks a proxy from ``*_proxy``
+    env vars and verifies an ``https://`` one against the OS store, sending any
+    proxy credentials before the Jetstream TLS starts.
     """
-    return ssl.create_default_context(cafile=certifi.where()) if urlsplit(url).scheme == "wss" else None
+    tls = ssl.create_default_context(cafile=certifi.where()) if urlsplit(url).scheme == "wss" else None
+    return {"ssl": tls, "proxy": None}
 
 
 async def consume(base_url: str, store: WindowStore, health: HealthState) -> None:
@@ -196,13 +203,13 @@ async def consume(base_url: str, store: WindowStore, health: HealthState) -> Non
     drop the in-flight events. Rewind the cursor a few seconds (and dedupe) if
     exact counts ever matter more than simplicity.
     """
-    tls = tls_context(base_url)
+    options = connect_options(base_url)
     cursor: int | None = None
     backoff = 1.0
     while True:
         url = subscribe_url(base_url, cursor)
         try:
-            async with websockets.connect(url, ssl=tls) as ws:
+            async with websockets.connect(url, **options) as ws:
                 logger.info("connected to Jetstream: %s", url)
                 health.jetstream_connected = True
                 async for raw in ws:

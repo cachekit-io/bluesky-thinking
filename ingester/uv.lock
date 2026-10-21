@@ -684,7 +684,7 @@ requires-dist = [
     { name = "cachekit", specifier = "==0.21.0" },
     { name = "certifi", specifier = ">=2026.10.19" },
     { name = "pydantic-settings", specifier = ">=2.6" },
-    { name = "websockets", specifier = ">=13" },
+    { name = "websockets", specifier = ">=15" },
 ]
 
 [package.metadata.requires-dev]

@@ -32,7 +32,7 @@ read this service's `.env` file:
 | `CACHEKIT_MASTER_KEY` | unset | 64-hex master key for the `@cache.secure` sentiment cache. **Required in live mode** (fail closed — a live deploy without it refuses to start); unset in dry-run → secure cache disabled with a warning. |
 | `CACHEKIT_API_URL` | unset | Backend endpoint. **Required in live mode** (fail closed — without it the SDK would send the key to its default host, so the ingester refuses to start). |
 | `CACHEKIT_ALLOW_CUSTOM_HOST` | unset | Required `true` when `CACHEKIT_API_URL` is outside the SDK's SSRF host allowlist, as the demo's endpoint is. |
-| `JETSTREAM_URL` | `wss://jetstream2.us-east.bsky.network/subscribe` | Jetstream endpoint. A `wss://` endpoint is verified against certifi's CA bundle (pinned in `uv.lock`), not the OS trust store; `SSL_CERT_FILE` and `SSL_CERT_DIR` do not apply to it. |
+| `JETSTREAM_URL` | `wss://jetstream2.us-east.bsky.network/subscribe` | Jetstream endpoint. A `wss://` endpoint is verified against certifi's CA bundle (pinned in `uv.lock`), not the OS trust store; `SSL_CERT_FILE` and `SSL_CERT_DIR` do not apply to it. The connection is always direct: `*_proxy` environment variables are ignored. |
 | `PORT` | `8080` | `/health` listener port (the Kubernetes liveness probe targets it). |
 | `PUBLISH_TICK_SECONDS` | `15` | Publish-loop poll interval. |
 | `CHECKPOINT_INTERVAL_SECONDS` | `300` | Window-state checkpoint cadence — also the restart staleness bound. 300 s was originally sized to fit Render's 5 GB/month egress allowance (see *Checkpointing*); the self-hosted cluster has no egress cap, but the cadence stays — nothing needs it tighter. |
