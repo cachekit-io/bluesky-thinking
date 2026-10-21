@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import ssl
 import time
 from collections.abc import Callable
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
+import certifi
 import websockets
 
 from skyline_ingester.extract import POST_COLLECTION, extract_post
@@ -183,12 +185,19 @@ async def consume(base_url: str, store: WindowStore, health: HealthState) -> Non
     drop the in-flight events. Rewind the cursor a few seconds (and dedupe) if
     exact counts ever matter more than simplicity.
     """
+    # Trust certifi, not the OS store: websockets' default context reads the
+    # base image's CA store, which can still carry a root certifi has already
+    # distrusted. certifi is pinned in uv.lock and is the bundle the CachekitIO
+    # client (httpx) trusts, so both outbound TLS connections share one bundle.
+    # SSL_CERT_FILE alone would not do it: OpenSSL still searches the default
+    # cert directory. ws:// gets None because websockets rejects any ssl= there.
+    tls = ssl.create_default_context(cafile=certifi.where()) if urlsplit(base_url).scheme == "wss" else None
     cursor: int | None = None
     backoff = 1.0
     while True:
         url = subscribe_url(base_url, cursor)
         try:
-            async with websockets.connect(url) as ws:
+            async with websockets.connect(url, ssl=tls) as ws:
                 logger.info("connected to Jetstream: %s", url)
                 health.jetstream_connected = True
                 async for raw in ws:

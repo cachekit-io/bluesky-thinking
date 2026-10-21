@@ -1,9 +1,16 @@
 """Event filtering and feature extraction."""
 
+import asyncio
 import json
+import ssl
+from pathlib import Path
+
+import certifi
+import pytest
 
 from skyline_ingester.extract import extract_post, score_sentiment
-from skyline_ingester.jetstream import _advanced_cursor, ingest_raw, subscribe_url
+from skyline_ingester.health import HealthState
+from skyline_ingester.jetstream import _advanced_cursor, consume, ingest_raw, subscribe_url
 from skyline_ingester.windows import WindowStore
 
 from .conftest import FIXTURE_TOTALS
@@ -236,3 +243,37 @@ def test_subscribe_url():
     url = subscribe_url("wss://host/subscribe")
     assert url == "wss://host/subscribe?wantedCollections=app.bsky.feed.post"
     assert subscribe_url("wss://host/subscribe", cursor=42).endswith("&cursor=42")
+
+
+class _StopConsume(BaseException):
+    """Escapes consume()'s blanket ``except Exception`` so the loop ends after one connect."""
+
+
+def _connect_kwargs(monkeypatch, base_url):
+    seen = {}
+
+    def fake_connect(url, **kwargs):
+        seen.update(kwargs)
+        raise _StopConsume
+
+    monkeypatch.setattr("skyline_ingester.jetstream.websockets.connect", fake_connect)
+    with pytest.raises(_StopConsume):
+        asyncio.run(consume(base_url, WindowStore(), HealthState()))
+    return seen
+
+
+def test_consume_trusts_only_certifi_for_wss(monkeypatch):
+    ctx = _connect_kwargs(monkeypatch, "wss://host/subscribe")["ssl"]
+    assert isinstance(ctx, ssl.SSLContext)
+    assert ctx.verify_mode == ssl.CERT_REQUIRED and ctx.check_hostname
+    # Exactly certifi's roots: the OS default bundle is never loaded alongside.
+    cas = ctx.get_ca_certs()
+    assert len(cas) == Path(certifi.where()).read_text().count("BEGIN CERTIFICATE")
+    # The root PYSEC-2026-4320 distrusts; fails if the lock ever regresses certifi.
+    roots = {dict(rdn[0] for rdn in ca["subject"]).get("commonName") for ca in cas}
+    assert "emSign ECC Root CA - G3" not in roots
+
+
+def test_consume_passes_no_tls_context_for_plain_ws(monkeypatch):
+    # websockets rejects any ssl= argument on a ws:// URI.
+    assert _connect_kwargs(monkeypatch, "ws://localhost:6008/subscribe")["ssl"] is None

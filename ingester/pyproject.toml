@@ -9,6 +9,7 @@ dependencies = [
     "cachekit==0.21.0",
     "websockets>=13",
     "pydantic-settings>=2.6",
+    "certifi>=2026.10.19",
 ]
 
 [project.scripts]
