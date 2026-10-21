@@ -37,7 +37,7 @@ import websockets
 from skyline_ingester import windows
 from skyline_ingester.extract import PostFeatures
 from skyline_ingester.health import _peak_rss_mib, _rss_mib
-from skyline_ingester.jetstream import ingest_raw, subscribe_url
+from skyline_ingester.jetstream import ingest_raw, subscribe_url, tls_context
 from skyline_ingester.windows import WINDOW_MINUTES, WindowStore
 
 MIB = 1024 * 1024
@@ -120,10 +120,11 @@ async def run_live(url: str, seconds: float, sample_interval: float) -> None:
     # RSS/key regression needs the POST-warm-up samples, which are exactly the
     # ones a first-drop exit throws away. Initial connect failures take the same
     # path, so a flaky start degrades the sample count rather than the run.
+    tls = tls_context(url)
     backoff = 1.0
     while time.monotonic() < deadline:
         try:
-            async with websockets.connect(url) as ws:
+            async with websockets.connect(url, ssl=tls) as ws:
                 backoff = 1.0
                 while time.monotonic() < deadline:
                     raw = await asyncio.wait_for(ws.recv(), timeout=max(1.0, deadline - time.monotonic()))

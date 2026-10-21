@@ -263,10 +263,14 @@ def _connect_kwargs(monkeypatch, base_url):
 
 
 def test_consume_trusts_only_certifi_for_wss(monkeypatch):
+    def os_store_loaded(self):
+        raise AssertionError("OS default CA file/dir loaded")
+
+    # The OS CA directory loads lazily, invisible to get_ca_certs(): fail on any default-path load instead.
+    monkeypatch.setattr(ssl.SSLContext, "set_default_verify_paths", os_store_loaded)
     ctx = _connect_kwargs(monkeypatch, "wss://host/subscribe")["ssl"]
     assert isinstance(ctx, ssl.SSLContext)
     assert ctx.verify_mode == ssl.CERT_REQUIRED and ctx.check_hostname
-    # Exactly certifi's roots: the OS default bundle is never loaded alongside.
     cas = ctx.get_ca_certs()
     assert len(cas) == Path(certifi.where()).read_text().count("BEGIN CERTIFICATE")
     # The root PYSEC-2026-4320 distrusts; fails if the lock ever regresses certifi.

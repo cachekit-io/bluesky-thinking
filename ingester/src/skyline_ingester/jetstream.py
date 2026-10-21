@@ -178,6 +178,17 @@ def subscribe_url(base: str, cursor: int | None = None) -> str:
     return base + ("&" if "?" in base else "?") + urlencode(params)
 
 
+def tls_context(url: str) -> ssl.SSLContext | None:
+    """certifi-backed TLS for a ``wss://`` Jetstream URL; None for ``ws://``, where websockets rejects any ``ssl=``.
+
+    Trust certifi, not the OS store: websockets' default context reads the
+    base image's CA store, which can still carry a root certifi has already
+    distrusted, while certifi is pinned in uv.lock. SSL_CERT_FILE alone would
+    not do it: OpenSSL still searches the default cert directory.
+    """
+    return ssl.create_default_context(cafile=certifi.where()) if urlsplit(url).scheme == "wss" else None
+
+
 async def consume(base_url: str, store: WindowStore, health: HealthState) -> None:
     """Consume forever, reconnecting with backoff and resuming from the last cursor.
 
@@ -185,13 +196,7 @@ async def consume(base_url: str, store: WindowStore, health: HealthState) -> Non
     drop the in-flight events. Rewind the cursor a few seconds (and dedupe) if
     exact counts ever matter more than simplicity.
     """
-    # Trust certifi, not the OS store: websockets' default context reads the
-    # base image's CA store, which can still carry a root certifi has already
-    # distrusted. certifi is pinned in uv.lock and is the bundle the CachekitIO
-    # client (httpx) trusts, so both outbound TLS connections share one bundle.
-    # SSL_CERT_FILE alone would not do it: OpenSSL still searches the default
-    # cert directory. ws:// gets None because websockets rejects any ssl= there.
-    tls = ssl.create_default_context(cafile=certifi.where()) if urlsplit(base_url).scheme == "wss" else None
+    tls = tls_context(base_url)
     cursor: int | None = None
     backoff = 1.0
     while True:
