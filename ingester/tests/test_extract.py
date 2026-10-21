@@ -1,4 +1,4 @@
-"""Event filtering and feature extraction."""
+"""Event filtering, feature extraction and Jetstream connection-option (TLS, proxy) tests."""
 
 import asyncio
 import json
@@ -279,7 +279,7 @@ def test_consume_trusts_only_certifi_for_wss(monkeypatch):
 
 
 def test_consume_passes_no_tls_context_for_plain_ws(monkeypatch):
-    # websockets rejects any ssl= argument on a ws:// URI.
+    # websockets rejects any non-None ssl= argument on a ws:// URI.
     assert _connect_kwargs(monkeypatch, "ws://localhost:6008/subscribe")["ssl"] is None
 
 
