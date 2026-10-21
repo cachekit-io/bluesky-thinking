@@ -186,7 +186,7 @@ def connect_options(url: str) -> dict[str, Any]:
     base image's CA store, which can still carry a root certifi has already
     distrusted, while certifi is pinned in uv.lock. SSL_CERT_FILE alone would
     not do it: OpenSSL still searches the default cert directory. ``ws://``
-    gets ``ssl=None`` because websockets rejects any ``ssl=`` there.
+    gets ``ssl=None`` because websockets rejects any non-None ``ssl=`` there.
 
     ``proxy=None``: websockets >= 15 otherwise picks a proxy from ``*_proxy``
     env vars and verifies an ``https://`` one against the OS store, sending any
