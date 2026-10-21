@@ -264,7 +264,7 @@ def _connect_kwargs(monkeypatch, base_url):
 
 def test_consume_trusts_only_certifi_for_wss(monkeypatch):
     def os_store_loaded(self):
-        raise AssertionError("OS default CA file/dir loaded")
+        pytest.fail("OS default CA file/dir loaded")  # BaseException: escapes consume()'s except Exception
 
     # The OS CA directory loads lazily, invisible to get_ca_certs(): fail on any default-path load instead.
     monkeypatch.setattr(ssl.SSLContext, "set_default_verify_paths", os_store_loaded)
