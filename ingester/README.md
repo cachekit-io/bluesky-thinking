@@ -11,9 +11,9 @@ byte-identical to what the TS edge API and Rust-WASM hot path read.
 cd ingester
 uv sync
 
-# Live: writes real CachekitIO entries. Creds per docs/architecture.md#credentials:
+# Live: writes real CacheKit Cloud entries. Creds per docs/architecture.md#credentials:
 # export CACHEKIT_API_KEY and CACHEKIT_MASTER_KEY from your secret manager, then
-# replace <endpoint> with your CachekitIO endpoint URL:
+# replace <endpoint> with your CacheKit Cloud endpoint URL:
 CACHEKIT_API_URL="<endpoint>" CACHEKIT_ALLOW_CUSTOM_HOST=true uv run skyline-ingester
 
 # Dry-run: no key -> same pipeline, in-process backend, every write logged
@@ -28,7 +28,7 @@ read this service's `.env` file:
 
 | Variable | Default | Meaning |
 | :--- | :--- | :--- |
-| `CACHEKIT_API_KEY` | unset | CachekitIO key. Unset → dry-run mode. |
+| `CACHEKIT_API_KEY` | unset | CacheKit Cloud API key. Unset → dry-run mode. |
 | `CACHEKIT_MASTER_KEY` | unset | 64-hex master key for the `@cache.secure` sentiment cache. **Required in live mode** (fail closed — a live deploy without it refuses to start); unset in dry-run → secure cache disabled with a warning. |
 | `CACHEKIT_API_URL` | unset | Backend endpoint. **Required in live mode** (fail closed — without it the SDK would send the key to its default host, so the ingester refuses to start). |
 | `CACHEKIT_ALLOW_CUSTOM_HOST` | unset | Required `true` when `CACHEKIT_API_URL` is outside the SDK's SSRF host allowlist, as the demo's endpoint is. |
