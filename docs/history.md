@@ -40,7 +40,7 @@ rejected on measured grounds, not taste:
 | Workers KV              | No range queries — a 7d chart is 168 point-reads or a hand-rolled index. Wrong shape.                                                                                                                              |
 | R2 objects              | Range query = manifest + N GETs, retention = lifecycle rules per tier. More moving parts for the same rows.                                                                                                        |
 | Render Postgres         | Free instances expire after 30 days, and writes from Render add the exact egress we measured we cannot afford.                                                                                                     |
-| CachekitIO as the store | It is a cache: TTL-bounded, key-value, no range scans. Using it as a durable archive misrepresents the product and Skyline's privacy posture. It **does** serve as the response cache (below) — the correct role.  |
+| CacheKit Cloud as the store | It is a cache: TTL-bounded, key-value, no range scans. Using it as a durable archive misrepresents the product and Skyline's privacy posture. It **does** serve as the response cache (below) — the correct role.  |
 
 ### Cadence and tiering: capture-time, not post-hoc
 
@@ -144,7 +144,7 @@ deploy.
   live endpoints can be healthy while capture is broken, and vice versa.
 
 **Response caching is CacheKit-backed (dogfood):** a computed range response
-is written to CachekitIO keyed on (operation, range, current bucket) — a
+is written to CacheKit Cloud keyed on (operation, range, current bucket) — a
 closed set of 10 keys per bucket — with TTL = one tier period, so within a
 bucket the planet shares one D1 computation; `x-history-source:
 cachekit|d1|d1-fallback` says which path served. Two honesty rules apply:
@@ -171,9 +171,9 @@ cachekit|d1|d1-fallback` says which path served. Two honesty rules apply:
   bound: 60 s CacheKit TTL + the 15 s POP TTL below means a late point can
   take up to **~75 s** to appear, not 60.
 
-D1 is the source of truth — any CachekitIO failure (or an unset
+D1 is the source of truth — any CacheKit Cloud failure (or an unset
 `CACHEKIT_API_KEY`) falls through to plain D1 serving, the inverse of the
-live endpoints where CachekitIO _is_ the truth. The existing POP cache (15 s)
+live endpoints where CacheKit Cloud _is_ the truth. The existing POP cache (15 s)
 fronts everything as before. Live endpoints are untouched: `/api/{operation}`
 and `/api/stats` behave byte-for-byte as before.
 
@@ -212,7 +212,7 @@ policy's safety filters.
   covered by tests — not by hope.
 - Manual deletion (a tag/link that must go earlier than its horizon):
   `npx wrangler d1 execute skyline-history --remote --command "DELETE FROM snapshots WHERE …"`,
-  then purge the response-cache layer by waiting out the ≤1h/≤24h CachekitIO
+  then purge the response-cache layer by waiting out the ≤1h/≤24h CacheKit Cloud
   TTL (or deleting the `bluesky-thinking:history_response:*` keys) and the
   15 s POP TTL. Because rows hold only aggregate rankings, removal targets a
   value inside `payload` (SQLite `json_remove`/`REPLACE`) or the whole bucket
@@ -229,7 +229,7 @@ read/day. Cloudflare docs, verified 2026-08-14.
 | Rows read/day          | ≤170/query (≤168 range rows + 2 indexed `MIN` seeks — the history-start lookup is bound per tier so it seeks the `(tier, bucket_ts)` index instead of scanning the table); response reuse ≥1h complete / 60 s incomplete; even 10k uncached queries/day ≈ 1.7M         | ~3× worst-case, ~10³× expected |
 | Storage                | 4,200 hourly + 2,000 daily = 6,200 rows. Typical row ~6 KiB (top-20 trim) ≈ **~40 MiB** steady state; every row at the 32 KiB hard cap ≈ **~194 MiB** worst case. Payload bytes only — the two indexes and SQLite overflow pages sit on top of that                    |     ~25× at the worst-case cap |
 | Cron slots (5/account) | **1** — the hourly `skyline-edge` schedule (inherited from the retired keep-alive cron)                                                                                                                                                                                |                              — |
-| CachekitIO ops         | 5 GETs/hour capture + ≤10 response-cache entries/bucket                                                                                                                                                                                                                |        dogfood, our own tenant |
+| CacheKit Cloud ops     | 5 GETs/hour capture + ≤10 response-cache entries/bucket                                                                                                                                                                                                                |        dogfood, our own tenant |
 
 The 7d/30d row math: 7d = 168 hourly rows/operation (840 total), 30d = 30
 daily rows/operation (150 total) — both served whole in one bounded query.

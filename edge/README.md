@@ -1,8 +1,8 @@
 # Skyline edge API + dashboard
 
 TypeScript Cloudflare Worker serving the five Skyline aggregates from the shared
-CachekitIO namespace via [interop/v1](../docs/architecture.md#locked-key-convention)
-reads (`@cachekit-io/cachekit` 0.1.5), plus a static dashboard on Workers Assets.
+CacheKit Cloud namespace via [interop/v1](../docs/architecture.md#locked-key-convention)
+reads (`@cachekit-io/cachekit`, the version pinned in `package.json`), plus a static dashboard on Workers Assets.
 For the live aggregates the edge is **read-only**: they are computed and written
 by the Python ingester; a cache miss here is surfaced (404 + `X-Cache: MISS`),
 never recomputed or faked. The edge's only writes are its own derived state:
@@ -52,8 +52,8 @@ decoded interop/v1 MessagePack map as written by the ingester.
 
 Aggregate reads (not `/api/stats`) are additionally fronted by the Cloudflare
 POP cache — 200s for 15 s, 404s for 10 s (negative caching) — so unauthenticated
-public traffic can't mint billable misses against the metered CachekitIO
-backend at will. A POP-cached
+public traffic can't mint billable misses against metered CacheKit
+Cloud at will. A POP-cached
 response replays the stored `X-Cache` header; per-POP scope means at most one
 backend read per URL per POP per TTL.
 
@@ -100,12 +100,12 @@ design + operating contract: [`docs/history.md`](../docs/history.md).
 The Worker needs two secrets, both from your secret manager (creds per
 [docs/architecture.md#credentials](../docs/architecture.md#credentials)):
 `CACHEKIT_API_KEY`, the tenant's API key, and `CACHEKIT_API_URL`, the
-CachekitIO endpoint the tenant is provisioned on. Neither is committed.
+CacheKit Cloud endpoint the tenant is provisioned on. Neither is committed.
 `wrangler.toml` lists both under `[secrets] required`, so `wrangler deploy`
 (wrangler >= 4.77) fails, naming the missing secret, until both are set on
 the Worker. At runtime, while either is unset, the aggregate routes and
 `/api/stats` answer 503, `/api/history/*` reads D1 directly without the
-CachekitIO response cache, and the hourly history capture is skipped.
+CacheKit Cloud response cache, and the hourly history capture is skipped.
 
 On a Worker that already exists, set or rotate a secret in place:
 
@@ -133,6 +133,5 @@ npx wrangler d1 migrations apply skyline-history --remote
 
 Dev deployment: **https://skyline-edge.raywalker.workers.dev**
 
-`@cachekit-io/cachekit` 0.1.5 ships a WASM core that bundles for Workers as
-is: no `nodejs_compat` flag, no build-time alias. Do not target 0.1.4 — it is
-abandoned and uninstallable.
+`@cachekit-io/cachekit` ships a WASM core that bundles for Workers as is: no
+`nodejs_compat` flag, no build-time alias.

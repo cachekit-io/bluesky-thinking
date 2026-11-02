@@ -19,7 +19,7 @@ kubectl config current-context
 ```
 
 **1. Create the secret** (first deploy, and again whenever a value rotates —
-the command is idempotent). It carries the CachekitIO endpoint and both
+the command is idempotent). It carries the CacheKit Cloud endpoint and both
 credentials, supplied at deploy time: never committed, never echoed. The
 ingester **fails closed** without both credentials; live mode refuses to start
 rather than run with the secure sentiment cache disabled.
@@ -28,7 +28,7 @@ Export all three variables in the same shell first, every time — the command
 rewrites the whole Secret, so it needs every value, not just the one that
 changed:
 
-- `CACHEKIT_API_URL` — the CachekitIO API endpoint your tenant is provisioned
+- `CACHEKIT_API_URL` — the CacheKit Cloud API endpoint your tenant is provisioned
   on (the SDK default is `https://api.cachekit.io`).
 - `CACHEKIT_API_KEY` — the tenant's API key, from your secret manager.
 - `CACHEKIT_MASTER_KEY` — its 64-hex master key, from your secret manager; the
@@ -212,7 +212,7 @@ up the fix.
   honest. Restart staleness is bounded by `CHECKPOINT_INTERVAL_SECONDS`
   (300 s).
 - **Egress-only.** Outbound WebSocket to Jetstream + HTTPS to the
-  CachekitIO endpoint. No Service, no Ingress, nothing dials in. The old
+  CacheKit Cloud endpoint. No Service, no Ingress, nothing dials in. The old
   Cloudflare keep-alive cron existed solely for Render's inbound-idle
   spin-down and is gone; the edge cron that remains (`0 * * * *`) is history
   capture only and never touches the ingester.

@@ -1,6 +1,6 @@
 # Skyline hot-path Worker (`hotpath/`)
 
-The Rust-WASM leg of the Skyline edge: `cachekit-rs` 0.7.0 (crates.io) compiled to
+The Rust-WASM leg of the Skyline edge: `cachekit-rs` (crates.io, the version pinned in `Cargo.toml`) compiled to
 `wasm32-unknown-unknown`, deployed as its own Cloudflare Worker. The TS edge reaches it through a
 service binding (see below).
 
@@ -13,7 +13,7 @@ Dev deployment: **https://skyline-hotpath.raywalker.workers.dev**
 | interop/v1 key derivation | `GET /v1/key/:operation/:window` | The five locked operations × `5m`/`1h`/`24h` (contract: [`docs/architecture.md`](../docs/architecture.md)). Returns the key + locked TTL. Off-contract input → 400. |
 | Payload integrity | `POST /v1/verify[?expected=<16-hex>]` | Body = raw cached payload. Returns xxHash3-64 (big-endian hex, the `StorageEnvelope` convention) + strict interop/v1 validity (single MessagePack document, no trailing bytes, CK frames flagged with a diagnostic). |
 | Window-slice aggregation | `POST /v1/merge` | JSON `{"slices": ["<base64 msgpack {str:int} doc>", …], "top": 50}` → merged top-N counts (count desc, key asc) + the canonical interop/v1 MessagePack of the result, ready to write back byte-identically. |
-| Cache read + verify | `GET /v1/cache/:operation/:window` | Derives the key, fetches the live backend via `WorkersCachekitIO` (the wasm32 `SystemTime` panic was fixed in cachekit-rs 0.7.0; the direct `worker::Fetch` workaround is gone), checksums + strict-decodes the payload. Failure statuses: 503 if the `CACHEKIT_API_KEY` or `CACHEKIT_API_URL` secret is unset, 500 if the backend config is invalid, 502 if the backend request fails. |
+| Cache read + verify | `GET /v1/cache/:operation/:window` | Derives the key, fetches the live backend via `WorkersCachekitIO`, checksums + strict-decodes the payload. Failure statuses: 503 if the `CACHEKIT_API_KEY` or `CACHEKIT_API_URL` secret is unset, 500 if the backend config is invalid, 502 if the backend request fails. |
 | Service info | `GET /` | Contract summary + endpoint list; doubles as a health check. |
 
 Example — the byte-locked spike vector, derived live on the edge:
@@ -33,12 +33,11 @@ $ curl https://skyline-hotpath.raywalker.workers.dev/v1/key/posts_per_minute/5m
 ## Build, test, deploy
 
 Build-chain pins are locked in [`docs/architecture.md`](../docs/architecture.md#build-chain-pins-from-spike-friction-so-nobody-rediscovers-them):
-`worker-build@^0.1`, `wasm-bindgen-cli` **0.2.126** seeded into worker-build's cache — PATH is
-ignored, see the architecture doc (Cargo.toml pins the
-`wasm-bindgen` crate to `=0.2.126` and the committed `Cargo.lock` holds the full graph, so
-CLI and crate ABI can never drift). `cachekit-rs` comes from **crates.io 0.7.0** — the
-spec's git-tag workaround retired once cachekit-rs was published to crates.io; 0.7.0 keeps `worker`
-pinned at 0.4, so the chain pins are unchanged.
+`worker-build@^0.1`, `wasm-bindgen-cli` at the exact version `Cargo.toml` pins for the `wasm-bindgen` crate, seeded into
+worker-build's cache — PATH is ignored, see the architecture doc (the committed `Cargo.lock` holds
+the full graph, so CLI and crate ABI can never drift). `cachekit-rs` comes from **crates.io**, at
+the version pinned in `Cargo.toml` — the spec's git-tag workaround retired once cachekit-rs was
+published to crates.io; that release keeps `worker` pinned at 0.4, so the chain pins are unchanged.
 
 ```console
 $ cargo test                                     # native: contract + vector tests, no creds
@@ -55,7 +54,7 @@ CI ([`hotpath-qa`](../.github/workflows/hotpath-qa.yml)) gates every PR and push
 
 Two secrets, both from your secret manager
 ([docs/architecture.md#credentials](../docs/architecture.md#credentials)):
-`CACHEKIT_API_KEY`, the tenant's API key, and `CACHEKIT_API_URL`, the CachekitIO endpoint the
+`CACHEKIT_API_KEY`, the tenant's API key, and `CACHEKIT_API_URL`, the CacheKit Cloud endpoint the
 tenant is provisioned on. Nothing else is configurable. `wrangler.toml` lists both under
 `[secrets] required`, so `wrangler deploy` fails, naming the missing secret, until both are set
 on the Worker; the cache route answers 503 while either is unset. Setting, rotating and the
