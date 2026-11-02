@@ -61,7 +61,7 @@ manifest: `ingester/pyproject.toml`, `edge/package.json`, `hotpath/Cargo.toml`.
 
 | Check | Result | Evidence |
 | :--- | :--- | :--- |
-| Python decorators `@cache.production` / `@cache.secure` / `@cache.io` | ✅ present + run on the `cachekit` PyPI release current on 2026-07-24 | [`spike/decorators/`](spike/decorators/) |
+| Python decorators `@cache.production` / `@cache.secure` / `@cache.io` | ✅ present + run on the `cachekit` release named in `spike/decorators/spike_decorators.py` | [`spike/decorators/`](spike/decorators/) |
 | `cachekit-rs` compiles for `wasm32-unknown-unknown` | ✅ SDK CI recipe + downstream consumer crate | [`spike/edge-worker/`](spike/edge-worker/) |
 | `cachekit-rs` Worker **deploys and runs** on Cloudflare | ✅ deployed and ran live on the Workers edge, 180 KiB gzipped, 2 ms startup | [`spike/edge-worker/`](spike/edge-worker/) |
 | Cross-SDK key byte-compatibility | ✅ Python (PyPI), TS (npm), Rust (live CF edge) all derive `bluesky-thinking:posts_per_minute:230037de…` | [`docs/architecture.md`](docs/architecture.md#locked-key-convention) |

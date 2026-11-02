@@ -37,7 +37,7 @@ Build-chain pins are locked in [`docs/architecture.md`](../docs/architecture.md#
 worker-build's cache — PATH is ignored, see the architecture doc (the committed `Cargo.lock` holds
 the full graph, so CLI and crate ABI can never drift). `cachekit-rs` comes from **crates.io**, at
 the version pinned in `Cargo.toml` — the spec's git-tag workaround retired once cachekit-rs was
-published to crates.io; that release keeps `worker` pinned at 0.4, so the chain pins are unchanged.
+published to crates.io.
 
 ```console
 $ cargo test                                     # native: contract + vector tests, no creds
